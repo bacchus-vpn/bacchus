@@ -1,0 +1,17 @@
+{
+    "Bacchus — Settings": "Bacchus — Настройки",
+    "Split-tunnel, kill-switch, and DNS below are saved for later use - this client has no device-wide tunnel yet, so they do not change traffic today.": "Настройки раздельного туннелирования, аварийного отключения и DNS ниже сохраняются на будущее — у этого клиента пока нет туннеля на уровне всего устройства, поэтому сейчас они не влияют на трафик.",
+    "Split-tunnel bypass list (one per line: IP, CIDR, or domain)": "Список исключений раздельного туннелирования (по одному на строку: IP, CIDR или домен)",
+    "Split-tunnel mode": "Режим раздельного туннелирования",
+    "Kill-switch (block traffic if the tunnel drops) — not active yet": "Аварийное отключение (блокировать трафик при обрыве туннеля) — пока не активно",
+    "DNS upstream (host:port)": "Вышестоящий DNS (хост:порт)",
+    "Connect automatically when Bacchus starts": "Подключаться автоматически при запуске Bacchus",
+    "Start Bacchus when you log in": "Запускать Bacchus при входе в систему",
+    "Save": "Сохранить",
+    "Cancel": "Отмена",
+    "Save failed:": "Не удалось сохранить:",
+    "Saved, but launch-on-boot could not be set:": "Сохранено, но не удалось настроить запуск при входе в систему:",
+    "Settings…": "Настройки…",
+    "File": "Файл",
+    "Launch-on-boot could not be set:": "Не удалось настроить запуск при входе в систему:"
+}

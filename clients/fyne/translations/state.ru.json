@@ -1,0 +1,13 @@
+{
+    "Disconnected": "Отключено",
+    "You're not protected right now.": "Сейчас вы не защищены.",
+    "Connecting…": "Подключение…",
+    "Finding the safest way to connect…": "Ищем безопасный способ подключения…",
+    "Proxy ready": "Прокси готов",
+    "Apps set to use the proxy at 127.0.0.1:1080 are protected. Other apps are not.": "Защищены только приложения, которым указан прокси 127.0.0.1:1080. Остальные — нет.",
+    "Blocked": "Заблокировано",
+    "The connection dropped — trying to reconnect…": "Соединение прервано — пробуем переподключиться…",
+    "Connect": "Подключиться",
+    "Disconnect": "Отключиться",
+    "Your settings file could not be read:": "Не удалось прочитать файл настроек:"
+}

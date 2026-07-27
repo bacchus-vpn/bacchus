@@ -1,0 +1,20 @@
+[Unit]
+Description=Bacchus coordinator (UDP signaling + STUN/TURN + cold-start bootstrap)
+After=network.target
+
+[Service]
+# Public advertise address + TURN credentials come from the env file
+# (gitignored). See deploy/coordinator.env.example. Bootstrap signing key +
+# per-user secrets persist under /etc/bacchus/ (created on first run if
+# missing).
+EnvironmentFile=/etc/bacchus/coordinator.env
+ExecStart=/usr/local/bin/bacchus-coordinator -advertise ${ADVERTISE} \
+  -turn-public-ip ${TURN_PUBLIC_IP} -turn-user ${TURN_USER} -turn-pass ${TURN_PASS} \
+  -bootstrap-key /etc/bacchus/bacchus-bootstrap.key \
+  -bootstrap-secrets /etc/bacchus/bacchus-bootstrap-secrets.json
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target

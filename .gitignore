@@ -1,0 +1,53 @@
+# --- secrets / local config (NEVER commit) ---
+*.env
+!*.env.example
+bacchus.config.json
+bacchus-fyne.config.json
+config.json
+*.local.json
+*.secret
+secrets/
+*.log
+
+# --- build artifacts ---
+*.exe
+*.dll
+*.so
+*.dylib
+/dist/
+/bin/
+*-linux
+*-darwin
+*-windows
+bacchus-node
+bacchus-coordinator
+bacchus-turn
+bacchus-fyne
+
+# --- third-party runtime binaries (fetched, NOT vendored) ---
+# wintun.dll is proprietary ((c) WireGuard LLC, "licensed, not sold" — see its
+# own LICENSE.txt) and must never land in this AGPL repo. It is a Windows-client
+# runtime dependency fetched from wintun.net and staged here at build/package
+# time. See clients/windows/README.md ("wintun runtime dependency").
+/clients/windows/wintun/
+
+# --- third-party datasets (fetched, NOT vendored) ---
+# The GeoLite2 Country database the coordinator derives node countries from
+# (issue #136, ADR-0042). It is a licensed MaxMind dataset under its own terms,
+# not ours to redistribute, and it is bulk data besides — so it is staged out of
+# band and refreshed on MaxMind's cadence, never committed. See docs/RUNNING.md
+# ("GeoIP country database").
+/geoip/
+GeoLite2-Country-*.csv
+GeoLite2-Country-*.mmdb
+GeoLite2-Country-CSV_*/
+
+# --- go ---
+/vendor/
+
+# --- editor / OS ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

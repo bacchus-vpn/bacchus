@@ -1,0 +1,147 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        run: go vet ./core/... ./bind/... ./cmd/...
+      - name: build
+        run: go build ./cmd/...
+      # Deliberately no -short: a few real-transport integration tests are
+      # gated behind testing.Short() specifically so they still run here
+      # while a local `go test -short ./...` skips them for a fast inner
+      # loop — core/dtls_fingerprint_test.go's real WebRTC/DTLS handshakes
+      # and cmd/node/midsession_recovery_test.go's ~94s real mid-session
+      # mesh-walk recovery (issue #131). Adding -short to this step would
+      # silently stop covering both; if CI runtime ever needs to come down,
+      # split those into their own non-short job instead of short-circuiting
+      # this one.
+      - name: test
+        run: go test ./core/... ./bind/... ./cmd/...
+
+  windows-client:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: gofmt
+        shell: bash
+        run: test -z "$(gofmt -l clients/windows)"
+      - name: vet
+        run: go vet ./clients/windows/...
+      - name: build
+        run: go build ./clients/windows
+      # Deliberately no -short, the same reasoning as the server job above:
+      # clients/windows/midsession_recovery_test.go's real mid-session
+      # mesh-walk recovery (issue #129, mirroring cmd/node's own #131) rides
+      # the identical real, unexported core timeouts and is gated behind
+      # testing.Short() specifically so it still runs here while a local
+      # `go test -short ./...` skips it for a fast inner loop. Adding
+      # -short to this step would silently stop covering it.
+      # Explicit -timeout: the two real recovery tests run ~95s each and the
+      # rest of the package adds more, against Go's default 600s per-binary
+      # limit. A local run came in at ~190s, so the headroom is real but not
+      # large enough to leave a required check one slow runner away from a
+      # panic-on-timeout failure that looks like a product bug.
+      - name: test
+        run: go test -timeout 20m ./clients/windows/...
+
+  linux-client:
+    # The Linux GUI build target (issue #153): clients/fyne is the first
+    # package in the repo needing a C toolchain (Fyne's desktop driver is
+    # go-gl/glfw, both cgo) — see ADR-0039's "new build prerequisite"
+    # section, which proved this exact package list by hand in a disposable
+    # Docker container before this job existed. Encoded here so that proof
+    # runs on every push instead of living only in that one-time record.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: install GUI toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev wayland-protocols
+      - name: gofmt
+        run: test -z "$(gofmt -l clients/fyne)"
+      - name: vet
+        run: go vet ./clients/fyne/...
+      - name: build
+        run: go build -o /tmp/bacchus-fyne ./clients/fyne
+      # internal/appstate is deliberately Fyne-free (ADR-0039) and needs no
+      # display; the outer package (main.go/settings.go/ui.go) has no test
+      # files of its own, so this compiles it under the real cgo/GL
+      # toolchain above without needing Xvfb just to run `go test`.
+      - name: test
+        run: go test ./clients/fyne/...
+      # Compiling is not proof it runs (ADR-0039 makes exactly this point
+      # about the earlier ephemeral-SOCKS-port bug: "the tunnel came up...
+      # 100% of traffic went out in the clear" while every build-time check
+      # stayed green). Launch the real binary under a virtual display and
+      # confirm it survives past startup, with no config file present -
+      # the common fresh-install case (main.go treats a missing config as
+      # a normal empty state, not a startup error).
+      # xauth is a "Recommended", not "Depends", package of xvfb on Debian -
+      # --no-install-recommends (used above for the GUI toolchain) silently
+      # drops it, and xvfb-run hard-requires it ("xauth command not found",
+      # confirmed by hand): list it explicitly rather than dropping the flag
+      # and pulling in everything else xvfb recommends.
+      - name: install Xvfb
+        run: sudo apt-get install -y --no-install-recommends xvfb xauth
+      - name: smoke test (headless launch)
+        # issue #170: `xvfb-run ... & APP_PID=$!` captured xvfb-run's own PID,
+        # not the app's - xvfb-run is a wrapper script that starts Xvfb, runs
+        # the app, then tears Xvfb down, so `kill -0 "$APP_PID"` was proving
+        # the wrapper survived, not the app. `timeout`'s own exit-code
+        # contract sidesteps the wrapper entirely: without --foreground it
+        # runs the command in a fresh process group and signals that whole
+        # group on expiry, so the app (xvfb-run's child, inheriting the same
+        # group) is what actually gets terminated - exit 124 means the app
+        # was still alive at the 5s mark (success), anything else means it
+        # exited on its own before then (failure, whatever its exit code).
+        # The pkill afterward is a belt-and-suspenders cleanup, not part of
+        # the pass/fail signal.
+        #
+        # `|| ec=$?` rather than a bare call followed by `ec=$?`: Actions runs
+        # every `run:` block under `bash -e`, so a bare `timeout` returning
+        # its expected 124 aborts the shell on the spot and the assignment
+        # below never executes - the step fails with 124, the one code that
+        # means success here. A command on the left of `||` is exempt from
+        # errexit, which is what makes the exit code readable at all.
+        #
+        # 125/126/127 are timeout's own "could not run the command" codes, so
+        # they get their own message: reporting them as "the app exited
+        # early" would read as a product crash when the real fault is the
+        # runner.
+        run: |
+          ec=0
+          timeout 5 xvfb-run --auto-servernum /tmp/bacchus-fyne || ec=$?
+          pkill -f /tmp/bacchus-fyne 2>/dev/null || true
+          case "$ec" in
+            124)
+              ;;
+            125|126|127)
+              echo "timeout could not run xvfb-run (exit code $ec) - runner/toolchain failure, not an app crash"
+              exit 1
+              ;;
+            *)
+              echo "bacchus-fyne exited before the 5s mark (exit code $ec) - see above for output"
+              exit 1
+              ;;
+          esac

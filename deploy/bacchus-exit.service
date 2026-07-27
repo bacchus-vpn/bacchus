@@ -1,0 +1,18 @@
+[Unit]
+Description=Bacchus node (exit role: TCP egress + direct WebRTC endpoint)
+After=network.target
+
+[Service]
+# Config comes from the env file (gitignored). See deploy/node.env.example.
+# -advertise = host:port relays dial; the exit also accepts DIRECT WebRTC clients,
+# so it needs STUN/TURN too. -exit-key fixes this exit's identity (its node id is
+# its X25519 public key) so it stays stable across restarts; an empty EXIT_KEY
+# falls back to a fresh, ephemeral identity each start.
+EnvironmentFile=/etc/bacchus/node.env
+ExecStart=/usr/local/bin/bacchus-node -role exit -listen :20000 -advertise ${ADVERTISE} -country ${COUNTRY} -coordinators ${COORDINATORS} -stun ${STUN} -turn ${TURN} -turn-user ${TURN_USER} -turn-pass ${TURN_PASS} -exit-key ${EXIT_KEY}
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target
