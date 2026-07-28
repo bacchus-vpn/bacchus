@@ -16,6 +16,31 @@ type Entry struct {
 	Country string `json:"country,omitempty"`
 	Addr    string `json:"addr"` // host:port
 
+	// CountrySource says HOW the coordinator arrived at Country (issue #3): one of the
+	// Country* provenance values below, or empty from a coordinator predating the
+	// field.
+	//
+	// It ships because Country alone is four different claims wearing one label. A tag
+	// the coordinator resolved from an address it observed, a tag the node simply
+	// asserted through its -country flag (the fallback, and the ONLY source in a
+	// deployment with no database staged), and a tag resolved from an address the
+	// coordinator can see disagrees with where the node says it serves traffic from —
+	// all three used to arrive here byte-identical in shape. The signature over this
+	// snapshot proves the coordinator said it; it says nothing about which of those
+	// three it is.
+	//
+	// That mattered less when the snapshot was a bootstrap contact list. It matters now
+	// because ADR-0042 §9 made it THE exit-discovery path for relay chaining: a
+	// chaining client picks its terminating exit — the jurisdiction the whole feature
+	// exists to choose — out of this artifact, with no live reply to check it against.
+	// See CountryContradicted for what a consumer does with it.
+	//
+	// Carried for relays as well as exits. A relay's Addr and Ingress are built from
+	// the observed source IP so they cannot disagree with each other, but its COUNTRY
+	// still falls back to the node's own -country hint whenever that address resolves
+	// to nothing.
+	CountrySource string `json:"countrySource,omitempty"`
+
 	// Ingress is the TCP address a client's onion layer dials to reach this node as
 	// an INTERMEDIATE relay hop in a multi-hop chain (issue #124, ADR-0038 §9 item 3).
 	// It is deliberately distinct from Addr: for a relay, Addr is the coordinator-
@@ -44,6 +69,58 @@ type Entry struct {
 	// The coordinator sets this from its own operator registry, never from a node's
 	// self-report; empty when the coordinator has no assignment for the node.
 	Operator string `json:"operator,omitempty"`
+}
+
+// Country provenance values carried in [Entry.CountrySource] (issue #3, ADR-0042 §1/§8).
+//
+// These are the wire values, so they are defined HERE, in the package that owns the
+// signed artifact's schema — cmd/coordinator holds an identical set of unexported
+// constants because that binary deliberately does not import core (see its wire doc),
+// and TestCountrySourceWireContract on each side pins the two copies against each
+// other, exactly as TestQuotaStateWireContract does for the quota literals (#97).
+const (
+	// CountryObserved: the coordinator resolved the country from the address it
+	// observed the node register from, and — for an exit — the data-plane endpoint the
+	// node advertises is that same address. The strongest statement available.
+	CountryObserved = "observed"
+	// CountryHinted: the observed address resolved to nothing, so the country is the
+	// node's own -country flag. A self-report, and the only source of a country at all
+	// in a deployment with no geo database staged.
+	CountryHinted = "hint"
+	// CountrySignalingOnly: the observed address resolved, but the node advertises a
+	// data-plane endpoint that is a DIFFERENT address (or a name the coordinator will
+	// not resolve). The country describes where the node signals from, which the
+	// coordinator can see is not where it says it serves traffic from.
+	CountrySignalingOnly = "observed-signaling-only"
+	// CountryNoEndpoint: the observed address resolved, but under -geoip-required the
+	// node advertises no data-plane endpoint at all, so there is nothing to corroborate
+	// the resolution against (issue #2). Such an entry carries no Country.
+	CountryNoEndpoint = "unverifiable-no-endpoint"
+)
+
+// CountryContradicted reports whether the coordinator itself observed this entry's
+// country to disagree with where the node says it serves traffic from — the exit that
+// signals through a host in one country and egresses in another.
+//
+// It is the fail-closed test for choosing a JURISDICTION out of this directory, and it
+// is deliberately narrower than "not verified". Refusing everything unverified would
+// refuse [CountryHinted], which is every entry in a deployment with no geo database
+// staged — the default, and today's fleet — so a client would stop being able to chain
+// at all against a coordinator that is behaving exactly as it always has. What this
+// names instead is the case where the coordinator holds two facts that do not agree and
+// published both: a country tag that describes a machine other than the one the traffic
+// leaves from. A user who asked to egress in one jurisdiction and was given that is not
+// under-informed, they are misrouted.
+//
+// An empty CountrySource is NOT contradicted: it means the coordinator predates the
+// field, which is the pre-#3 status quo rather than a discovered disagreement.
+//
+// Note the asymmetry with -geoip-required, and that it is intentional. Under that flag
+// a contradicted exit carries no country at all and never reaches a country filter in
+// the first place; this predicate is what protects the -geoip-WITHOUT-required
+// deployment, where such an exit keeps its signaling-derived tag and is assignable.
+func (e Entry) CountryContradicted() bool {
+	return e.CountrySource == CountrySignalingOnly
 }
 
 // RelayEligible reports whether this entry can serve as an intermediate hop in a

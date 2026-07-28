@@ -92,7 +92,7 @@ being precise, because the flag names do not make it obvious:
 |---|---|
 | neither (the default) | 100% the node's own `COUNTRY=` claim — nothing is derived |
 | `-geoip <dir>` | the observed signaling address, falling back to `COUNTRY=` when it does not resolve |
-| `-geoip` + `-geoip-required` | the observed signaling address, or no country at all — **unless the exit advertises no endpoint**, which passes the check vacuously |
+| `-geoip` + `-geoip-required` | the observed signaling address, **corroborated by the exit's advertised endpoint**, or no country at all |
 
 Even at the strictest setting the guarantee is bounded. What is verified is the
 address the coordinator **observed the register arrive from**, checked against the
@@ -100,17 +100,48 @@ data-plane endpoint the exit advertises: an exit that forwards only its
 coordinator signaling through a host in another country is detected and, under
 `-geoip-required`, refused a country entirely (it is then offered to no one).
 
-That check needs something to check. An exit started **without `-advertise`** makes no
-claim, so there is nothing to contradict and it keeps the observed country even under
-`-geoip-required`. `-advertise` is empty by default and a direct-mode exit does not need
-it, so this is the path of least resistance rather than an obscure corner — if you are
-running with `-geoip-required` because you want the guarantee, require your exit
-operators to set `-advertise` as well.
+That check needs something to check, so **under `-geoip-required` an exit must set
+`-advertise` to get a country at all** (issue #2). An exit that advertises nothing has
+made no claim to contradict, and until #2 that passed the check vacuously — which meant
+the split-endpoint setup above was defeated by *omitting* a flag, since `-advertise` is
+empty by default and a direct-mode exit does not otherwise need it. Under the flag,
+silence is now treated as unverifiable rather than as agreement. Such an exit registers
+and runs normally; it simply carries no country, and the coordinator logs which of the
+three reasons it was:
+
+```
+WARNING: exit <id> has NO country: its address resolved, but it advertises no
+data-plane endpoint and -geoip-required is set … Set -advertise to the address it
+serves from.
+```
+
+**Without `-geoip-required` nothing changes**: an exit with no `-advertise` keeps its
+observed country exactly as before. The flag is what buys the guarantee, so it is the
+flag that carries the requirement — you do not have to reconfigure a fleet that never
+asked for it.
 
 And the coordinator never sees the egress itself, so an operator who places their whole
 apparatus behind one address can still egress elsewhere. Country is a
 strong signal about where a node sits, not a proof about where its traffic leaves.
-See ADR-0042 §8.
+See ADR-0042 §8 and its #2 amendment.
+
+### What the signed directory says about a country (issue #3)
+
+Every entry in the signed snapshot now carries a `countrySource` alongside its
+`country`, because the signature proves the coordinator *said* the country and says
+nothing about how it arrived at one:
+
+| `countrySource` | meaning |
+|---|---|
+| `observed` | resolved from the address the coordinator observed, and the advertised endpoint agrees |
+| `hint` | the observed address resolved to nothing, so this is the node's own `COUNTRY=` claim — the only source in a deployment with no `-geoip` staged |
+| `observed-signaling-only` | resolved, but the advertised endpoint is a **different** address: the tag says where the node signals from, not where it egresses |
+| `unverifiable-no-endpoint` | resolved, but nothing was advertised to corroborate it under `-geoip-required` (carries no country) |
+
+A client assembling its own relay chain refuses `observed-signaling-only` as a
+terminating exit: it chose that country as a jurisdiction, and the coordinator has
+published that the tag describes a different machine. `hint` is still accepted — refusing
+it would break every deployment running without `-geoip`.
 
 Exits **may** share a country: a client picks a country and the coordinator picks
 the exit inside it by headroom (issue #146, ADR-0042), so two exits in the same

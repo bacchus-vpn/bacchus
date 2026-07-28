@@ -107,6 +107,15 @@ assignable. Without `-geoip` at all, the coordinator falls back to each node's
 `-country` tag for everything — which is how the local stack and any
 pre-staging deployment work.
 
+Under `-geoip-required` an **exit must also set `-advertise`** (issue #2). The
+coordinator checks the country it derived from the signaling source against the
+data-plane endpoint the exit advertises, and an exit that advertises nothing gives it
+nothing to check — which used to pass vacuously, so an operator could defeat the check
+by leaving out a flag a direct-mode exit does not otherwise need. Such an exit now
+carries no country and is offered to no client; the startup warning names that
+specifically, rather than reporting an unresolved address. Nothing changes without the
+flag: an exit with no `-advertise` keeps its observed country as before.
+
 ## Transport selection
 `-transport` picks the session transport (ADR-0008): `webrtc` (default; UDP/DTLS
 with NAT traversal) or `reality` (TCP :443 under camouflage TLS, issue #16). The

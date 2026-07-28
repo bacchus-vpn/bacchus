@@ -36,6 +36,20 @@ func startPeerRelaySession(t *testing.T, client, relayP *net.UDPConn, exitID str
 	if sess.Type != "session" || sess.Relay != relayPeer {
 		t.Fatalf("session setup: client got %+v, want a peer-relay session", sess)
 	}
+	// Drive the setup handshake, not just the pairing. Every transport in the repo
+	// brings its session up by exchanging frames through this coordinator
+	// (core.Signaler), so a real peer-relay session has ALWAYS relayed at least one
+	// before it goes quiet — which is precisely what "no signaling has flowed since
+	// setup" in the #105 fixtures presupposes. Pairing without ever signaling is a
+	// different animal: a session that was minted and abandoned, which prune now reaps
+	// (issue #1) and which harvestedRelaySession below exists to build deliberately.
+	//
+	// Reading the forwarded copy off the relay keeps both sockets drained for the
+	// caller, and incidentally asserts the splice really is wired client -> relay.
+	handle(wire{Type: "candidate", Session: sess.Session}, client.LocalAddr().(*net.UDPAddr))
+	if fwd := recvWire(t, relayP, time.Second); fwd.Type != "candidate" || fwd.Session != sess.Session {
+		t.Fatalf("session setup: relay got %+v, want the client's candidate for %q", fwd, sess.Session)
+	}
 	return sess.Session
 }
 
@@ -212,12 +226,12 @@ func TestReselectIgnoresDirectAndTurnSessions(t *testing.T) {
 	registerExit(reExitID, "RU", reExitTCP, exitP)
 
 	// Direct-mode session: peer is the exit, relayID is empty.
-	handle(wire{Type: "connect", Country: countryOf(reExitID), Mode: "direct"}, client.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{Country: countryOf(reExitID), Mode: "direct"}, client.LocalAddr().(*net.UDPAddr))
 	recvWire(t, exitP, time.Second) // assign
 	dsess := recvWire(t, client, time.Second)
 
 	// TURN-fallback session: relay-mode connect with no relay registered.
-	handle(wire{Type: "connect", Country: countryOf(reExitID), Mode: "relay"}, client.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{Country: countryOf(reExitID), Mode: "relay"}, client.LocalAddr().(*net.UDPAddr))
 	recvWire(t, exitP, time.Second) // assign
 	tsess := recvWire(t, client, time.Second)
 	if tsess.Relay != relayTURN {
@@ -322,7 +336,7 @@ func TestPruneStillReapsDirectSessionOnSilence(t *testing.T) {
 	client, exitP := fakePeer(t), fakePeer(t)
 
 	registerExit(reExitID, "RU", reExitTCP, exitP)
-	handle(wire{Type: "connect", Country: countryOf(reExitID), Mode: "direct"}, client.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{Country: countryOf(reExitID), Mode: "direct"}, client.LocalAddr().(*net.UDPAddr))
 	recvWire(t, exitP, time.Second) // assign
 	dsess := recvWire(t, client, time.Second)
 

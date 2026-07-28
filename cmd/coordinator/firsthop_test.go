@@ -25,7 +25,7 @@ const (
 // connectFirstHop drives a chained relay-mode connect: it names a first hop and,
 // as a real chaining client does, no country at all.
 func connectFirstHop(hop string, from *net.UDPConn) {
-	handle(wire{Type: "connect", FirstHop: hop, Mode: "relay"}, from.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{FirstHop: hop, Mode: "relay"}, from.LocalAddr().(*net.UDPAddr))
 }
 
 // TestConnectFirstHopPairsTheNamedNode is the core of §9's wire: the coordinator
@@ -45,7 +45,7 @@ func TestConnectFirstHopPairsTheNamedNode(t *testing.T) {
 
 	// Country names the OTHER exit's country; firstHop names the hop. firstHop wins,
 	// because the coordinator is not being asked to choose.
-	handle(wire{Type: "connect", FirstHop: fhHopID, Country: "NL", Mode: "relay"},
+	dialConnect(wire{FirstHop: fhHopID, Country: "NL", Mode: "relay"},
 		client.LocalAddr().(*net.UDPAddr))
 
 	asg := recvWire(t, relayP, time.Second)
@@ -206,7 +206,7 @@ func TestConnectFirstHopIsRefusedOutsideRelayMode(t *testing.T) {
 			registerExit(fhHopID, "DE", fhHopTCP, hopP)
 			registerRelay("relay-1", relayP)
 
-			handle(wire{Type: "connect", FirstHop: fhHopID, Mode: mode},
+			dialConnect(wire{FirstHop: fhHopID, Mode: mode},
 				client.LocalAddr().(*net.UDPAddr))
 
 			m := recvWire(t, client, time.Second)
@@ -236,7 +236,7 @@ func TestUnchainedConnectStillNamesItsExit(t *testing.T) {
 	registerExit(fhOtherID, "NL", fhOtherTCP, exitP)
 	registerRelay("relay-1", relayP)
 
-	handle(wire{Type: "connect", Country: "NL", Mode: "relay"}, client.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{Country: "NL", Mode: "relay"}, client.LocalAddr().(*net.UDPAddr))
 
 	_ = recvWire(t, relayP, time.Second)
 	sess := recvWire(t, client, time.Second)

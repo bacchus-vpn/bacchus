@@ -106,7 +106,7 @@ func TestExactExitPinningIsGone(t *testing.T) {
 	registerExit("e1", "NL", "203.0.113.10:20000", exit)
 
 	// The pre-#146 request shape, verbatim: an exit id, no country.
-	handle(wire{Type: "connect", ExitID: "e1", Mode: "direct"}, client.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{ExitID: "e1", Mode: "direct"}, client.LocalAddr().(*net.UDPAddr))
 	reply := recvWire(t, client, time.Second)
 	if reply.Type != "error" {
 		t.Fatalf("a connect naming an exit id was honoured (%q); pinning must be gone from the wire", reply.Type)
