@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bacchus-vpn/bacchus/core/capacity"
 )
 
 // Country-scoped exit assignment (issue #146) and country-granularity backpressure
@@ -106,7 +108,7 @@ func TestExactExitPinningIsGone(t *testing.T) {
 	registerExit("e1", "NL", "203.0.113.10:20000", exit)
 
 	// The pre-#146 request shape, verbatim: an exit id, no country.
-	handle(wire{Type: "connect", ExitID: "e1", Mode: "direct"}, client.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{ExitID: "e1", Mode: "direct"}, client.LocalAddr().(*net.UDPAddr))
 	reply := recvWire(t, client, time.Second)
 	if reply.Type != "error" {
 		t.Fatalf("a connect naming an exit id was honoured (%q); pinning must be gone from the wire", reply.Type)
@@ -122,10 +124,61 @@ func TestExactExitPinningIsGone(t *testing.T) {
 	}
 }
 
+// tierFor reports which exits in country cc are inside the octave tier chooseExit picks
+// from, and their rank shares.
+//
+// It calls the production ranking functions — exitSessions, exitAssignable, rankShare
+// and tierFloor — rather than recomputing any of them, so a change to how ranking works
+// moves this with it instead of leaving a second implementation to drift. It is the
+// deterministic view of assignment: which exits are in contention has a definite answer,
+// while which one is returned deliberately does not.
+func tierFor(cc string) (in map[string]bool, share map[string]capacity.Rate) {
+	mu.Lock()
+	defer mu.Unlock()
+	load := exitSessions(time.Now())
+	var candidates []*exitNode
+	for _, e := range exits {
+		if e.country == cc && exitAssignable(e, load[e.id]) {
+			candidates = append(candidates, e)
+		}
+	}
+	floor := tierFloor(candidates, load)
+	in, share = map[string]bool{}, map[string]capacity.Rate{}
+	for _, e := range candidates {
+		s := rankShare(e, load[e.id])
+		share[e.id] = s
+		if s >= floor {
+			in[e.id] = true
+		}
+	}
+	return in, share
+}
+
 // TestAssignmentPrefersTheRoomierExit: the load term discriminates. Both exits declare
 // nothing and are unrated, so they tie on capacity — and today that is every exit in the
 // fleet — leaving the session count, which this coordinator observed itself, as the only
 // thing separating them.
+//
+// # What this test asserts, and what it deliberately does not
+//
+// Assignment is a coarse TIER plus an arbitrary pick inside it (ADR-0042 §3). Only the
+// first half has a definite answer, so only the first half is asserted here: which exits
+// the load term puts in contention. Which tier member comes back is explicitly not a
+// uniform draw — §3 says so outright — and an earlier version of this test's second phase
+// depended on it being one, asserting that both exits appeared across 60 calls.
+//
+// That assertion failed roughly once in three thousand runs, permanently, and the number
+// is not a guess. The in-tier winner is the first candidate in Go's map order, and
+// measuring the two-exit fixture gives a stable **7:1** split — the disfavoured key wins
+// about 1/8 of the time, in every process. So P(60 draws all land on one exit) =
+// (7/8)^60 ≈ 3.3e-4, on every run rather than on unlucky ones. Two things that look like
+// fixes are not: `-count=N` in one process reuses the same layout and cannot reproduce
+// it, and rebuilding the exits map between draws does not resample the bias (measured —
+// the same 7:1 appears either way).
+//
+// The anti-determinism property that assertion was reaching for is real and is kept —
+// it belongs to TestChooseExitDoesNotConcentrateOnOneNode, which owns it deliberately
+// and at a sample size the same measurement shows is safe.
 func TestAssignmentPrefersTheRoomierExit(t *testing.T) {
 	resetRegistry(t)
 	setPC(t)
@@ -135,8 +188,20 @@ func TestAssignmentPrefersTheRoomierExit(t *testing.T) {
 	registerExit("idle", "NL", "203.0.113.11:20000", idlePeer)
 	loadExit(t, "busy", 4) // 4 sessions: more than an octave worse than idle
 
-	// Repeated, because the choice among indistinguishable candidates is random: the
-	// loaded exit must never win, not merely usually lose.
+	// The loaded exit is out of contention — a definite fact, so assert it as one
+	// rather than inferring it from a run of winners.
+	in, share := tierFor("NL")
+	if in["busy"] {
+		t.Fatalf("the loaded exit is still in the assignment tier (shares: busy=%v idle=%v); four sessions is more than an octave worse and the load term is not ranking", share["busy"], share["idle"])
+	}
+	if !in["idle"] {
+		t.Fatalf("the idle exit is not in the tier (shares: busy=%v idle=%v) — the fixture is broken", share["busy"], share["idle"])
+	}
+
+	// And the pick honours it. Repeated because the choice among candidates is
+	// arbitrary: the loaded exit must never win, not merely usually lose. This is a
+	// live check on chooseExit rather than on the tier maths above, so it stays even
+	// though the tier assertion already settles the outcome.
 	for i := 0; i < 40; i++ {
 		e, refusal := chooseExit("NL", nil, time.Now())
 		if refusal != refuseNone {
@@ -148,16 +213,22 @@ func TestAssignmentPrefersTheRoomierExit(t *testing.T) {
 	}
 
 	// Self-correction: once the idle exit carries comparable load, it stops being the
-	// automatic winner. This is the property that keeps ranking from piling every
-	// client onto one node.
+	// automatic winner and BOTH are in contention. This is the property that keeps
+	// ranking from piling every client onto one node — every session assigned to the
+	// roomiest exit lowers that exit's own share, so the choice moves along by itself.
+	//
+	// Asserted as tier membership, which is deterministic, rather than as an observed
+	// frequency, which is not. "Both are eligible" is the whole of what the ranking
+	// promises here; the arbitrary pick then does what it does.
 	loadExit(t, "idle", 4)
-	seen := map[string]bool{}
-	for i := 0; i < 60; i++ {
-		e, _ := chooseExit("NL", nil, time.Now())
-		seen[e.id] = true
+	in, share = tierFor("NL")
+	if !in["busy"] || !in["idle"] {
+		t.Errorf("with both exits equally loaded the tier is %v (shares: busy=%v idle=%v); equally-roomy exits must both be in contention, or the previously-idle exit stays the automatic winner and ranking piles every client onto it",
+			in, share["busy"], share["idle"])
 	}
-	if len(seen) != 2 {
-		t.Errorf("with both exits equally loaded only %v was ever chosen; equally-roomy exits must share", seen)
+	if share["busy"] != share["idle"] {
+		t.Errorf("equally-loaded exits scored differently (busy=%v idle=%v) — the fixture no longer makes them a tie, so the assertion above is not testing what it says",
+			share["busy"], share["idle"])
 	}
 }
 
@@ -165,6 +236,26 @@ func TestAssignmentPrefersTheRoomierExit(t *testing.T) {
 // to exits: a DETERMINISTIC best-node pick would let a node collect every client's
 // source address and timing, and would defeat cross-coordinator failover because every
 // pool member would keep handing back the same node.
+//
+// This is the test that owns the anti-determinism property, and it is the only one that
+// should sample winners — sorting the candidate slice, or any other change that made the
+// in-tier pick a function of the ranking, fails here and nowhere else.
+//
+// # Why 300 draws, and why the number must not be reduced
+//
+// It is a statistical assertion, so its size is load-bearing. What it rests on is only
+// that every tier member has a NON-ZERO chance of being first, which is structural: the
+// winner is the first candidate in Go's map order and iteration starts at a randomized
+// offset, so no member is ever unreachable. It must NOT rest on that chance being
+// uniform, because it is not — ADR-0042 §3 says so, and measuring this three-exit
+// fixture gives roughly 6000/1000/1000 over 8000 draws: a floor of about **1/8** for the
+// least-favoured key, stable across processes.
+//
+// At that floor, 300 draws miss a reachable exit with probability (7/8)^300 ≈ 4e-18.
+// Sixty draws would give 3.3e-4 — about one run in three thousand, which is exactly the
+// flake TestAssignmentPrefersTheRoomierExit used to carry and why its second phase is now
+// asserted on tier membership instead. Note also what does not help: `-count=N` in one
+// process reuses one map layout, and rebuilding the map does not resample the bias.
 func TestChooseExitDoesNotConcentrateOnOneNode(t *testing.T) {
 	resetRegistry(t)
 	setPC(t)

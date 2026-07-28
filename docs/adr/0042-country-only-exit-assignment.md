@@ -1,6 +1,6 @@
 # 42. Country-only exit assignment, with a coordinator-derived country and country-granularity backpressure
 
-- Status: accepted (issues #136, #146, #147)
+- Status: accepted (issues #136, #146, #147); amended 2026-07-28 (issues #1, #2, #3 — see the amendment at the end)
 - Date: 2026-07-25
 
 ## Context
@@ -164,39 +164,40 @@ counts them. An ordinary assignment reveals nothing a plain connect would not.
 The aggregate is **strictly less** than clients used to get. The old reply enumerated
 every exit id — a network map, and the raw material for a pin. Counts are neither.
 
-**Residual: one connect is several assignments, not one.** `sendN` sends each connect
-three times against UDP loss, and `connectVia` does that once per mode, so a single
-`Connect()` can put six datagrams on the wire. The handler processes each independently
-and mints a session per copy, every one through a fresh randomized `chooseExit`.
-Measured with three exits in one country: **one `Connect()` minted six sessions across
-three distinct exits.** A client that reads all six replies and drives whichever names
-its target pins in one round trip, with no exclusion at all — with three exits, roughly
-nine times in ten.
+**Residual: one connect was several assignments, not one — closed by the amendment
+below (#1).** `sendN` sends each connect three times against UDP loss, and `connectVia`
+does that once per mode, so a single `Connect()` can put six datagrams on the wire. The
+handler processed each independently and minted a session per copy, every one through a
+fresh randomized `chooseExit`. Measured with three exits in one country: **one
+`Connect()` minted six sessions across three distinct exits.** A client that reads all
+six replies and drives whichever names its target pinned in one round trip, with no
+exclusion at all — with three exits, roughly nine times in ten.
 
 The retransmission is not new and is not this ADR's doing. What is new is that it
 *means* something: before §2 every copy named the same client-chosen exit, so the
 redundancy was invisible. Country-only assignment turns each retransmit into an
 independent draw.
 
-Two consequences follow, and neither is closed here:
+Two consequences followed:
 
-- Exclusion is cheaper to weaponise than the paragraph above implies, because one
-  reconnect is up to six assignments. In a small country a single connect collects most
-  of the complement.
-- §3's load term is inflatable by a **client**, not just unforgeable by a node: five of
-  six sessions are never used yet are counted for `sessionTTL`, so a client can push a
-  competitor exit out of the tier at one datagram per increment, and — once `minShare`
+- Exclusion was cheaper to weaponise than the paragraph above implies, because one
+  reconnect was up to six assignments. In a small country a single connect collected
+  most of the complement.
+- §3's load term was inflatable by a **client**, not just unforgeable by a node: five of
+  six sessions were never used yet were counted for `sessionTTL`, so a client could push
+  a competitor exit out of the tier at one datagram per increment, and — once `minShare`
   is non-zero — busy out a country.
 
-Both close the same way: a per-connect idempotency key, so duplicate copies of one
-connect return the same session and the same exit. Tracked as a follow-up rather than
-fixed here, because it is a wire change and this ADR is already one.
+Both close the same way, and the amendment at the end of this record does it: a
+per-connect idempotency key, so duplicate copies of one connect return the same session
+and the same exit.
 
-So the property §2 actually establishes, and the one the rest of this document rests
-on, is narrower than the first draft claimed: **a client cannot present a stable,
-declared exit preference, and the coordinator cannot honour one.** An outcome reached by
-minting and abandoning sessions remains available — and is louder than the mechanism it
-replaced, because the coordinator observes it happening.
+So the property §2 establishes is: **a client cannot present a stable, declared exit
+preference, and the coordinator cannot honour one.** With the retransmission residual
+closed, an outcome reached by minting and abandoning sessions costs one full request per
+draw — and every one of those requests is observed by the coordinator, which is the
+sense in which it is louder than the mechanism it replaced. What remains is §9's
+`firstHop` residual, which is a different door and is stated there.
 
 ### 3. Ranking is a coarse tier with a random pick inside it, not a sort
 
@@ -394,19 +395,19 @@ on its packet handler for a string the node chose — the tag is recorded as
 `observed-signaling-only`, logged loudly, and under `-geoip-required` the exit is given
 **no country at all**, which makes it invisible to country-scoped assignment.
 
-**With one exception, and it is the default.** An exit that advertises *nothing* has made
-no claim to contradict, so the comparison passes vacuously and the tag stays `observed`.
-`-advertise` is empty by default and a direct-mode exit never needs it — relays dial an
-advertised address, ICE does not. So the split-endpoint operator described above defeats
-the check by omitting a flag they had no reason to set, and does so under
-`-geoip-required`. Closing it means either treating an empty advertisement as
-unverifiable when that flag is set, or requiring `-advertise` for the exit role; tracked
-as a follow-up.
+**There was one exception, and it was the default — closed by the amendment below (#2).**
+An exit that advertises *nothing* had made no claim to contradict, so the comparison
+passed vacuously and the tag stayed `observed`. `-advertise` is empty by default and a
+direct-mode exit never needs it — relays dial an advertised address, ICE does not. So the
+split-endpoint operator described above defeated the check by omitting a flag they had no
+reason to set, and did so under `-geoip-required`. Of the two ways to close it — treating
+an empty advertisement as unverifiable when that flag is set, or requiring `-advertise`
+for the exit role — the amendment takes the first, and says why.
 
-Until then the flag's promise is narrower than "no self-report reaches a client's
-country choice". It is that no **contradicted** self-report does — which is worth having,
-since it makes the split endpoint a configuration an operator must now deliberately
-avoid rather than one they get for free, but it is not the guarantee the name suggests.
+Until that landed the flag's promise was narrower than "no self-report reaches a client's
+country choice". It was that no **contradicted** self-report did — worth having, since it
+made the split endpoint a configuration an operator had to deliberately avoid rather than
+one they got for free, but not the guarantee the name suggests.
 
 **The residual, stated rather than papered over.** The advertised address is still a
 claim; it is now a claim that must agree with an observation, not an unconstrained one.
@@ -445,6 +446,11 @@ their countries and is **signed** — strictly better than the list it replaces,
 same artifact ADR-0038's hop selection already reads. #146 removes the *unsigned live
 enumeration*; it does not remove the directory. `core/` does not read exits out of the
 snapshot today, and wiring that is chaining's work, not this record's.
+
+Signed is strictly better than unsigned, and it is not the same thing as *verified*: the
+signature proves the coordinator said the country, not how it arrived at one. That
+distinction is the subject of the #3 amendment below, and it became load-bearing the
+moment chaining shipped and this paragraph's "not today" became today.
 
 **And the tension worth naming, because it looks like a contradiction and is not.** A
 chaining client *does* choose its own terminating exit, which is exactly the pinning
@@ -568,8 +574,10 @@ question from one that merely says so.
   and neither is worth paying for load balancing nothing yet needs.
 - **Country describes where a node signals from, not where its traffic leaves** (§8).
   The advertised data-plane endpoint must now agree with the observed signaling source,
-  and `-geoip-required` refuses a split, but the coordinator never observes the egress
-  itself.
+  and `-geoip-required` refuses a split — and, since the #2 amendment, refuses an exit
+  that advertises no endpoint at all rather than treating silence as agreement. The
+  coordinator still never observes the egress itself, so this bounds a claim rather than
+  proving a fact.
 - **The loader cannot detect a cleanly-truncated database** (§7). A ratio check and a
   coordinator-side floor catch mismatch and gross truncation; a file cut at a line
   boundary needs a staging-pipeline checksum.
@@ -600,3 +608,165 @@ question from one that merely says so.
   healthy coordinator.
 - **#142 / ADR-0038** (relay chaining): §9 records the three wire commitments that let
   it land as a pure addition.
+
+## Amendment (issues #1, #2, #3, 2026-07-28): the three residuals this record left open are closed
+
+This record shipped with three named gaps: §2's retransmission residual, §8's empty
+advertisement, and the provenance §8 computed but did not carry past the coordinator.
+Each was stated rather than papered over, which is why they were findable; each is closed
+here. **No new ADR number is minted — these change what this record's own sections
+claim, and a reader who does not reach the follow-up must not be left with the old
+promise.**
+
+### 1. `connect{nonce}` — one request is one assignment (#1)
+
+**This is a wire change.** A connect now carries a client-minted per-connect idempotency
+key, and a connect without one is **refused** (`reason:"connect-needs-nonce"`).
+
+The coordinator remembers the answer it minted against `(observed source address,
+nonce)` and replays exactly those bytes — both the assign to the paired node and the
+session reply to the client — for every later copy of that request. One request, one
+`chooseExit`, one exit.
+
+*Why refused rather than optional.* An idempotency key a client may omit is not a guard,
+it is an opt-in: the client that wants several independent draws is precisely the one
+that would leave the field off, so an additive version would bind only the honest. This
+wire was already broken once by §2 on the owner's "no installed base before v1" call, and
+both halves land together here as they did there.
+
+*Why the source address is in the key.* The same reason it is in §2's session binding.
+Keyed on the nonce alone, a client that observed or guessed another's key would be handed
+that client's session — learning which exit it was given, and able to steer its own
+retries around it. Several clients behind one NAT share an address but not a port, so the
+full `UDPAddr` is what separates them.
+
+*What is deliberately NOT collapsed.* The key is per pairing **request**, not per
+`Connect()`. `connectVia` walks the mode ladder, and a direct pairing and a relayed one
+are not interchangeable answers to one question — a client that fell back to relay
+because direct failed genuinely asked twice. So one `Connect()` can still produce two
+assignments, and that is a decision rather than a leftover: what is collapsed is
+retransmission, which was never a decision. The measurement in §2 goes from six
+assignments to one per request.
+
+*Replaying the node's assign too.* The datagram that went missing may have been either
+one. Replaying both makes a retransmit recover the whole pairing, which is strictly
+better than the behaviour it replaces: there, a lost assign was "recovered" by minting a
+second session against a possibly different exit, leaving the client and the node it had
+been paired with holding different session ids.
+
+*The peer-relay half.* §3 records that `prune` exempts peer-relay sessions, because their
+liveness is their relay's (#96/#105). That exemption covered sessions that were never
+brought up at all, so a client harvesting assignments through `mode:"relay"` accumulated
+entries no reaper would ever touch — the exits they name stayed nameable in
+`ExcludeSessions` indefinitely, where a direct-mode client's aged out in `sessionTTL`.
+The coordinator can tell the two apart honestly: every transport drives its handshake
+through it (`core.Signaler`), so a session that has never relayed a single frame was
+paired and abandoned. Those are now reaped on the ordinary idle bound; a session that was
+brought up keeps the exemption in full.
+
+*What this does not close.* §9's `firstHop` residual is untouched — a client that asks
+for relay mode, names a node and terminates there has still reconstructed a stable exit
+preference, and no coordinator can see it. And §3's load term still counts sessions
+minted rather than tunnels served, so a client willing to spend one full request per
+increment can still inflate it. The price moved from one datagram to one request; the
+mechanism did not disappear.
+
+### 2. Under `-geoip-required`, an empty advertisement is unverifiable, not agreed (#2)
+
+§8's exception was the default configuration. `-advertise` is empty out of the box and a
+direct-mode exit never needs it, so the split-endpoint operator §8 describes defeated the
+check by **omitting a flag they had no reason to set**: run the exit in RU, forward only
+the UDP signaling through a cheap host abroad, and be tagged with the foreign country,
+`source=observed`, no warning logged, fully assignable — under the flag whose entire
+promise is that no node self-report reaches a client's country choice.
+
+Under `-geoip-required` an exit that advertises no data-plane endpoint now gets **no
+country**. The distinction that makes this coherent is between a claim that is
+*contradicted* and an observation that cannot be *corroborated*: the flag's promise is
+about what this coordinator can establish, and with one address and nothing to check it
+against it has established where the exit signals from and nothing about where its
+traffic leaves.
+
+Of the two options the issue named, this is the first. Requiring `-advertise` for the
+exit role was rejected because it would refuse an ordinary working direct-mode exit at
+register for omitting a flag it does not need, in deployments that never asked for the
+guarantee. **Without the flag, an empty advertisement still keeps its observed tag** —
+unchanged from today. The flag is what buys the property, and it now buys the whole of
+it.
+
+The structural half matters as much as the rule. The predicate this replaces answered a
+yes/no question — "does the advertisement agree?" — and had to say something about an
+exit that made no claim; it said yes. Collapsing *made no claim* into *made a claim that
+checks out* is what let the check be bypassed by omission, so the code now carries three
+states (`endpointAgrees` / `endpointDisagrees` / `endpointAbsent`) and every caller has
+to decide what an absent claim means to it. The provenance is recorded separately too
+(`unverifiable-no-endpoint` vs `observed-signaling-only` vs unresolved), because all
+three leave an exit with no country and an operator reading the log has three different
+faults with three different fixes — and a message saying "your address did not resolve"
+is actively wrong for an exit whose address resolved perfectly.
+
+### 3. The signed snapshot carries country provenance, and a chaining client acts on it (#3)
+
+§8 computed `countrySplit`, logged it loudly, and then discarded it at the snapshot
+boundary. `coldstart.Entry` had no provenance field, so a split-endpoint exit shipped in
+the **signed** directory as `{Country:"NL", Addr:"<RU address>"}` — byte-identical in
+shape to a verified entry. So did an exit whose country is nothing but its own
+`-country` flag, which is every node in a deployment with no database staged.
+
+That mattered more by the time it was fixed than when it was raised, exactly as §9
+predicted without meaning to: chaining has now shipped, and `chooseChainExit` picks the
+terminating exit — the jurisdiction the whole feature exists to choose — out of this
+artifact, with no live reply to check it against. The signature proves the coordinator
+said the country. It says nothing about which of the three it is.
+
+`Entry.CountrySource` now carries it, for relays as well as exits (a relay's address and
+ingress agree by construction, but its *country* still falls back to its own hint), and
+`core` fails closed on it.
+
+**Where the client's line is drawn, and why it is not "verified".** It refuses a
+**contradicted** country — one the coordinator itself observed to disagree with where the
+node says it serves traffic from — and nothing else. Refusing everything *unverified*
+would refuse every hinted tag, which is the whole fleet wherever no geo database is
+staged, so a client would simply stop being able to chain against a coordinator behaving
+exactly as it always has. An empty provenance (a coordinator predating the field) is not
+contradicted either: that is the status quo, not a discovered disagreement. This is the
+same distinction §8's own promise rests on — no *contradicted* self-report — applied
+client-side.
+
+The refusal is scoped to the **terminating** exit. A contradicted country says something
+about where a node egresses, which matters only for the node that terminates the path; a
+peeling hop egresses nothing, and hop diversity is operator- and AS-based (ADR-0038 §4).
+Such a node stays in the hop pool and stays a mesh-walk courier.
+
+**And the decision the field does not answer: a split-endpoint exit stays in the
+snapshot.** Withholding it was considered and is worse. This snapshot is not only a
+jurisdiction menu — it is also ADR-0037's mesh-walk courier list, and dropping a
+reachable peer over a property of its *country* withdraws recovery capacity at exactly
+the moment recovery is what the client needs, to fix a problem that has nothing to do
+with reaching it. It would also put the directory out of step with `connect`, which
+without `-geoip-required` still assigns that exit (§8): §4 forbids the aggregate
+promising what `connect` would refuse, and the mirror of that is a directory hiding what
+`connect` would hand out. So it ships, labelled, and the consumer decides. Under
+`-geoip-required` the question does not arise — such an exit has no country at all and
+ships as the country-less exit it is.
+
+### On the tests, because all three of these were invisible
+
+Every failure closed here is silent in production. Six sessions per connect is a
+perfectly working connection; an exit tagged with the wrong country connects and carries
+traffic; a chaining client that picks a contradicted exit egresses somewhere the user did
+not choose and is told nothing. None of them fails, so none of them could be found by a
+test that only checks that things work.
+
+Two fixture gaps in particular were load-bearing and are worth recording, because they
+are the same shape as the "a fake on both ends of a protocol tests the fakes" lesson this
+record already carries. `registerExitFrom` always set `Addr` from the source and
+`registerSplitExit` always set a different one, so **the default configuration — no
+`-advertise`, the one an operator actually runs and the one #2 needs — was the case no
+fixture could produce.** And the #96/#105 peer-relay fixtures paired a session without
+ever driving the setup handshake they describe as having happened, which is what made
+"minted and abandoned" indistinguishable from "up and quiet"; they now signal, and the
+abandoned case is a deliberate separate fixture.
+
+Every test added here was mutation-checked: the fix reverted, the test watched to fail,
+the fix restored.

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -741,8 +742,23 @@ func (e *Engine) attempt(ctx context.Context, l *coordLink, mode string, timeout
 // non-nil, skips a peer relay this pass already failed on and records a fresh failure
 // (issue #56); the pool passes nil (it has its own failover).
 func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, tr Transport, timeout time.Duration, dedup *relayDedup) attemptResult {
-	// Each connect is sent several times against UDP loss, so the coordinator
-	// mints one session per copy and we buffer the extra "session" replies. Drop
+	// One idempotency key for this whole request (issue #1, ADR-0042 §2). Minted here
+	// — once, outside sendN — so all three copies carry the SAME value and the
+	// coordinator answers them as one request rather than three. Minting it inside the
+	// send loop would defeat the entire mechanism while looking correct, which is why
+	// it is a local the loop closes over rather than something sendN could compute.
+	nonce, err := newConnectNonce()
+	if err != nil {
+		// crypto/rand failing is not a network condition and retrying against another
+		// pool member cannot help, but neither may this fall back to an unnonced
+		// connect: that is precisely the several-exits-per-request shape #1 closed, and
+		// a coordinator would refuse it anyway.
+		e.emit(EventError, "", "[%s] could not mint a connect nonce: %v", req.mode, err)
+		return attemptResult{outcome: transportFailed}
+	}
+	// Each connect is sent several times against UDP loss. The coordinator now
+	// collapses those copies onto one session (the nonce above), but a reply may still
+	// be duplicated on the way back, so we buffer the extra "session" replies. Drop
 	// any left over from a prior mode on this member so awaitSession can't pick
 	// up a stale session id.
 	e.drainMsgCh(l)
@@ -751,6 +767,7 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 		Country:         req.wireCountry(),
 		FirstHop:        req.plan.firstHopID(),
 		Mode:            req.mode,
+		Nonce:           nonce,
 		Cred:            e.cfg.AdmissionCred,
 		ExcludeSessions: req.exclude,
 	}, 3)
@@ -868,6 +885,26 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	return attemptResult{sess: chained, sid: sid, exitID: exitID, exitPub: exitPub, relay: reply.relay, outcome: connectOK}
 }
 
+// connectNonceLen is the size of a per-connect idempotency key, in bytes before hex
+// encoding (issue #1). It is not a secret and nothing is derived from it — it only has
+// to be unique among this client's own live requests to one coordinator, over the few
+// seconds a coordinator remembers it — but it IS drawn from crypto/rand rather than a
+// counter or a clock. A predictable key would be one another client could name, and the
+// coordinator's dedupe is keyed on (source address, nonce): a shared NAT puts several
+// clients behind one address, and there a guessable key would let one of them collide
+// with another's request and be handed that client's session.
+const connectNonceLen = 16
+
+// newConnectNonce mints one per-connect idempotency key. Hex rather than raw bytes
+// because it rides a JSON string field and lands in a coordinator map key.
+func newConnectNonce() (string, error) {
+	b := make([]byte, connectNonceLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // refusalText renders a coordinator refusal reason for a human. The two country
 // refusals (issue #147) get a sentence saying what to do about them; anything else —
 // including an empty reason from a coordinator that sent a bare error — is shown
@@ -886,6 +923,13 @@ func refusalText(reason string) string {
 		// it means the engine is sending a combination it believes it cannot send,
 		// and a bare reason string in a log is a poor way to find that out.
 		return "hop-needs-relay-mode (a first hop may only be named on a relay-mode connect; this is a client bug, not a network condition)"
+	case "connect-needs-nonce":
+		// Not reachable from an honest client either: attemptWith mints a nonce on
+		// every connect and fails the attempt outright if it cannot. Rendered because
+		// reaching it means this build sent a connect it believes it cannot send — the
+		// one thing worth distinguishing from a network condition, since no amount of
+		// rotating or retrying will fix it.
+		return "connect-needs-nonce (this coordinator requires a per-connect idempotency key and this connect carried none; this is a client bug, not a network condition)"
 	case "":
 		return "no reason given"
 	default:

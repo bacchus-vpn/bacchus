@@ -77,8 +77,16 @@ const (
 	// countrySplit is an exit whose observed SIGNALING address resolved, but whose
 	// advertised data-plane endpoint is a different address (or a name this
 	// coordinator will not resolve). The country describes where the exit signals
-	// from, which is not necessarily where its traffic egresses — see exitEndpointAgrees.
+	// from, which is not necessarily where its traffic egresses — see exitEndpoint.
 	countrySplit = "observed-signaling-only"
+	// countryNoEndpoint is an exit that resolved fine but advertises NO data-plane
+	// endpoint at all, under -geoip-required (issue #2). It carries no country, for the
+	// reason deriveExitCountry gives; the provenance is recorded separately from
+	// countryUnknown because the two are diagnosed completely differently by an
+	// operator. countryUnknown means "we could not resolve your address"; this means
+	// "we resolved it, and you have not given us the second address that would let us
+	// tie it to your egress" — and the fix is a flag, not a database.
+	countryNoEndpoint = "unverifiable-no-endpoint"
 )
 
 // setupGeoIP loads the country database from dir, or leaves the coordinator running
@@ -184,6 +192,31 @@ func deriveCountry(src *net.UDPAddr, hint string) (cc string, source string) {
 // host is a name — the split is recorded as countrySplit and, under -geoip-required,
 // the country is dropped entirely so the exit is not offered at all.
 //
+// # The empty advertisement, and why it is not agreement (issue #2)
+//
+// The first version of this treated an exit that advertises NOTHING as agreeing
+// vacuously: no claim, nothing to contradict, tag it observed. That reads as
+// conservative and is the opposite, because `-advertise` defaults to empty and a
+// DIRECT-mode exit never needs it — relays dial an advertised address, ICE does not.
+// So the split-endpoint operator this check exists to catch defeated it by OMITTING a
+// flag they had no reason to set: run the exit in RU, forward only its UDP signaling
+// through a cheap host abroad, and be tagged with the foreign country, source=observed,
+// no warning, fully assignable — under the very flag whose promise is that no node
+// self-report reaches a client's country choice.
+//
+// Under -geoip-required an empty advertisement is therefore treated as UNVERIFIABLE
+// rather than as agreed, and such an exit gets no country. The distinction that makes
+// this coherent is between a claim that is CONTRADICTED and an observation that cannot
+// be CORROBORATED: the flag's promise is about what this coordinator can establish, and
+// with one address and nothing to check it against it has established where the exit
+// signals from and nothing about where its traffic leaves.
+//
+// Without the flag, an empty advertisement still keeps its observed tag. That is
+// deliberate and it is the reason this was chosen over making `-advertise` mandatory
+// for the exit role: an operator who has not asked for the guarantee should not have
+// their working direct-mode exit refused at register for omitting a flag it does not
+// need. The flag is what buys the property, and now it buys the whole of it.
+//
 // What this does NOT do is verify that traffic egresses where the advertised endpoint
 // sits. The advertised address is still a claim; it is merely a claim that must now
 // agree with an observation instead of being unconstrained. A determined operator can
@@ -197,26 +230,67 @@ func deriveCountry(src *net.UDPAddr, hint string) (cc string, source string) {
 // and a resolution this coordinator could not trust anyway.
 func deriveExitCountry(src *net.UDPAddr, hint, advertised string) (cc string, source string) {
 	cc, source = deriveCountry(src, hint)
-	if source != countryObserved || exitEndpointAgrees(advertised, src) {
+	if source != countryObserved {
+		// Hinted or unresolved: there is no observation for an endpoint to corroborate
+		// or contradict, so the advertisement has nothing to say either way.
 		return cc, source
 	}
-	if requireGeoIP {
-		// The strict posture means no node self-assertion of location reaches a
-		// client, and an endpoint this coordinator never observed is exactly that.
-		return countryUnknown, countryUnknown
+	switch exitEndpoint(advertised, src) {
+	case endpointAgrees:
+		return cc, source
+	case endpointAbsent:
+		if requireGeoIP {
+			return countryUnknown, countryNoEndpoint
+		}
+		return cc, source
+	default: // endpointDisagrees
+		if requireGeoIP {
+			// The strict posture means no node self-assertion of location reaches a
+			// client, and an endpoint this coordinator never observed is exactly that.
+			// The provenance is kept even though the country is dropped, so the
+			// operator log can say WHICH of the two refusals this was.
+			return countryUnknown, countrySplit
+		}
+		return cc, countrySplit
 	}
-	return cc, countrySplit
 }
 
-// exitEndpointAgrees reports whether an exit's advertised data-plane endpoint names
-// the same address this coordinator observed its signaling arrive from.
+// endpointVerdict is what an exit's advertised data-plane endpoint says about the
+// country derived from its signaling source.
 //
-// An empty advertisement agrees vacuously: there is no claim to contradict the
-// observation. A host that is not an IP literal does not agree, because it cannot be
-// checked (see deriveExitCountry on why it is not resolved).
-func exitEndpointAgrees(advertised string, src *net.UDPAddr) bool {
-	if advertised == "" || src == nil {
-		return true
+// Three values rather than a bool, and that is the whole of issue #2's fix. The
+// predicate this replaces answered "does the advertisement agree?" and had to say
+// something about an exit that advertises nothing; it said yes — vacuously true, and
+// the default configuration. Collapsing "made no claim" into "made a claim that
+// checks out" is what let the check be bypassed by omission. Kept apart, each caller
+// has to decide what an absent claim means to it, which is a decision rather than a
+// fallthrough.
+type endpointVerdict int
+
+const (
+	// endpointAgrees: the advertised host is an IP literal equal to the observed
+	// signaling source. Signaling and data plane are the same machine as far as this
+	// coordinator can tell.
+	endpointAgrees endpointVerdict = iota
+	// endpointDisagrees: the advertised host is a different address, or a name — which
+	// is not checkable without a DNS lookup this coordinator will not perform (see
+	// deriveExitCountry). Unverifiable and verified-false are the same answer here: in
+	// both cases the observation has not been corroborated.
+	endpointDisagrees
+	// endpointAbsent: no data-plane endpoint was advertised at all.
+	endpointAbsent
+)
+
+// exitEndpoint classifies an exit's advertised data-plane endpoint against the address
+// this coordinator observed its signaling arrive from.
+func exitEndpoint(advertised string, src *net.UDPAddr) endpointVerdict {
+	if advertised == "" {
+		return endpointAbsent
+	}
+	if src == nil {
+		// No observation to compare against. Reached only from a synthetic call site;
+		// the register path always has a source address.
+		return endpointAbsent
 	}
 	host := advertised
 	if h, _, err := net.SplitHostPort(advertised); err == nil {
@@ -224,9 +298,12 @@ func exitEndpointAgrees(advertised string, src *net.UDPAddr) bool {
 	}
 	ip := net.ParseIP(strings.TrimSpace(host))
 	if ip == nil {
-		return false // a name: not checkable, so not agreed
+		return endpointDisagrees // a name: not checkable, so not corroborated
 	}
-	return ip.Equal(src.IP)
+	if ip.Equal(src.IP) {
+		return endpointAgrees
+	}
+	return endpointDisagrees
 }
 
 // rederiveCountry refreshes a node's country after its observed address changed,
@@ -286,6 +363,8 @@ func countrySourceLabel(source string) string {
 		return "observed IP"
 	case countrySplit:
 		return "observed SIGNALING IP only — advertised endpoint differs"
+	case countryNoEndpoint:
+		return "observed SIGNALING IP only — no advertised endpoint to corroborate it, and -geoip-required is set"
 	case countryHinted:
 		return "node hint, unresolved IP"
 	default:

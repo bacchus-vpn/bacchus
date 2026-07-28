@@ -148,12 +148,29 @@ type relayHop struct {
 	dial     string // host:port the previous hop dials
 	operator string // coordinator-signed operator/vouch tag, for diversity (#124)
 
-	// country is the coordinator-DERIVED country tag (issue #136, ADR-0042 §1) —
-	// resolved from the address the coordinator observed this node register from,
-	// not from the node's own claim. A chaining client filters terminating-exit
-	// candidates by it, which is the whole of how the user's chosen country still
-	// means something once the coordinator has stopped choosing the exit.
+	// country is the country tag the coordinator published for this node (issue #136,
+	// ADR-0042 §1). A chaining client filters terminating-exit candidates by it, which
+	// is the whole of how the user's chosen country still means something once the
+	// coordinator has stopped choosing the exit.
+	//
+	// It is NOT unconditionally coordinator-derived, and an earlier version of this
+	// comment said it was. It is derived from an observed address when the coordinator
+	// has a geo database and that address resolves; otherwise it is the node's own
+	// -country claim, which is every node in a deployment with none staged. See
+	// countryContradicted.
 	country string
+
+	// countryContradicted marks a node whose published country the coordinator itself
+	// observed to disagree with where the node says it serves traffic from — signaling
+	// arriving from one country while the advertised data-plane endpoint is another
+	// (coldstart.CountrySignalingOnly, ADR-0042 §8). chooseChainExit refuses such a
+	// node as a TERMINATING exit.
+	//
+	// It deliberately does not gate a node's use as a peeling HOP. A hop's country is
+	// not a jurisdiction the user chose — hop diversity is operator- and AS-based (§4)
+	// — so a contradicted country says nothing about a hop's fitness, and dropping it
+	// would shrink the candidate set for no gain.
+	countryContradicted bool
 
 	// pairable reports whether the COORDINATOR can pair a client directly to this
 	// node, i.e. it is registered as an exit with an advertised address. It gates
@@ -221,11 +238,24 @@ type relayDirectory struct {
 // per-exit list (#146) left the signed snapshot as the only place a client can
 // learn a concrete exit id, and a chaining client needs one — it encrypts its
 // innermost layer to that exit's static key, which IS its id (ADR-0009).
+//
+// An exit whose country the coordinator flagged as CONTRADICTED is not a candidate,
+// however well its tag matches (issue #3). This is the same fail-closed rule as the
+// rest of this file: a user who asked to egress in one jurisdiction and was handed an
+// exit whose tag the coordinator can see describes a different machine has been given a
+// weaker path than the one they asked for, and would go on acting on an assurance they
+// no longer have. Refusing costs them that exit; accepting costs them the feature's
+// entire point. It is scoped to CONTRADICTED rather than to merely unverified — see
+// coldstart.Entry.CountryContradicted for why refusing an unverified tag would break
+// every deployment with no geo database staged.
 func (d *relayDirectory) exitsIn(cc string) []relayHop {
 	want := geoip.Canonical(cc)
 	var out []relayHop
 	for _, h := range d.hops {
 		if !h.pairable {
+			continue
+		}
+		if h.countryContradicted {
 			continue
 		}
 		if want != "" && geoip.Canonical(h.country) != want {
@@ -234,6 +264,25 @@ func (d *relayDirectory) exitsIn(cc string) []relayHop {
 		out = append(out, h)
 	}
 	return out
+}
+
+// contradictedIn counts the exit-role entries in country cc that exitsIn withheld for a
+// contradicted country tag. It exists purely for diagnosis: it is read only when no
+// candidate survived, so a chaining client can say which of "there are no exits there"
+// and "there are exits there and none of them can be trusted to be there" it hit.
+func (d *relayDirectory) contradictedIn(cc string) int {
+	want := geoip.Canonical(cc)
+	n := 0
+	for _, h := range d.hops {
+		if !h.pairable || !h.countryContradicted {
+			continue
+		}
+		if want != "" && geoip.Canonical(h.country) != want {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // loadRelayDirectory verifies signed under pub and indexes it for chaining. It
@@ -306,9 +355,10 @@ func loadRelayDirectory(signed []byte, pub ed25519.PublicKey, selfID string, now
 		}
 		d.hops = append(d.hops, relayHop{
 			id: ent.ID, pub: pub, dial: dial,
-			operator: ent.Operator,
-			country:  ent.Country,
-			pairable: ent.Role == "exit" && ent.Addr != "",
+			operator:            ent.Operator,
+			country:             ent.Country,
+			countryContradicted: ent.CountryContradicted(),
+			pairable:            ent.Role == "exit" && ent.Addr != "",
 		})
 	}
 	if len(d.hops) == 0 {
@@ -606,6 +656,15 @@ func (e *Engine) chooseChainExit(d *relayDirectory, country string) (relayHop, e
 		}
 	}
 	if len(usable) == 0 {
+		// Name the withheld ones. "No exit in NL" when the directory plainly lists
+		// exits in NL is the kind of failure an operator chases in the wrong place for
+		// an afternoon; the actual condition — this coordinator published a country for
+		// those exits that it can see disagrees with where they serve traffic from — is
+		// both diagnosable and actionable, and it is not the user's fault.
+		if n := d.contradictedIn(country); n > 0 {
+			return relayHop{}, fmt.Errorf("%w: none usable in %q (%d exit(s) there carry a country the coordinator itself flagged as describing where they SIGNAL from, not where they egress, and cannot be trusted to choose a jurisdiction — issue #3, ADR-0042 §8)",
+				errChainNoExit, country, n)
+		}
 		return relayHop{}, fmt.Errorf("%w: none in %q", errChainNoExit, country)
 	}
 	i, err := randIndex(len(usable))

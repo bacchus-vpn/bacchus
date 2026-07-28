@@ -79,6 +79,17 @@ const (
 	// it and reveals nothing about the network — see the wire.FirstHop guard in
 	// the connect handler for why the combination is refused rather than honoured.
 	refuseHopNotRelayMode assignRefusal = "hop-needs-relay-mode"
+	// refuseNoNonce answers a connect carrying no per-connect idempotency key, or one
+	// too long to store (issue #1, ADR-0042 §2). Like refuseHopNotRelayMode it names
+	// the client's own malformed request back to it and reveals nothing about the
+	// network — an unnonced connect is refused identically whether the country is
+	// empty, busy, or full of exits.
+	//
+	// Refusing rather than falling back to per-datagram assignment is the decision, not
+	// the message. An idempotency key a client may omit gives the pre-#1 behaviour —
+	// several independent exit draws per request — to precisely the client that wants
+	// it, so the guard would bind only the honest.
+	refuseNoNonce assignRefusal = "connect-needs-nonce"
 )
 
 // resolveFirstHop answers a connect that names its own first peeling hop (issue
@@ -145,11 +156,17 @@ func exitRating(nodeID string, declared uint64) (usable capacity.Rate, rated boo
 // discriminates at all today: it is a number this coordinator OBSERVED itself, so
 // unlike a declared cap there is nothing for a NODE to inflate.
 //
-// A client is a different matter, and the asymmetry is worth stating where the number
-// is built. One Connect() puts several connect copies on the wire (sendN, once per
-// mode) and each mints its own session, so a client can raise an exit's count without
-// carrying any traffic through it. See ADR-0042 §2's retransmission residual: until a
-// per-connect idempotency key lands, this counts sessions minted, not tunnels served.
+// A client used to be a different matter, and the asymmetry is worth recording where
+// the number is built. One Connect() puts several connect copies on the wire (sendN,
+// once per mode) and each minted its own session, so a client could raise an exit's
+// count several-fold without carrying any traffic through it — ADR-0042 §2's
+// retransmission residual. The per-connect idempotency key (issue #1) closes that: the
+// copies of one request now share one session, so a client raising this count pays one
+// full pairing request per increment, and every one of them is observed here.
+//
+// It still counts sessions MINTED rather than tunnels served — see below — so a client
+// willing to spend a request per increment can still inflate it. What changed is the
+// price, from one datagram to one request.
 //
 // Built once per assignment rather than kept as a counter on exitNode, deliberately:
 // the register handler replaces a node's registry struct wholesale every ~10 s, so a
@@ -439,13 +456,7 @@ func chooseExit(country string, exclude map[string]bool, now time.Time) (*exitNo
 	// `candidates` was built in randomized order, "first within the tier" is an
 	// arbitrary choice among the indistinguishable ones that varies per call — which
 	// is the property, not an accident.
-	var best capacity.Rate
-	for _, e := range candidates {
-		if s := rankShare(e, load[e.id]); s > best {
-			best = s
-		}
-	}
-	floor := capacity.OctaveFloor(best)
+	floor := tierFloor(candidates, load)
 	for _, e := range candidates {
 		if rankShare(e, load[e.id]) >= floor {
 			return e, refuseNone
@@ -454,6 +465,33 @@ func chooseExit(country string, exclude map[string]bool, now time.Time) (*exitNo
 	// Unreachable: the candidate at exactly `best` always clears the floor, and mu is
 	// held throughout so nothing changed between the passes.
 	return nil, refuseCountryBusy
+}
+
+// tierFloor is the minimum rank share a candidate must offer to be in the best tier —
+// one octave below the roomiest of them (capacity.OctaveFloor).
+//
+// It is the whole of what the RANKING decides. Which member of the tier is then returned
+// is deliberately arbitrary (see chooseExit), so this floor is the only part of
+// assignment that has a definite answer, and it is therefore the only part a test can
+// assert on without depending on a distribution the design does not promise.
+//
+// Named rather than inlined for exactly that reason: the property "the load term moved
+// this exit into/out of contention" had no name, so a test could only observe it
+// indirectly by sampling winners — which needs the arbitrary pick to be near-uniform,
+// and it is not (see TestChooseExitDoesNotConcentrateOnOneNode). Extracting it changes
+// no behaviour; chooseExit computes exactly what it computed before.
+//
+// The band is measured FROM the best candidate rather than from fixed power-of-two
+// buckets, which is what stops a node sitting just beneath an absolute boundary and
+// crossing it for a marginal gain (ADR-0042 §3).
+func tierFloor(candidates []*exitNode, load map[string]int) capacity.Rate {
+	var best capacity.Rate
+	for _, e := range candidates {
+		if s := rankShare(e, load[e.id]); s > best {
+			best = s
+		}
+	}
+	return capacity.OctaveFloor(best)
 }
 
 // rankShare is the per-exit ranking number: the bandwidth one more session could

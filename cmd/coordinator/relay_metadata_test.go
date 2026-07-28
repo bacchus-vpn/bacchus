@@ -25,7 +25,7 @@ import (
 // naming the COUNTRY of the given exit (see connectRelay / countryOf: a client cannot
 // name an exit post-#146).
 func connectDirect(exitID string, from *net.UDPConn) {
-	handle(wire{Type: "connect", Country: countryOf(exitID), Mode: "direct"}, from.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{Country: countryOf(exitID), Mode: "direct"}, from.LocalAddr().(*net.UDPAddr))
 }
 
 // TestPeerRelaySessionCarriesStableTag: a peer-relay connect tags the client's
@@ -216,6 +216,61 @@ func TestSnapshotAdvertisesRelayIngressAndOperator(t *testing.T) {
 	}
 	if !e.RelayEligible() {
 		t.Fatal("a relay advertising an ingress must be relay-eligible")
+	}
+}
+
+// TestOutOfRangeIngressPortIsIgnored is issue #11: only the PORT of a relay's forwarding
+// ingress comes from the node (buildSnapshot supplies the host from the observed source
+// address), and nothing checked that it was a port.
+//
+// A relay reporting 70000 — or a negative number — was advertised in the SIGNED
+// directory as `observedIP:70000`, which no client can dial. Self-inflicted, and §4
+// rejects it on dial, so this is hardening; it is worth having because publishing an
+// unusable entry in the artifact this project asks clients to trust spends a client's
+// hop-selection attempt and its dial timeout on a node the coordinator could see was
+// unusable at register time.
+//
+// Out of range means "advertises no ingress", not "refuse the register": the relay is
+// otherwise serviceable and only its relay-eligibility depends on a usable port.
+func TestOutOfRangeIngressPortIsIgnored(t *testing.T) {
+	for _, port := range []int{70000, -1, 65536} {
+		setPC(t)
+		resetRegistry(t)
+		relayP := fakePeer(t)
+
+		registerRelayIngress("relay-1", port, relayP)
+
+		snap := buildSnapshot("203.0.113.1:3478")
+		e := findEntry(t, snap, "relay-1")
+		if e.Ingress != "" {
+			t.Errorf("port %d: the directory advertised ingress %q; a port outside 1..65535 is not a port and must not reach the signed snapshot", port, e.Ingress)
+		}
+		if e.RelayEligible() {
+			t.Errorf("port %d: the relay is still relay-eligible; an entry a client cannot dial must not be offered as a hop", port)
+		}
+		// Still registered, still a rendezvous peer and a mesh-walk courier — one
+		// malformed advisory field must not cost the network a working node.
+		if e.Addr == "" {
+			t.Errorf("port %d: the relay lost its signaling address too — only relay-eligibility depends on the port", port)
+		}
+	}
+}
+
+// TestBoundaryIngressPortsAreAccepted is the non-vacuity half: the check is a range and
+// not a blanket rejection, so both ends of the valid range still advertise.
+func TestBoundaryIngressPortsAreAccepted(t *testing.T) {
+	for _, port := range []int{1, 65535} {
+		setPC(t)
+		resetRegistry(t)
+		relayP := fakePeer(t)
+
+		registerRelayIngress("relay-1", port, relayP)
+
+		e := findEntry(t, buildSnapshot("203.0.113.1:3478"), "relay-1")
+		want := net.JoinHostPort(relayP.LocalAddr().(*net.UDPAddr).IP.String(), strconv.Itoa(port))
+		if e.Ingress != want {
+			t.Errorf("port %d: ingress = %q, want %q — %d is a valid port and must still advertise", port, e.Ingress, want, port)
+		}
 	}
 }
 

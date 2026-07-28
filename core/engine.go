@@ -685,6 +685,21 @@ type wire struct {
 	// it. Set only by a client at RelayHops >= 2; absent otherwise, which keeps an
 	// ordinary connect byte-identical to a pre-#142 one.
 	FirstHop string `json:"firstHop,omitempty"`
+	// Nonce is this client's per-connect idempotency key (issue #1, ADR-0042 §2):
+	// one fresh value per pairing REQUEST, repeated identically on every copy sendN
+	// puts on the wire. The coordinator assigns the first copy it sees, remembers the
+	// answer against (our source address, this nonce), and replays it for the rest.
+	//
+	// It is what makes one request one assignment. Without it the coordinator drew a
+	// fresh randomized exit per COPY, so a single request produced several exits and
+	// whichever reply a client kept was the exit it had chosen — country-only
+	// assignment (#146) undone by retransmission. Required on a connect: a coordinator
+	// refuses one without it (connect-needs-nonce).
+	//
+	// Minted per attemptWith call rather than per Connect(), because the mode ladder's
+	// direct and relay attempts are different requests and must be answered
+	// separately. See newConnectNonce.
+	Nonce string `json:"nonce,omitempty"`
 	// ExcludeSessions names sessions this client was minted whose exits it just failed
 	// against, so a retry is not handed the same broken exit (issue #146; ADR-0035's
 	// relay dedupe applied to exits). Sessions rather than exit ids so that excluding
