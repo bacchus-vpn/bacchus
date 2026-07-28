@@ -447,3 +447,51 @@ only the coordinator and the peer relay's transport faked. A second suite drives
 real coordinator handler, because the client half had been tested against a fake
 coordinator and the coordinator half against nothing — so a build that ignored
 `firstHop` entirely passed the repository. 19 mutations now run with no survivors.
+
+## Amendment (issue #11, 2026-07-28): the ingress port is range-checked, and the operator tag's trust bound stated
+
+Two hardening items the independent review of #124 (PR #126, §9 item 3) raised and
+recorded as non-blocking. Neither is a correctness fix; the load-bearing
+network-diversity anchor is unchanged and remains the client-side IP-derived AS of §4.
+
+**The self-reported `IngressPort` is range-checked at register.** Only the *port* of a
+relay's forwarding ingress comes from the node — `buildSnapshot` supplies the host from
+the address the coordinator observed, which is what lets §4 trust an IP-derived AS — and
+nothing checked that the port was a port. A relay reporting `70000`, or a negative
+number, was advertised in the **signed** directory as `observedIP:70000`: an address no
+client can dial. A port outside `1..65535` is now ignored at register, so such a relay
+advertises no ingress and is, by `Entry.RelayEligible`, simply not a hop.
+
+Ignoring the port rather than refusing the register is deliberate. The relay is otherwise
+perfectly serviceable — it can still splice, still act as a mesh-walk courier, still
+carry a country — and only its relay-*eligibility* depends on a usable port. Refusing the
+whole registration over one malformed advisory field would cost the network a working
+node to punish a mistake that only harms the node making it.
+
+It is worth doing at all, given the relay only harms itself and §4 rejects the address on
+dial, because the signed snapshot is the artifact this project asks clients to trust.
+Publishing an entry the coordinator could see was undialable at register time spends a
+client's hop-selection attempt and its dial timeout on a node that was never going to
+answer.
+
+**The operator tag is trustworthy only as far as node-id authentication is.** §6/§7 and
+the #124 amendment above establish that `Operator` is coordinator-side truth rather than
+a node self-report, and that is true and it is the reason the tag is worth signing at
+all. It is not the whole bound, and the missing half is worth stating plainly: the tag is
+keyed by the node id (`operators[m.ID]`), and the node id is **self-asserted at
+register**. With admission (#42) disabled — which is fail-open, and the default — a node
+can register under an arbitrary id and inherit whatever operator assignment that id
+carries in the coordinator's file. The tag therefore says "the operator's file assigns
+this *id* to that subtree", not "this *node* belongs to that operator", and those two
+statements come apart exactly when ids are not authenticated.
+
+That stays within the advisory-only model §6 already declares, and it does not change
+what the tag is used for. What it changes is how much weight the sentence "operator
+identity is not IP-derivable, so it is legitimately signed" can carry: signing binds the
+tag to the coordinator's assertion, and the coordinator's assertion is bounded by
+whatever authenticates the id it is keyed on. **The real diversity anchor for §4 is the
+IP-derived AS, not this tag** — an observed address cannot be re-registered under
+somebody else's name — and enabling admission (#42) is what raises the operator tag from
+advisory to something a hostile node cannot simply claim.
+
+Part of #76; closes neither it nor #124.

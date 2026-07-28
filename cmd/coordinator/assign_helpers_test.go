@@ -65,5 +65,24 @@ func wantCountry(t *testing.T, reply wire, cc string, exits, available int) {
 
 // connectCountry drives a connect for a country, the only thing a client may ask for.
 func connectCountry(cc, mode string, from *net.UDPConn) {
-	handle(wire{Type: "connect", Country: cc, Mode: mode}, from.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{Country: cc, Mode: mode}, from.LocalAddr().(*net.UDPAddr))
+}
+
+// dialConnect drives one connect through the real handler, stamping the per-connect
+// idempotency key that every connect now carries (issue #1, ADR-0042 §2). m.Type is set
+// here so a caller cannot forget it, and a nonce already present is left alone — that is
+// how a test drives a RETRANSMIT, by sending the same one twice.
+//
+// It exists so no test has to remember the nonce. A connect without one is refused
+// outright, so a call site that forgot it would not fail loudly as a protocol error; it
+// would quietly become a test that asserts on a refusal, which is how a fixture stops
+// exercising the thing it was written for. Routing every connect through one helper
+// makes that impossible by construction. Tests whose subject IS the nonce build the
+// datagram by hand.
+func dialConnect(m wire, from *net.UDPAddr) {
+	m.Type = "connect"
+	if m.Nonce == "" {
+		m.Nonce = randID()
+	}
+	handle(m, from)
 }

@@ -27,6 +27,10 @@ func resetRegistry(t *testing.T) {
 	relays = map[string]*relayNode{}
 	exits = map[string]*exitNode{}
 	sessions = map[string]*session{}
+	// Per-connect idempotency records (issue #1). Cleared with the rest: a record left
+	// behind would replay a previous test's session id into this one, and — because a
+	// replay is answered exactly like a first assignment — it would do so invisibly.
+	mintedConnects = map[string]*mintedConnect{}
 	mu.Unlock()
 }
 
@@ -186,7 +190,7 @@ func TestConnectRejectsMissingCredential(t *testing.T) {
 	setAdmission(t, pub, nil)
 	peer := fakePeer(t)
 
-	handle(wire{Type: "connect", Country: "NL", Mode: "direct"}, peer.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{Country: "NL", Mode: "direct"}, peer.LocalAddr().(*net.UDPAddr))
 
 	m, ok := readReply(t, peer, time.Second)
 	if !ok || m.Type != "reject" {

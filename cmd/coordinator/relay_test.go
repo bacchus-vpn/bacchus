@@ -51,7 +51,7 @@ func registerRelay(id string, from *net.UDPConn) {
 // specific exit asks for its country — which in these single-exit-per-country
 // fixtures selects exactly that exit. See countryOf.
 func connectRelay(exitID string, from *net.UDPConn) {
-	handle(wire{Type: "connect", Country: countryOf(exitID), Mode: "relay"}, from.LocalAddr().(*net.UDPAddr))
+	dialConnect(wire{Country: countryOf(exitID), Mode: "relay"}, from.LocalAddr().(*net.UDPAddr))
 }
 
 // TestConnectRelayPrefersPeerRelay: with a distinct relay registered, a

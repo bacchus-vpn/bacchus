@@ -251,6 +251,59 @@ func TestRealClientPairsByCountryAndLearnsItsExit(t *testing.T) {
 	}
 }
 
+// TestRealConnectIsOneAssignmentPerRequest is #1's acceptance across the real wire, and
+// the one that would have caught the bug in the first place.
+//
+// The measurement ADR-0042 §2 recorded: one Connect() minted SIX sessions across three
+// distinct exits, because sendN sends each connect three times and connectVia does that
+// once per mode. Both halves of that count are real — six datagrams — and only one of
+// them is a decision. A request is a decision; a retransmission is not.
+//
+// So the invariant asserted here is not a number, it is a correspondence: the
+// coordinator holds exactly as many sessions as it received distinct pairing REQUESTS.
+// A number would have to be updated whenever the mode ladder changed; the
+// correspondence holds regardless, and it is exactly what fails when the copies of one
+// request are assigned independently again.
+//
+// Three exits in the country, deliberately: with one, resampling returns the same exit
+// by construction and the whole failure is invisible.
+func TestRealConnectIsOneAssignmentPerRequest(t *testing.T) {
+	resetRegistry(t)
+	t.Cleanup(func() { resetRegistry(t) })
+	addr := coordinatorUnderTest(t)
+	for i := 0; i < 3; i++ {
+		registerExitIn(t, "NL")
+	}
+
+	eng, _ := newRealClient(t, addr, "NL")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	// Fails: the fixture exits are addresses nothing answers on, so no transport comes
+	// up. What is under test is how many assignments the pairing that precedes it made.
+	_ = eng.Connect(ctx)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sessions) == 0 {
+		t.Fatal("the client never paired at all — the fixture is broken")
+	}
+	if len(sessions) != len(mintedConnects) {
+		t.Errorf("one Connect() minted %d session(s) from %d distinct pairing request(s) — a retransmitted copy must replay its request's answer, not draw a fresh exit (ADR-0042 §2)",
+			len(sessions), len(mintedConnects))
+	}
+	// And the sharper statement of the same thing: whatever the ladder did, it cannot
+	// have produced more assignments than it made requests, and each request's answer
+	// is one exit. A client that saw several exits per request could keep the one it
+	// wanted, which is the pin #146 removed.
+	if len(sessions) > len(mintedConnects) {
+		var got []string
+		for _, s := range sessions {
+			got = append(got, s.exitID)
+		}
+		t.Errorf("exits assigned across %d request(s): %v", len(mintedConnects), got)
+	}
+}
+
 // TestRealClientSurfacesACountryRefusal is #147's acceptance across the real wire: a
 // country the coordinator does not know must reach the client as a stated reason, not
 // as silence. Before this, awaitSession discarded wire.Reason and both named refusals

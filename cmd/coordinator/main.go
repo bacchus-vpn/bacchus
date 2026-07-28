@@ -128,6 +128,32 @@ type wire struct {
 	// layer this coordinator must not be able to read. ADR-0042 §9 states the
 	// residual and why it was accepted rather than closed.
 	FirstHop string `json:"firstHop,omitempty"`
+	// Nonce is the client's per-connect idempotency key (issue #1, ADR-0042 §2): one
+	// fresh value per pairing REQUEST, repeated byte-identically across the copies
+	// core's sendN puts on the wire against UDP loss. This coordinator answers the
+	// first copy by minting a session, remembers that answer under (source address,
+	// nonce), and REPLAYS it for every later copy rather than assigning again.
+	//
+	// Without it one request was several assignments. sendN sends each connect three
+	// times and this handler processed every copy independently, minting a session per
+	// copy through a fresh randomized chooseExit — so one Connect() drew three
+	// independent exits inside the country and the client could simply keep the reply
+	// naming the exit it wanted. That is exact-exit pinning reconstructed out of packet
+	// loss handling, and it inflated exitSessions by the same factor, which is the one
+	// ranking term a node cannot forge but a CLIENT could.
+	//
+	// REQUIRED on a connect, not optional (refuseNoNonce). An idempotency key a client
+	// may omit is not a guard, it is an opt-in: the client that wants several draws is
+	// exactly the one that would leave the field off. ADR-0042 already broke this wire
+	// once for #146 on the owner's "no installed base before v1" call, and both halves
+	// of this one land together too.
+	//
+	// It is scoped per pairing request, NOT per Connect(): connectVia walks the mode
+	// ladder and each mode is a genuinely different request (a direct pairing and a
+	// relayed one are not interchangeable answers), so each carries its own nonce and
+	// is answered on its own merits. What is collapsed is retransmission, which is the
+	// thing that was never a decision.
+	Nonce string `json:"nonce,omitempty"`
 	// ExcludeSessions names sessions THIS coordinator minted for this client whose
 	// exits it has just failed against, so a retry is not handed the same broken exit
 	// (issue #146; the rotation-dedupe idea ADR-0035 gave relays). The coordinator
@@ -265,7 +291,22 @@ type session struct {
 	// is, which is the one input to the ranking that this coordinator observed itself
 	// rather than being told. Unlike relayID it is never empty for a live session —
 	// every session has an exit.
-	exitID   string
+	exitID string
+	// signaled records whether ANY offer/answer/candidate has been relayed for this
+	// session since it was minted — that is, whether the client ever tried to bring
+	// the transport up over it. Every transport in the repo drives its handshake
+	// through this coordinator (core.Signaler; WebRTC exchanges SDP and candidates,
+	// Reality an offer and an answer), so a session that has never seen a frame was
+	// paired and then abandoned.
+	//
+	// It exists because prune EXEMPTS peer-relay sessions from the idle sweep (their
+	// liveness is their relay's — issue #96/#105), and that exemption was load-bearing
+	// for the harvest #1 describes: a client minting relay-mode sessions it never used
+	// accumulated entries that no reaper would ever touch, so the exits it had been
+	// assigned stayed nameable in ExcludeSessions indefinitely while a direct-mode
+	// client's aged out in two minutes. Distinguishing "never brought up" from "up and
+	// quiet" reaps the first without weakening the second.
+	signaled bool
 	lastSeen time.Time // last signaling activity; the rendezvous state is reaped sessionTTL after it goes quiet
 }
 
@@ -476,10 +517,16 @@ func handle(m wire, src *net.UDPAddr) {
 			// ingressPort is the relay's onion-forward listener port (issue #124); the
 			// coordinator pairs it with the observed src IP in buildSnapshot to advertise a
 			// forwarding ingress. Absent (zero) => this relay is not advertised as a hop.
+			// It is range-checked on the way in (issue #11) — see validIngressPort.
 			// Declared limits (issue #143) are read off every register because this
 			// assignment replaces the entry wholesale — a field carried once would be
 			// silently dropped 10s later.
-			relays[m.ID] = &relayNode{id: m.ID, addr: src, ingressPort: m.IngressPort, speedCap: m.SpeedCap, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
+			port := m.IngressPort
+			if port != 0 && !validIngressPort(port) {
+				log.Printf("relay %s (%s) reported ingress port %d, outside 1..65535 — ignoring it; this relay advertises no forwarding ingress and is not relay-eligible (issue #11)", m.ID, src, port)
+				port = 0
+			}
+			relays[m.ID] = &relayNode{id: m.ID, addr: src, ingressPort: port, speedCap: m.SpeedCap, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
 		case "exit":
 			// An exit, unlike a relay, advertises a data-plane endpoint of its own, so
 			// its country is derived against that too: signaling arriving from one
@@ -498,7 +545,22 @@ func handle(m wire, src *net.UDPAddr) {
 					// Loud, because it is silently disqualifying: with a country the
 					// only thing a client can ask for (issue #146), an exit without one
 					// is registered, healthy, and unreachable.
-					log.Printf("WARNING: exit %s has NO country (observed address did not resolve and no usable -country hint) — it will not be offered to any client (issues #136/#146)", m.ID)
+					//
+					// The reason is named, because the three ways to get here have
+					// nothing in common from an operator's desk. An unresolved address
+					// is a database or a staging problem; a split endpoint is a
+					// deliberate forwarding setup; and no endpoint at all is a missing
+					// flag on an otherwise perfectly ordinary direct-mode exit — the
+					// last of which would be actively misdiagnosed by a message saying
+					// the address did not resolve, since it resolved fine (issue #2).
+					switch countrySrc {
+					case countryNoEndpoint:
+						log.Printf("WARNING: exit %s has NO country: its address resolved, but it advertises no data-plane endpoint and -geoip-required is set, so this coordinator cannot tie the resolution to where its traffic egresses. Set -advertise to the address it serves from. It will not be offered to any client (issues #2/#136/#146)", m.ID)
+					case countrySplit:
+						log.Printf("WARNING: exit %s has NO country: it signals from %s but advertises %s, and -geoip-required refuses a country this coordinator cannot tie to the egress path. It will not be offered to any client (issues #136/#146, ADR-0042 §8)", m.ID, src.IP, m.Addr)
+					default:
+						log.Printf("WARNING: exit %s has NO country (observed address did not resolve and no usable -country hint) — it will not be offered to any client (issues #136/#146)", m.ID)
+					}
 				}
 			}
 			exits[m.ID] = &exitNode{id: m.ID, tcpAddr: m.Addr, udp: src, speedCap: m.SpeedCap, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
@@ -549,6 +611,23 @@ func handle(m wire, src *net.UDPAddr) {
 		// Client admission (issue #42): matchmaking is gated too, so a leaked
 		// exit list can't be turned into a live session without a credential.
 		if !admit(m, src, admission.RoleClient, "") {
+			return
+		}
+		// Per-connect idempotency (issue #1, ADR-0042 §2). Each connect is sent
+		// several times against UDP loss, and before this every copy was assigned
+		// independently — so one request drew several exits and the client could keep
+		// whichever it liked. The nonce identifies the REQUEST rather than the
+		// datagram: the first copy is assigned, its answer is remembered, and every
+		// later copy replays it.
+		//
+		// Refused rather than tolerated when absent. A client that omitted the field
+		// would get back exactly the pre-#1 behaviour, which is the behaviour the
+		// attacker wants, so an optional key would guard only the honest.
+		if m.Nonce == "" || len(m.Nonce) > maxNonceLen {
+			send(src, wire{Type: "error", Reason: string(refuseNoNonce), Country: geoip.Canonical(m.Country)})
+			return
+		}
+		if replayMintedConnect(src, m.Nonce, now) {
 			return
 		}
 		// The client names a COUNTRY; this coordinator picks the exit inside it
@@ -628,11 +707,12 @@ func handle(m wire, src *net.UDPAddr) {
 				return
 			}
 			sessions[sid] = &session{client: src, peer: e.udp, exitID: exitID, lastSeen: now}
-			send(e.udp, wire{Type: "assign", Session: sid}) // no exitAddr => egress directly
 			// ExitID tells the client WHICH exit it was given (issue #146). It is not
 			// informational: an exit's id is its Noise static public key (ADR-0009),
 			// so without it the client cannot bring up the end-to-end channel at all.
-			send(src, wire{Type: "session", Session: sid, ExitID: exitID, Release: coordRelease})
+			pairAndReply(src, m.Nonce, e.udp,
+				wire{Type: "assign", Session: sid}, // no exitAddr => egress directly
+				wire{Type: "session", Session: sid, ExitID: exitID, Release: coordRelease}, now)
 			log.Printf("session %s DIRECT: client %s <-> exit %s(%s)", sid, src, e.id, e.country)
 		} else if r := pickRelay(e.id); r != nil {
 			// Peer relay (issue #17, ADR-0033): a Bacchus relay node blind-splices
@@ -642,7 +722,6 @@ func handle(m wire, src *net.UDPAddr) {
 			// relay carries the session so reselectDeadRelays can notice if it later
 			// dies mid-session and nudge the client to re-establish (issue #96).
 			sessions[sid] = &session{client: src, peer: r.addr, relayID: r.id, exitID: exitID, lastSeen: now}
-			send(r.addr, wire{Type: "assign", Session: sid, ExitAddr: e.tcpAddr})
 			// The reply carries the relay's opaque dedupe tag (issue #56) so a client
 			// rotating the pool can skip a second member that hands back this same relay
 			// after a failed dial. It is derived from r.id, not r.addr, so it is stable
@@ -653,7 +732,9 @@ func handle(m wire, src *net.UDPAddr) {
 			// that is also a hop holds both ends of the chain (core/relaychain.go
 			// verifyChainDisjoint). pickRelay already excludes the node it paired — the
 			// chain's head — but not the client's later hops, which it cannot see.
-			send(src, wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayPeer, RelayTag: relayTag(r.id), Release: coordRelease})
+			pairAndReply(src, m.Nonce, r.addr,
+				wire{Type: "assign", Session: sid, ExitAddr: e.tcpAddr},
+				wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayPeer, RelayTag: relayTag(r.id), Release: coordRelease}, now)
 			if chained {
 				// Deliberately not the shape of the line below it. There is no exit to
 				// name, and printing e.id under an "exit" heading would record a hop as a
@@ -670,8 +751,9 @@ func handle(m wire, src *net.UDPAddr) {
 			// TURN relay candidate only if a direct hole-punch fails — TURN is the
 			// last resort, not the default. E2E again terminates at the exit.
 			sessions[sid] = &session{client: src, peer: e.udp, exitID: exitID, lastSeen: now}
-			send(e.udp, wire{Type: "assign", Session: sid}) // no exitAddr => exit egresses directly
-			send(src, wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayTURN, Release: coordRelease})
+			pairAndReply(src, m.Nonce, e.udp,
+				wire{Type: "assign", Session: sid}, // no exitAddr => exit egresses directly
+				wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayTURN, Release: coordRelease}, now)
 			log.Printf("session %s TURN-FALLBACK: client %s <-> exit %s(%s) (no peer relay available)", sid, src, e.id, e.country)
 		} else {
 			// Neither a peer relay nor a directly-reachable exit — nothing to pair.
@@ -684,6 +766,10 @@ func handle(m wire, src *net.UDPAddr) {
 			return
 		}
 		s.lastSeen = now // signaling keeps the rendezvous entry alive; silence lets prune reap it
+		// The first frame is what tells a paired session apart from a merely MINTED one
+		// (issue #1). It matters only for the peer-relay disposition, which prune
+		// exempts from the idle sweep — see session.signaled and prune.
+		s.signaled = true
 		other := s.peer
 		if src.String() == s.peer.String() {
 			other = s.client
@@ -719,12 +805,25 @@ func prune(now time.Time) {
 			// reaper, dropping it when that relay goes stale. (A session whose client
 			// vanished while its relay stays up therefore lingers until the relay
 			// dies; the coordinator has no client-side liveness signal — see ADR-0033.)
-			continue
+			//
+			// That exemption applies to a session that was BROUGHT UP, which is what
+			// signaled records. One that never saw a single handshake frame was paired
+			// and abandoned, and exempting it too is what let a client harvest
+			// relay-mode sessions no reaper would ever touch (issue #1): the exits they
+			// name stayed excludable forever, where a direct-mode client's aged out in
+			// sessionTTL. Reaped on the same idle bound as any other unused session —
+			// which for an unsignaled entry is measured from when it was minted, since
+			// nothing has refreshed lastSeen since.
+			if s.signaled || now.Sub(s.lastSeen) <= sessionTTL {
+				continue
+			}
 		}
 		if now.Sub(s.lastSeen) > sessionTTL {
 			delete(sessions, id)
 		}
 	}
+	// Per-connect idempotency records expire on their own, shorter window (issue #1).
+	pruneMintedConnects(now)
 }
 
 // reselectDeadRelays is the coordinator-side liveness check on the peer relay that
@@ -850,6 +949,29 @@ func pickRelay(excludeID string) *relayNode {
 	}
 	return nil
 }
+
+// validIngressPort reports whether a relay's self-reported onion-forward listener port
+// is a port at all (issue #11, ADR-0038 §9 item 3).
+//
+// Only the PORT of a relay's forwarding ingress is taken from the node — buildSnapshot
+// supplies the host from the address this coordinator OBSERVED, so a relay cannot claim
+// an ingress in an AS it does not occupy — and this is the one check that half needs.
+// A relay reporting 70000, or a negative number, was advertised in the SIGNED directory
+// as `observedIP:70000`, an address no client can dial.
+//
+// It is self-inflicted (a relay reporting nonsense only makes itself undialable) and
+// §4 rejects it on dial, so this is hardening rather than a correctness fix. It is worth
+// having because the signed directory is the artifact this project asks clients to
+// trust: publishing an entry that cannot possibly work spends a client's hop-selection
+// attempt and its dial timeout on a node the coordinator could see was unusable when it
+// registered.
+//
+// Out of range means "advertises no ingress" rather than "refuse the register". The
+// relay is otherwise perfectly serviceable — it can still splice, still act as a
+// mesh-walk courier, still carry a country — and only its relay-ELIGIBILITY (#124's
+// field-level gate) depends on a usable port. Refusing the whole registration over one
+// malformed advisory field would cost the network a working node.
+func validIngressPort(p int) bool { return p >= 1 && p <= 65535 }
 
 // servingCheck applies the min-serving-version fence (issue #36, ADR-0015) to a
 // registering node's reported release. ok is false, with a safe-to-log reason
@@ -989,7 +1111,39 @@ func buildSnapshot(advertise string) coldstart.Snapshot {
 		// nor collided against, and at depth 2 the head is the only peeling hop there
 		// is. The operators map is keyed by node id and has never been role-scoped, so
 		// this reads a value that was already there.
-		entries = append(entries, coldstart.Entry{Role: "exit", ID: e.id, Country: e.country, Addr: e.tcpAddr, Operator: operators[e.id]})
+		// Country ships with the provenance that produced it (issue #3). Without it,
+		// three different claims arrived here indistinguishable: a country resolved
+		// from an observed address, one taken verbatim from the node's own -country
+		// flag, and one resolved from an address this coordinator can see disagrees
+		// with the endpoint the exit says it serves traffic from. The signature proves
+		// this coordinator said the country; it says nothing about which of the three
+		// it was, and ADR-0042 §9 made this artifact the exit-discovery path for
+		// chaining — so a chaining client picks its jurisdiction out of exactly this
+		// field with no live reply to check it against.
+		//
+		// # A split-endpoint exit STAYS in the snapshot, and that is a decision
+		//
+		// The alternative — withholding it — was considered and is worse, because this
+		// snapshot is not only a jurisdiction menu. It is also the mesh-walk courier
+		// list (issue #31, ADR-0037): the relay and exit entries are the peers a client
+		// that has lost every coordinator asks for a fresh directory. Dropping a
+		// working courier because of a property of its COUNTRY withdraws recovery
+		// capacity at exactly the moment recovery is what the client needs, to fix a
+		// problem that has nothing to do with reaching it.
+		//
+		// It would also put this surface out of step with connect. Without
+		// -geoip-required a split-endpoint exit keeps its signaling-derived country and
+		// is assignable (ADR-0042 §8) — a directory that hid what connect would hand
+		// out is the same class of disagreement §4 forbids in the other direction, and
+		// a client would see a country vanish from the directory while the coordinator
+		// happily pairs it there.
+		//
+		// So it ships, labelled, and the consumer decides: Entry.CountryContradicted is
+		// the fail-closed test, and core/relaychain.go refuses such an exit as a
+		// terminating exit while still using it as a courier. Under -geoip-required the
+		// question does not arise — such an exit has no country at all (§8, issue #2)
+		// and ships as the country-less exit it is.
+		entries = append(entries, coldstart.Entry{Role: "exit", ID: e.id, Country: e.country, CountrySource: e.countrySource, Addr: e.tcpAddr, Operator: operators[e.id]})
 	}
 	for id, r := range relays {
 		if r.exhausted {
@@ -1016,7 +1170,13 @@ func buildSnapshot(advertise string) coldstart.Snapshot {
 		// relay's claim about itself — the same standard Ingress and Operator are held
 		// to right below. A relay's country was silently dropped before #136: it was
 		// registered and then had nowhere to live.
-		e := coldstart.Entry{Role: "relay", ID: id, Country: r.country, Addr: r.addr.String(), Operator: operators[id]}
+		// The provenance rides along for a relay too (issue #3). A relay's Addr and
+		// Ingress are both built from the observed source IP so they cannot disagree
+		// with each other, but its COUNTRY still falls back to the node's own -country
+		// hint whenever that address resolves to nothing — which is every node in a
+		// deployment with no database staged. A consumer that cannot see the difference
+		// is reading a self-report as a coordinator-established fact.
+		e := coldstart.Entry{Role: "relay", ID: id, Country: r.country, CountrySource: r.countrySource, Addr: r.addr.String(), Operator: operators[id]}
 		if r.ingressPort != 0 {
 			e.Ingress = net.JoinHostPort(r.addr.IP.String(), strconv.Itoa(r.ingressPort))
 		}
