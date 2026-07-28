@@ -767,7 +767,7 @@ func TestSelectHopsSpreadsAcrossOperators(t *testing.T) {
 		{id: "5", dial: "127.0.0.1:5", operator: "initech"},
 	}
 	for i := 0; i < 40; i++ { // selection is randomized; the invariant must hold every time
-		got, err := selectHops(cand, 3, "")
+		got, _, err := selectHops(cand, 3, "", nil)
 		if err != nil {
 			t.Fatalf("selectHops: %v", err)
 		}
@@ -793,7 +793,7 @@ func TestSelectHopsNeverReusesTheExitOrAHop(t *testing.T) {
 		{id: "a", dial: "127.0.0.1:2", pairable: true},
 		{id: "b", dial: "127.0.0.1:3"},
 	}
-	got, err := selectHops(cand, 2, "exit")
+	got, _, err := selectHops(cand, 2, "exit", nil)
 	if err != nil {
 		t.Fatalf("selectHops: %v", err)
 	}
@@ -818,7 +818,7 @@ func TestSelectHopsHeadMustBePairable(t *testing.T) {
 		{id: "a", dial: "127.0.0.1:2"}, // relay-only: fine as a later hop, never the head
 		{id: "b", dial: "127.0.0.1:3"},
 	}
-	if _, err := selectHops(cand, 1, ""); err == nil {
+	if _, _, err := selectHops(cand, 1, "", nil); err == nil {
 		t.Fatal("selected a chain head the coordinator cannot pair a client to; want an error")
 	}
 }

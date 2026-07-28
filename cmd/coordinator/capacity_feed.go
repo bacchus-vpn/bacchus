@@ -8,6 +8,7 @@ import (
 
 	"github.com/bacchus-vpn/bacchus/core/accounting"
 	"github.com/bacchus-vpn/bacchus/core/admission"
+	"github.com/bacchus-vpn/bacchus/core/asn"
 	"github.com/bacchus-vpn/bacchus/core/capacity"
 )
 
@@ -121,7 +122,7 @@ func handleCapacityReport(m wire, src *net.UDPAddr) {
 	if err := accounting.VerifyReport(r, m.ReportSig); err != nil {
 		return
 	}
-	as := observedAS(src)
+	as := observedAS(src, asnTable)
 	if as == "" {
 		return // no attributable AS: an uncappable sample is a hole, not a kindness (design §6.4)
 	}
@@ -178,21 +179,54 @@ func sampleFrom(r accounting.Receipt, as string) capacity.Sample {
 // unit of Sybil cost (one AS, one vote; design §6.4), so letting a client state its own
 // would make that cost zero.
 //
-// This is a COARSE stand-in: with no ASN database wired yet it masks the IP to a routing
-// prefix (/24 v4, /48 v6) as a "same-network" proxy. That is enough for the untrusted
-// stream, which clamps to the ceiling regardless of how many distinct ASes attest — the
-// proxy only affects how readily an honest node reaches the ceiling, never how far an
-// attacker can push past it. A real ASN lookup is required before the TRUSTED stream is
-// fed (it is what the ~4:1 AS bound is denominated in), and is a follow-up — noted in
-// ADR-0041 alongside the unfed-trusted seam.
-func observedAS(src *net.UDPAddr) string {
+// It resolves that address against an independent AS table (core/asn, issue #23) when
+// one is staged. That is the real ASN lookup ADR-0041 line 173 recorded as required
+// before the TRUSTED stream is fed: the ~4:1 AS bound is denominated in autonomous
+// systems, so until the AS is an actual AS the bound is denominated in a proxy.
+//
+// # The prefix mask is now the NAMED fallback, not the silent default
+//
+// With no table staged it still masks the IP to a routing prefix (/24 v4, /48 v6) as a
+// "same-network" proxy, which is exactly what this function did before #23. The change
+// is that this is now the fallback branch of a function whose primary answer is a real
+// AS, rather than the only thing it ever does — asFallback says so in its name, and a
+// caller reading a key can tell which it got.
+//
+// Telling them apart matters, and not only for readability. The estimator counts
+// DISTINCT AS values to decide whether a node has been attested widely enough to rise
+// past the ceiling (capacity.Params.CeilingASes), so the two forms are not
+// interchangeable inputs: one real AS spread across several /24s counts as several
+// "ASes" under the mask and as one under the table. The mask therefore makes the
+// ceiling EASIER to reach than the AS bound intends. That was tolerable while only the
+// untrusted stream was fed — it clamps to the ceiling regardless, so the proxy only
+// affects how readily an honest node reaches it, never how far an attacker can push
+// past it — and it is precisely what stops being tolerable when the trusted stream is
+// fed. The two key spaces are kept syntactically disjoint (asn.AS renders "AS64496",
+// the fallback renders a CIDR) so a mixed window is visible rather than silent.
+func observedAS(src *net.UDPAddr, lookup asn.Lookup) string {
 	if src == nil || src.IP == nil {
 		return ""
 	}
-	if v4 := src.IP.To4(); v4 != nil {
+	if a, ok := asn.OfAddr(lookup, src.IP); ok {
+		return a.String()
+	}
+	return asFallback(src.IP)
+}
+
+// asFallback is the pre-#23 behaviour, kept and named: the observed IP masked to a
+// routing prefix as a coarse "same-network" stand-in for an AS.
+//
+// It is reached when no table is staged, and also when a staged table cannot place the
+// address — which on a local stack is every node, since they all register from
+// loopback and no AS announces 127.0.0.0/8. Returning a masked prefix there rather than
+// nothing is deliberate: an empty AS makes handleCapacityReport DROP the sample as
+// unattributable, so failing to fall back would silently stop the capacity feed on
+// every developer box and in the smoke stack.
+func asFallback(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
 		return v4.Mask(net.CIDRMask(24, 32)).String() + "/24"
 	}
-	return src.IP.Mask(net.CIDRMask(48, 128)).String() + "/48"
+	return ip.Mask(net.CIDRMask(48, 128)).String() + "/48"
 }
 
 // measuredUsable is capacity.Usable(declared, measured) for a node — the min(declared,

@@ -358,6 +358,7 @@ func main() {
 	operatorsPath := flag.String("operators", "secrets/operators.json", "path to the node->operator-tag assignment file (JSON object {\"nodeID\":\"operatorTag\"}), advertised in the signed directory for operator-diversity hop selection (issue #124, ADR-0038); a missing file means no operator tags")
 	geoipDir := flag.String("geoip", "", "path to an unzipped MaxMind GeoLite2-Country-CSV directory, used to derive each node's country from the source address this coordinator OBSERVES it register from (issue #136). Staged out of band and never committed; see docs/RUNNING.md. Empty DISABLES derivation and falls back to each node's self-reported -country tag.")
 	geoipRequired := flag.Bool("geoip-required", false, "refuse to fall back to a node's self-reported -country when its observed address does not resolve (issue #136). The hardened posture: no node self-report can reach a client's country choice. Off by default because every node in a local stack registers from loopback, which no database resolves. Requires -geoip.")
+	asnTablePath := flag.String("asn-table", "", "path to a disjoint IP->ASN table (`prefix<TAB>asn` rows, see core/asn), used to resolve a capacity attester's autonomous system from the source address this coordinator OBSERVES its report arrive from (issue #23, ADR-0044). The AS is the unit of Sybil cost the ~4:1 attestation bound is denominated in (ADR-0041). Staged out of band and never committed. Empty falls back to masking the observed IP to a routing prefix (/24, /48), which is what this coordinator did before the table existed.")
 	minServingVersion := flag.String("min-serving-version", "0.0.0", "minimum node release (MAJOR.MINOR.PATCH) this coordinator will assign work to; nodes below it are fenced from matchmaking until they update (issue #36, ADR-0015). Raise it past the grace window after a release to pull stragglers up. 0.0.0 disables the fence — every node serves regardless of version.")
 	policyRootPubKey := flag.String("policy-root-pubkey", "", "offline ROOT public key (hex) the signed network policy chains to (issue #39, ADR-0043). When set, this coordinator fetches a signed policy bundle and enforces the floors, fences and reserves inside it — numbers it cannot author, because it does not hold the key that signs them. Empty DISABLES signed policy and leaves this coordinator enforcing only its own flags. NOTE the direction of failure flips here: unlike -admission-pubkey and -min-serving-version, which fail OPEN when unset, a coordinator WITH a policy root configured stops assigning new work once its policy goes stale. Coordinators are a pool with client rotation, so one failing closed sheds to its peers.")
 	policySource := flag.String("policy-source", "", "where to fetch the signed policy bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at. Required when -policy-root-pubkey is set. Re-fetched every 10s and re-verified from scratch every time, delegation included.")
@@ -429,6 +430,13 @@ func main() {
 	// database: an operator who asked for derived countries must not silently get
 	// self-reported ones.
 	if err := setupGeoIP(*geoipDir, *geoipRequired); err != nil {
+		log.Fatal(err)
+	}
+	// Same discipline for the AS table (issue #23): loaded once here, before the packet
+	// loop, so handleCapacityReport reads asnTable without a lock. Fatal on a
+	// configured-but-bad table, for the same reason — an operator who asked for real AS
+	// resolution must not silently get the prefix-mask fallback under its name.
+	if err := setupASNTable(*asnTablePath); err != nil {
 		log.Fatal(err)
 	}
 	ua, err := net.ResolveUDPAddr("udp", *addr)
