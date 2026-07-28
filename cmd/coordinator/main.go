@@ -704,18 +704,6 @@ func handle(m wire, src *net.UDPAddr) {
 			send(src, wire{Type: "reject", Reason: reason})
 			return
 		}
-		// Connect-time device-credential verification (issue #50, ADR-0045). The
-		// account service's entitlement chain, verified offline against the anchored
-		// root and bound to the challenge issued to this source above.
-		//
-		// After the drain check deliberately: a coordinator that is not assigning
-		// anything should not spend ed25519 verifications on connects it is going to
-		// refuse regardless, and the client's response to a drain is to rotate away
-		// rather than to fix its credential. Before any assignment work, because a
-		// connect that fails here mints nothing at all.
-		if !admitDevice(m, src) {
-			return
-		}
 		// Per-connect idempotency (issue #1, ADR-0042 §2). Each connect is sent
 		// several times against UDP loss, and before this every copy was assigned
 		// independently — so one request drew several exits and the client could keep
@@ -731,6 +719,28 @@ func handle(m wire, src *net.UDPAddr) {
 			return
 		}
 		if replayMintedConnect(src, m.Nonce, now) {
+			return
+		}
+		// Connect-time device-credential verification (issue #50, ADR-0045). The
+		// account service's entitlement chain, verified offline against the anchored
+		// root and bound to the challenge issued to this source above.
+		//
+		// AFTER the idempotency replay, and that ordering is load-bearing rather than
+		// incidental. core's sendN puts three copies of every connect on the wire
+		// against UDP loss, and the challenge this gate spends is SINGLE USE. Run
+		// before the replay, the first copy spends the nonce and mints a session while
+		// copies two and three find it spent and are refused — one request answered
+		// with one session and two rejects. A retransmission is not a replay attack:
+		// it is the same request arriving twice, which is precisely what the
+		// idempotency layer already identifies and answers, so the later copies must
+		// never reach this gate at all.
+		//
+		// Reaching here means this is a genuinely new (source, nonce) pair. Still
+		// after the drain check, so a coordinator that is not assigning anything does
+		// not spend ed25519 verifications on connects it would refuse regardless, and
+		// still before any assignment work, because a connect that fails here mints
+		// nothing at all.
+		if !admitDevice(m, src) {
 			return
 		}
 		// The client names a COUNTRY; this coordinator picks the exit inside it

@@ -136,6 +136,22 @@ single use, a captured connect would be replayable at the same coordinator for t
 nonce's whole lifetime, and the challenge would be bounding the damage rather than
 preventing it.
 
+"Single use" means **one request**, not one datagram, and the distinction is
+load-bearing. `core`'s `sendN` puts three copies of every connect on the wire
+against UDP loss. A gate that spent a challenge per *datagram* would answer one
+request with one session and two rejects — so the challenge is bound to the
+connect nonce (issue #1's per-request idempotency key), which identifies the
+request rather than the datagram. Retransmissions of that request are answered; a
+*different* request re-presenting a spent challenge is a replay and is refused.
+
+For the same reason the gate runs **after** `replayMintedConnect`, not before it:
+once a request has been answered, its later copies must replay that answer without
+re-entering the gate at all. This was found by testing the gate against `sendN`'s
+actual retransmission behaviour rather than against single datagrams.
+
+A **failed** verification drops the challenge outright, so a rejected attempt
+cannot be retried against a nonce that is still live.
+
 `devicecred.MinChallenge` (16 bytes) is enforced on **both** sides: a verifier
 refuses a weak challenge and a device refuses to sign one. The coordinator picks
 the connect challenge and is not trusted to pick it well, so a device that signed

@@ -275,10 +275,17 @@ func TestConnectRefusalsAtTheGate(t *testing.T) {
 	}
 }
 
-// TestChallengeIsSingleUse. Without this a captured connect could be replayed at
-// the same coordinator for as long as the nonce lived, and the challenge would be
-// bounding the damage rather than preventing it.
-func TestChallengeIsSingleUse(t *testing.T) {
+// TestChallengeAnswersOneRequestNotOneDatagram is the distinction the gate has to
+// draw, and it cuts both ways.
+//
+// core's sendN puts three copies of one connect on the wire against UDP loss, so
+// refusing the second copy would refuse every honest client. But a SECOND request
+// re-presenting a spent challenge is a replay, and admitting it would mean a
+// captured connect stayed good for the nonce's whole lifetime.
+//
+// The connect nonce is what separates them: it identifies the request rather than
+// the datagram.
+func TestChallengeAnswersOneRequestNotOneDatagram(t *testing.T) {
 	setPC(t)
 	c := mintChain(t, chainWindow{})
 	setDeviceGate(t, c.rootPub, "coord-1")
@@ -287,17 +294,29 @@ func TestChallengeIsSingleUse(t *testing.T) {
 
 	ch := requestChallenge(t, peer, src)
 	m := c.connectMsg(t, "coord-1", ch)
+	m.Nonce = "request-A"
 
-	if !admitDevice(m, src) {
-		t.Fatal("the first use of a fresh challenge was refused")
+	// The three copies sendN puts on the wire are all answered.
+	for i := 0; i < 3; i++ {
+		if !admitDevice(m, src) {
+			t.Fatalf("copy %d of one request was refused — an honest client retransmits", i+1)
+		}
 	}
-	if admitDevice(m, src) {
-		t.Fatal("the SAME connect was admitted twice — the challenge is not single use")
+
+	// A DIFFERENT request re-presenting the same spent challenge is a replay.
+	replay := c.connectMsg(t, "coord-1", ch)
+	replay.Nonce = "request-B"
+	if admitDevice(replay, src) {
+		t.Fatal("a second request replayed a spent challenge")
 	}
 }
 
-// TestAFailedAttemptBurnsTheChallenge, so a captured chain cannot be retried
-// against a nonce that is still outstanding.
+// TestAFailedAttemptBurnsTheChallenge, so a rejected attempt cannot be retried
+// against a nonce that is still live.
+//
+// Both attempts carry the SAME connect nonce deliberately. That is the only way to
+// isolate the drop: a differing nonce is already refused by the request binding, so
+// a test using two nonces would pass whether or not a failure burns anything.
 func TestAFailedAttemptBurnsTheChallenge(t *testing.T) {
 	setPC(t)
 	c := mintChain(t, chainWindow{})
@@ -306,17 +325,23 @@ func TestAFailedAttemptBurnsTheChallenge(t *testing.T) {
 	src := peer.LocalAddr().(*net.UDPAddr)
 
 	ch := requestChallenge(t, peer, src)
+	const nonce = "one-request"
 
 	// A wrong-audience attempt against a live challenge.
-	if admitDevice(c.connectMsg(t, "wrong", ch), src) {
+	bad := c.connectMsg(t, "wrong", ch)
+	bad.Nonce = nonce
+	if admitDevice(bad, src) {
 		t.Fatal("a wrong-audience connect was admitted")
 	}
 	readReply(t, peer, time.Second)
 
-	// The correct connect against the SAME challenge must now fail too: the nonce
-	// is spent, not merely unsatisfied.
-	if admitDevice(c.connectMsg(t, "coord-1", ch), src) {
-		t.Fatal("a spent challenge was accepted on a second attempt")
+	// The correct connect, same request nonce, same challenge, must now fail too:
+	// the nonce is spent AND burned, not merely unsatisfied. Otherwise a rejected
+	// attempt buys unlimited further attempts against a challenge that is still live.
+	good := c.connectMsg(t, "coord-1", ch)
+	good.Nonce = nonce
+	if admitDevice(good, src) {
+		t.Fatal("a burned challenge was accepted on a second attempt")
 	}
 }
 
@@ -366,7 +391,7 @@ func TestExpiredChallengeIsRefused(t *testing.T) {
 		t.Fatal("issue returned nothing")
 	}
 	// One nanosecond before expiry it is still usable.
-	if got := s.consume("peer", now.Add(deviceChallengeTTL-time.Nanosecond)); got == nil {
+	if got := s.spend("peer", "req-1", now.Add(deviceChallengeTTL-time.Nanosecond)); got == nil {
 		t.Fatal("a challenge expired before its TTL")
 	}
 
@@ -376,7 +401,7 @@ func TestExpiredChallengeIsRefused(t *testing.T) {
 	}
 	// Exactly on expiry it is dead — the same strict boundary the credential
 	// windows use.
-	if got := s.consume("peer", now.Add(deviceChallengeTTL)); got != nil {
+	if got := s.spend("peer", "req-2", now.Add(deviceChallengeTTL)); got != nil {
 		t.Fatal("a challenge exactly at its expiry was still accepted")
 	}
 }
@@ -404,7 +429,7 @@ func TestChallengeStoreIsBounded(t *testing.T) {
 		t.Fatalf("store holds %d entries, above the %d cap", got, testCap)
 	}
 	// The honest client's challenge survived the flood and is still spendable.
-	if got := s.consume("honest-client", now); got == nil {
+	if got := s.spend("honest-client", "req", now); got == nil {
 		t.Fatal("a live challenge was evicted by a flood of spoofed sources")
 	}
 
@@ -426,4 +451,57 @@ func dummyChallenge() string {
 		b[i] = 0x5A
 	}
 	return base64.StdEncoding.EncodeToString(b)
+}
+
+// TestRetransmittedConnectIsNotRefusedByTheGate.
+//
+// core's sendN puts THREE copies of every connect on the wire against UDP loss
+// (core/client.go). Per-connect idempotency (issue #1, ADR-0042 §2) exists exactly
+// so the later copies replay the first one's answer instead of drawing a fresh
+// exit — but the device gate spends a challenge, so a gate that treated each
+// DATAGRAM as a fresh use would refuse copies two and three, and one request would
+// be answered with one session and two rejects.
+//
+// A retransmission is not a replay attack: it is the same request arriving twice.
+// Verified end to end through handle() with a real exit registered, so this covers
+// the gate, the idempotency layer and the ordering between them together.
+func TestRetransmittedConnectIsNotRefusedByTheGate(t *testing.T) {
+	setPC(t)
+	resetRegistry(t)
+	c := mintChain(t, chainWindow{})
+	setDeviceGate(t, c.rootPub, "coord-1")
+	client := fakePeer(t)
+	src := client.LocalAddr().(*net.UDPAddr)
+	exitFleet(t, 3, "NL")
+
+	ch := requestChallenge(t, client, src)
+	m := c.connectMsg(t, "coord-1", ch)
+	m.Nonce = randID()
+	m.Country = "NL"
+	m.Mode = "direct"
+
+	const copies = 3
+	for i := 0; i < copies; i++ {
+		handle(m, src)
+	}
+
+	// One request is still one assignment: the gate must not have disturbed the
+	// dedupe it now sits behind.
+	if got := sessionCount(); got != 1 {
+		t.Fatalf("three copies of one connect minted %d sessions; want exactly 1", got)
+	}
+
+	// And every copy is answered with a session — none refused by the gate.
+	var first wire
+	for i := 0; i < copies; i++ {
+		r := recvWire(t, client, time.Second)
+		if r.Type != "session" {
+			t.Fatalf("copy %d answered %s (%s); want a session — a retransmit must still be answered", i+1, r.Type, r.Reason)
+		}
+		if i == 0 {
+			first = r
+		} else if r.Session != first.Session || r.ExitID != first.ExitID {
+			t.Errorf("copy %d answered session=%q exit=%q; copy 1 answered session=%q exit=%q", i+1, r.Session, r.ExitID, first.Session, first.ExitID)
+		}
+	}
 }

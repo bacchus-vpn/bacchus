@@ -97,10 +97,23 @@ const (
 	challengeSweep = 30 * time.Second
 )
 
-// pendingChallenge is one issued, not-yet-spent nonce.
+// pendingChallenge is one issued nonce.
+//
+// spentBy records the connect nonce (issue #1's per-REQUEST idempotency key) that
+// spent it, empty until it is spent. That binding is what separates the two things
+// a repeated connect can be: core's sendN puts three copies of one request on the
+// wire against UDP loss, and those copies must all be answered, while a second
+// request re-presenting a spent challenge is a replay and must not be.
+//
+// The connect nonce identifies the REQUEST rather than the datagram, so "same
+// nonce" is exactly "same request" — which makes it the right thing to bind to and
+// saves keeping a second, parallel notion of sameness next to the one that already
+// exists.
 type pendingChallenge struct {
 	value   []byte
 	expires time.Time
+	spentBy string
+	spent   bool
 }
 
 // challengeStore holds the nonces this coordinator has issued and not yet seen
@@ -189,20 +202,41 @@ func (s *challengeStore) issue(key string, now time.Time) []byte {
 	return v
 }
 
-// consume returns the outstanding challenge for key and removes it, so the same
-// nonce is never accepted twice. A missing or expired entry returns nil.
-func (s *challengeStore) consume(key string, now time.Time) []byte {
+// spend returns the outstanding challenge for key, binding it to the connect nonce
+// that spent it. A missing or expired entry returns nil, and so does a spent entry
+// re-presented by any request other than the one that spent it.
+//
+// The effect is that a challenge answers exactly one REQUEST — retransmitted as
+// often as UDP loss demands — rather than exactly one datagram. Binding to the
+// datagram would refuse copies two and three of every honest connect; binding to
+// nothing would let a captured connect be replayed for the nonce's whole lifetime.
+func (s *challengeStore) spend(key, nonce string, now time.Time) []byte {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.entries[key]
-	if !ok {
+	if !ok || !now.Before(e.expires) {
 		return nil
 	}
-	delete(s.entries, key)
-	if !now.Before(e.expires) {
-		return nil
+	if e.spent {
+		// Only the request that spent it may re-present it. An empty nonce can never
+		// match, so a caller that lost its nonce cannot re-enter this path either.
+		if e.spentBy == "" || nonce == "" || e.spentBy != nonce {
+			return nil
+		}
+		return e.value
 	}
+	e.spent, e.spentBy = true, nonce
+	s.entries[key] = e
 	return e.value
+}
+
+// drop removes a challenge outright. It is what a FAILED verification does, so a
+// rejected attempt cannot be retried against a nonce that is still live — a
+// captured chain gets one attempt, not one attempt per copy it can send.
+func (s *challengeStore) drop(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.entries, key)
 }
 
 func (s *challengeStore) len() int {
@@ -314,13 +348,20 @@ func admitDevice(m wire, src *net.UDPAddr) bool {
 		return true
 	}
 
+	key := challengeKey(src)
+
+	// A refusal drops the challenge, so a rejected attempt cannot be retried against
+	// a nonce that is still live. The successful path deliberately leaves the entry
+	// in place, bound to this request's nonce, so the retransmitted copies of this
+	// same connect are answered rather than refused.
 	reject := func(reason string) bool {
+		challenges.drop(key)
 		log.Printf("device credential: reject connect from %s: %s", src, reason)
 		send(src, wire{Type: "reject", Reason: reason})
 		return false
 	}
 
-	issued := challenges.consume(challengeKey(src), time.Now())
+	issued := challenges.spend(key, m.Nonce, time.Now())
 	if issued == nil {
 		return reject("no outstanding device-credential challenge for this address — request one with a \"challenge\" message immediately before connecting")
 	}
