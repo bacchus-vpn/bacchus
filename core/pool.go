@@ -224,19 +224,26 @@ func (e *Engine) selectPath(ctx context.Context) (dialedPath, selection.Candidat
 }
 
 // poolCountries returns the countries to select among and, instead of a silent empty
-// list, two errors the caller must act on:
+// list, three errors the caller must act on:
 //
 //   - the latched force-major version mismatch (issue #79): this build can no longer
 //     speak the network's wire protocol, so every candidate is withheld and the
-//     mismatch surfaced rather than letting a client dial a cutover it can't speak; and
+//     mismatch surfaced rather than letting a client dial a cutover it can't speak;
 //   - ErrNoCoordinatorReachable when every coordinator was silent (issue #115):
 //     pairing a session needs a coordinator, so nothing can be reached — surface the
 //     sentinel so the pool triggers mesh-walk recovery instead of failing cold or
-//     spinning on a dead directory.
+//     spinning on a dead directory; and
+//   - ErrCoordinatorUnroutable when one ANSWERED in a shape this build cannot route
+//     (issue #5). Rendezvous is up, so this is emphatically not the all-silent
+//     sentinel and must not trigger mesh-walk; it is a protocol disagreement, and a
+//     rediscovered directory would name coordinators that answer identically.
 //
-// Force-major takes precedence over the all-silent sentinel: a client too old for the
-// network must stop with the update message, not chase a fresh directory it still
-// couldn't speak to.
+// Force-major takes precedence over both: a client too old for the network must stop
+// with the update message, not chase a fresh directory it still couldn't speak to.
+// (Force-major and unroutable are near neighbours — both are "we and the network
+// disagree about the protocol" — but only the first is a conclusion the network stated
+// and this client verified; the second is what it looks like from the outside when
+// nobody said anything at all.)
 //
 // # The Config.ExitID fallback is gone
 //
@@ -257,6 +264,16 @@ func (e *Engine) poolCountries(ctx context.Context) ([]CountryInfo, error) {
 	}
 	if errors.Is(err, ErrNoCoordinatorReachable) {
 		return nil, ErrNoCoordinatorReachable
+	}
+	if errors.Is(err, ErrCoordinatorUnroutable) {
+		// A member answered in a shape this build cannot route (issue #5). Surfaced
+		// verbatim rather than flattened into the empty-list case below, for the same
+		// reason force-major is: "the network offers no country" describes a network
+		// with no exits, and this is a network this client cannot read — the same
+		// symptom for opposite causes, and the second one names its own fix. It is
+		// deliberately NOT the all-silent sentinel, so maintainPath does not walk the
+		// mesh over a protocol disagreement.
+		return nil, err
 	}
 	return nil, nil
 }
@@ -656,6 +673,25 @@ func (e *Engine) activePath() (Session, []byte) {
 	return e.activeSess, e.activeExitPub
 }
 
+// activePathServable reports whether the pooled accept loop has everything an accepted
+// connection needs: a live session AND the static key of the exit terminating it.
+//
+// The key half is not decoration (issue #29). Every end-to-end channel opened over this
+// session verifies the exit's admission credential against that key, and a check reached
+// without one does not fail — admission.accept reads an empty subject as a bearer
+// credential and skips the binding, so any authorized exit would admit any other. The
+// single-transport accept loop has always tested both (`sess == nil || len(exitPub) ==
+// 0`); this is the pooled loop's half of the same guard, and the asymmetry between them
+// is precisely the shape #29 describes.
+//
+// Belt-and-braces as things stand — setActivePath writes both fields from one dialedPath
+// and clearActivePath clears both — which is the point: the invariant is currently held
+// by every writer remembering, and this makes the reader stop depending on that.
+func (e *Engine) activePathServable() bool {
+	sess, pub := e.activePath()
+	return sess != nil && len(pub) > 0
+}
+
 // bindPoolSocks binds the local SOCKS5 listener once and serves it, tunnelling
 // each accepted connection over whatever session is active at accept time — so a
 // failover swaps the path underneath without rebinding or dropping the listener.
@@ -695,8 +731,12 @@ func (e *Engine) bindPoolSocks(addr string) error {
 					continue
 				}
 			}
+			// Both halves, not just the session (issue #29): serving over a session
+			// whose exit key we do not hold runs the end-to-end admission check
+			// unbound, and an unbound check accepts any authorized exit's credential
+			// rather than failing.
 			sess, pub := e.activePath()
-			if sess == nil {
+			if !e.activePathServable() {
 				_ = c.Close()
 				continue
 			}

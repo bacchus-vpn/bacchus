@@ -167,3 +167,52 @@ client verifies it **end-to-end** against the admission root.
 See `docs/design/node-admission.md` for the client-verification details and the
 invite v2 format, and `docs/threat-model.md` for the hostile-coordinator case
 this closes.
+
+## Amendment (issue #29, 2026-07-28): the subject binding is now unforgettable, not merely present
+
+This record states the check as `subject == hex(exitPub)`, and that binding is the whole
+of what makes a credential non-transferable — Noise_NK proves *this peer holds the id you
+dialed*, the credential proves *the root authorized that id*, and only the binding joins
+the two. Without it a client verifies that some exit somewhere was authorized, which is
+not a statement about the exit it is talking to.
+
+**What #29 reported, and what was actually found.** The issue describes
+`Engine.exitVerifyFunc` closing over an `e.exitPub` engine field that `connectPooled`
+never sets, so the pooled path reached the verifier with an empty subject. That field no
+longer exists: country-only assignment (#146, ADR-0042) made the exit key **per-path**
+rather than engine state, precisely because the coordinator may assign a different exit on
+any reconnect, and `exitVerifyFunc` took the key as a parameter in the same change. The
+reported defect was therefore already closed, as a side effect rather than deliberately.
+Verified rather than assumed: the test this issue asks for — a pooled client with an
+anchor must reject an exit presenting a valid credential issued to a **different** exit —
+passes with no code change.
+
+What was missing is what the issue also says: **no test covered pooled + anchor
+together**, so nothing would have caught it coming back. That barrier now exists, and a
+mutation restoring the engine-state shape reproduces the original bug exactly — exit A
+presenting exit B's valid credential is accepted.
+
+**Two structural gaps were still live, and both are closed here**, because "already
+fixed" and "cannot come back" are different properties:
+
+- **An empty exit key is no longer a bearer credential.** `hex.EncodeToString(nil)` is
+  `""`, and `admission.accept` reads an empty subject as bearer and skips the binding.
+  That default is correct where it comes from — a client has no coordinator-known id, so
+  its own credential genuinely is bearer — and it is exactly wrong on this path, in a way
+  no caller can see: a path that fails to thread the key through does not get an error, it
+  gets a check that silently passes. Reaching `verifyExitCredential` means a static key
+  was just authenticated, so an empty one is a plumbing bug rather than a state the
+  protocol produces, and it is now refused. That is the difference between fixing the
+  instance and closing the class: the next path that forgets fails closed and loudly.
+- **The pooled SOCKS accept loop now checks the key, not just the session.** The
+  single-transport loop has always tested both (`sess == nil || len(exitPub) == 0`); the
+  pooled one tested only the session. Nothing can currently produce a session without a
+  key — `setActivePath` writes both from one `dialedPath` — which is the point: that
+  invariant was held by every writer remembering, and the reader now does not depend on
+  it. One path holding a guard the other does not is the exact shape #29 describes.
+
+The residual is unchanged and worth restating: this check is **fail-open when
+unconfigured**. A client with no `AdmissionPubKey` verifies nothing and accepts any exit
+it can complete Noise_NK with, matching the coordinator's own behaviour with
+`-admission-pubkey` unset (#42). Nothing here narrows that; what it fixes is a client
+that *did* configure an anchor getting less than it asked for.
