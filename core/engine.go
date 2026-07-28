@@ -644,10 +644,17 @@ type wire struct {
 	// learns nothing about where the path terminates — the real exit is named only
 	// inside the onion, which it cannot read.
 	//
-	// It does not reopen exit pinning, which §2 closed. A pin is a STABLE declared
-	// preference the coordinator can honour; this names a hop drawn fresh from a
-	// shuffled candidate set on every connect (core/relaychain.go selectHops), and
-	// the node named is by construction NOT the one the traffic egresses from.
+	// It is sent ONLY on a relay-mode connect — chainFor builds a plan for no other
+	// mode, and a coordinator refuses the combination outright
+	// (hop-needs-relay-mode) — because outside relay mode the node named would be
+	// the one the traffic egresses from, which is the pinning §2 closed.
+	//
+	// Within relay mode this engine does not reopen pinning: the hop is drawn fresh
+	// from a shuffled candidate set on every connect (core/relaychain.go selectHops)
+	// and is not the node the traffic egresses from. That holds because THIS client
+	// is built that way, not because the wire enforces it — a modified client can
+	// name a node and terminate there, and no coordinator can tell. ADR-0042 §9
+	// records that residual.
 	//
 	// Country is omitted alongside it: it means the terminating exit's country and a
 	// chaining client resolves its own exit, so the coordinator has nothing to do with

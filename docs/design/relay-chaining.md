@@ -762,6 +762,17 @@ depth `n` the signed directory must contain, in addition to the coordinator:
 
 So depth 2 needs two exit-role nodes and a relay; depth 3 adds a forwarding relay.
 
+**The head must be exit-role, and at depth 2 the head is the only hop you choose.**
+This is the single most common way to build a deployment that cannot chain, so it is
+worth stating twice: `-relay-ingress` alone makes a node usable as a *middle* hop and
+nothing more. A relay-only node is not eligible to head a chain, because the head is
+reached by being named in `connect{firstHop}` and the coordinator can only pair a
+client to a node registered as an exit (`loadRelayDirectory` sets `pairable` from
+`Role == "exit"`; `selectHops` requires it for position one). Depth 2 chooses exactly
+one hop — the head — so a network whose every forwarding node runs `-role relay` has
+no working chain at any client, however many hops the directory lists. Middle
+positions, and therefore relay-only nodes, first exist at depth 3. See §10.3.
+
 ### 10.2 A client that wants a chained relay path
 
 ```
@@ -792,6 +803,28 @@ packet, setup pays `n+1` sequential handshakes, and the direct tier is not offer
 at all while chaining (§7).
 
 ### 10.3 A node that wants to carry other people's chains
+
+There are **two** such nodes, and they are not interchangeable. Running the wrong one
+is the defect §10.1 warns about: the command below carries middle positions only, and
+a network with no head cannot chain at all.
+
+**To provide a chain HEAD — what depth 2 actually needs — run an exit-role node.**
+An exit-registered node is eligible to head a chain by virtue of being pairable; it
+needs no `-relay-ingress`, because a head is reached at its advertise address:
+
+```
+bacchus-node -role exit \
+  -exit-key <64 hex chars, generated once and kept> \
+  -advertise <publicly reachable host:port> \
+  -relay-directory /path/to/snapshot.bin \
+  -mesh-pubkey <coordinator snapshot-signing key, hex>
+```
+
+Such a node is an ordinary exit that is additionally available as a chain head. It
+does not learn where the chains it heads terminate — it peels one layer and forwards
+— and heading a chain does not change how it serves its own unchained sessions.
+
+**To provide a MIDDLE position — which first exists at depth 3 — run a relay:**
 
 ```
 bacchus-node -role relay \
@@ -831,10 +864,33 @@ relay chaining: 2 hops on relayed paths — 1 peeling hop(s) chosen per connect
 from 5 directory candidates; DIRECT paths are not offered while chaining
 ```
 
-If that line is absent, you are **not** chaining — check `-relay-hops`. Then connect
-and look for `connected via RELAY to exit …`. A chaining client that reports
-`connected DIRECT` is a bug, not a fallback; the direct tier is removed from its
-ladder.
+If that line is absent, you are **not** chaining — check `-relay-hops`.
+
+Read it for what it says and not a word more. It reports **configuration**, and its
+candidate count is every entry in the directory usable as a hop *somewhere* — it does
+not check that any of them can head a chain. On the all-relay deployment §10.1
+describes it prints a healthy-looking count while every connect fails. It tells you
+chaining is switched on; it does not tell you chaining can work here.
+
+**The decisive client-side signal is the failure, not the success.** A chain that
+cannot be assembled is refused rather than downgraded, and says so:
+
+```
+[relay] chain not built: core: chain too short: no directory entry can head a chain
+(the head must be one the coordinator can pair a client to)
+```
+
+That is the all-relay deployment, named exactly. Any `[relay] chain not built:` line
+means no connection was made on that attempt — the feature failing closed, which is
+correct behaviour and the opposite of a silent downgrade.
+
+Then connect. **`connected via RELAY to exit …` is not evidence of chaining** — it is
+printed for every peer-relay path, chained or not, and an unchained client on a
+network with a relay prints it too. It confirms you got a relayed data plane, nothing
+about hops. What *is* conclusive on the client: chaining ran if you see neither a
+`chain not built` line nor `connected DIRECT`, since the direct tier is removed from a
+chaining client's ladder and a chained attempt that cannot build its chain fails
+loudly. A chaining client reporting `connected DIRECT` is a bug, not a fallback.
 
 **On the coordinator**, a chained session logs a deliberately different line from an
 unchained one:
@@ -847,6 +903,13 @@ terminating exit not known to this coordinator
 That line is the property, observable from the side that would violate it: the
 coordinator names the head and states plainly that it does not know the exit. If you
 instead see the ordinary `-> exit <id>` form, the connect was not chained.
+
+Of the three signals in this section this is the only one that distinguishes a
+chained connect from an unchained one on its own — the startup line reports
+configuration and the `via RELAY` line reports a relayed data plane, and neither
+becomes false on a deployment that cannot chain. It is also the one an operator
+running only a client cannot see. When you have access to just the client, use the
+absence of `chain not built` plus the absence of `connected DIRECT`, as above.
 
 **End to end**, `core/relaychain_acceptance_test.go` does all of this in-process
 against real forwarding nodes and asserts what arrived at the exit; it is the

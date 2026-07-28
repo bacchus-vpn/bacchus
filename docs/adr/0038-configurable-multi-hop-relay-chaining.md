@@ -395,6 +395,19 @@ doc's §7 and filed as issue #190 rather than claimed away.
 
 ### Smaller corrections
 
+- **`firstHop` is honoured only on a relay-mode connect** (`hop-needs-relay-mode`).
+  The client half already worked this way — `chainFor` builds a plan for no other
+  mode — but the coordinator inferred "chained" from the field's presence alone, so
+  the wire accepted `{mode:"direct", firstHop:X}` and paired the client straight to
+  the node it named. That is exact-exit pinning (#146, ADR-0042 §2) reconstructed
+  through the field ADR-0042 §9 opened, reachable by any modified client. It is now
+  refused before anything is paired, for `direct` and for an absent mode alike — the
+  latter because the handler's dispatch treats an unset mode as relay, so a guard
+  written against the literal `"direct"` would leave the field open to a client that
+  simply omits it. What this does **not** close, and ADR-0042 §9 now states rather
+  than argues away: a client may ask for relay mode, name a node, and terminate there
+  instead of peeling. No coordinator can detect that without reading the onion it
+  exists not to read.
 - **A depth above `RelayHopsMax` is refused at construction**, not clamped with a
   logged notice. Clamping is the silent downgrade the fail-closed rule forbids
   everywhere else in this feature: an operator who asked for 6 and was given 4 without

@@ -114,10 +114,19 @@ type wire struct {
 	// read. Country is absent alongside it, and the session this coordinator mints
 	// records no exit id at all — see the connect handler.
 	//
-	// It is not exit pinning returning by another door. A pin is a stable declared
-	// preference that gets honoured; the node named here is drawn fresh from a
-	// shuffled candidate set on every connect, and is by construction not the node the
-	// client egresses from.
+	// It is accepted ONLY on a relay-mode connect (the handler refuses any other mode
+	// with refuseHopNotRelayMode): outside relay mode there is no onion, so the node
+	// named would be the node the client egresses from, and honouring it would be the
+	// exact-exit pinning #146 removed.
+	//
+	// For an honest client this is not pinning by another door — the node named is
+	// drawn fresh from a shuffled candidate set on every connect and is not the node
+	// it egresses from. That is a property of the CLIENT, though, not one this
+	// coordinator can verify: a client may ask for relay mode, name the node it
+	// wants, and terminate there rather than peeling, and a chained connect is
+	// indistinguishable from that by design, since the terminating exit is inside a
+	// layer this coordinator must not be able to read. ADR-0042 §9 states the
+	// residual and why it was accepted rather than closed.
 	FirstHop string `json:"firstHop,omitempty"`
 	// ExcludeSessions names sessions THIS coordinator minted for this client whose
 	// exits it has just failed against, so a retry is not handed the same broken exit
@@ -561,9 +570,28 @@ func handle(m wire, src *net.UDPAddr) {
 		chained := m.FirstHop != ""
 		var e *exitNode
 		var refusal assignRefusal
-		if chained {
+		switch {
+		case chained && m.Mode != "relay":
+			// A named node is only ever a chain's first PEELING hop. In direct mode
+			// there is no onion and nothing to peel, so the node named here would be
+			// the node the client egresses from — and honouring that is exact-exit
+			// pinning, the thing #146/ADR-0042 §2 removed from this wire, arriving
+			// through the field §9 opened for chaining. The client cannot ask for
+			// this by accident: chainFor builds a plan only in relay mode, so an
+			// honest client never populates FirstHop here. Refused rather than
+			// silently ignored, because a client that sent it wanted a specific node
+			// and must not be told it got one when it did not.
+			//
+			// This is the guard's whole extent, and §9 now says so: it closes the
+			// case where the wire itself asks to be paired directly with a named
+			// node. It does NOT stop a client from claiming relay mode and simply
+			// terminating at the node it named — that path stays open by
+			// construction, since not being able to see inside the onion is the
+			// point of the feature. What is refused is the pin with no cover story.
+			refusal = refuseHopNotRelayMode
+		case chained:
 			e, refusal = resolveFirstHop(m.FirstHop)
-		} else {
+		default:
 			e, refusal = chooseExit(m.Country, excludedExits(src, m.ExcludeSessions), now)
 		}
 		if refusal != refuseNone {

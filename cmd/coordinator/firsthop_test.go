@@ -173,6 +173,55 @@ func TestConnectFirstHopRefusesAnExhaustedNode(t *testing.T) {
 	expectSilence(t, relayP)
 }
 
+// TestConnectFirstHopIsRefusedOutsideRelayMode is the pinning guard.
+//
+// A first hop is a chain's first PEELING hop. Outside relay mode there is no onion
+// and nothing to peel, so the node named would be the node the client egresses
+// from — which is exact-exit pinning (#146, ADR-0042 §2) arriving through the field
+// §9 opened for chaining. The coordinator refuses instead of honouring it.
+//
+// The named node here is a perfectly assignable registered exit, and the request is
+// well-formed in every other respect: the ONLY reason to refuse is the mode. Both
+// the explicit "direct" and an absent mode are checked, the latter because the
+// dispatch below treats an unset mode as relay, so a guard written against the
+// literal string "direct" alone would leave the field open to anyone who simply
+// omits it.
+//
+// What this does NOT claim: a client that asks for relay mode and then terminates
+// at the node it named still gets there, and this coordinator cannot tell. That
+// residual is stated in ADR-0042 §9 rather than papered over here.
+func TestConnectFirstHopIsRefusedOutsideRelayMode(t *testing.T) {
+	for _, mode := range []string{"direct", ""} {
+		name := mode
+		if name == "" {
+			name = "unset"
+		}
+		t.Run(name, func(t *testing.T) {
+			setPC(t)
+			resetRegistry(t)
+			client, hopP, relayP := fakePeer(t), fakePeer(t), fakePeer(t)
+
+			// A hop that WOULD be assignable: registered, in quota, reachable. Only
+			// the mode is wrong.
+			registerExit(fhHopID, "DE", fhHopTCP, hopP)
+			registerRelay("relay-1", relayP)
+
+			handle(wire{Type: "connect", FirstHop: fhHopID, Mode: mode},
+				client.LocalAddr().(*net.UDPAddr))
+
+			m := recvWire(t, client, time.Second)
+			if m.Type != "error" || m.Reason != string(refuseHopNotRelayMode) {
+				t.Fatalf("mode=%q: client got %+v, want a %q refusal — honouring a named node here is exact-exit pinning",
+					mode, m, refuseHopNotRelayMode)
+			}
+			// Nothing may be wired: not the named node directly, and not a relay
+			// splicing to it. A refusal that still paired would be the pin itself.
+			expectSilence(t, hopP)
+			expectSilence(t, relayP)
+		})
+	}
+}
+
 // TestUnchainedConnectStillNamesItsExit is the zero-regression half: a connect
 // carrying no firstHop behaves exactly as it did before this feature, right down to
 // recording and returning the chosen exit.

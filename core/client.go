@@ -880,6 +880,12 @@ func refusalText(reason string) string {
 		return "no-such-country (this coordinator knows no exit in that country — check the country code)"
 	case "no-such-hop":
 		return "no-such-hop (this coordinator has no exit registered under the node this chain names as its first hop — your signed directory may be stale)"
+	case "hop-needs-relay-mode":
+		// Not reachable from an honest client — chainFor builds a plan only in relay
+		// mode, so this build never names a hop outside it. Rendered anyway: reaching
+		// it means the engine is sending a combination it believes it cannot send,
+		// and a bare reason string in a log is a poor way to find that out.
+		return "hop-needs-relay-mode (a first hop may only be named on a relay-mode connect; this is a client bug, not a network condition)"
 	case "":
 		return "no reason given"
 	default:

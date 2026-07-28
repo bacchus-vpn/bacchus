@@ -74,6 +74,11 @@ const (
 	refuseNoCountry   assignRefusal = "no-such-country"
 	refuseCountryBusy assignRefusal = "country-busy"
 	refuseNoHop       assignRefusal = "no-such-hop"
+	// refuseHopNotRelayMode answers a connect that names a first hop without
+	// asking for relay mode. It names the client's own malformed request back to
+	// it and reveals nothing about the network — see the wire.FirstHop guard in
+	// the connect handler for why the combination is refused rather than honoured.
+	refuseHopNotRelayMode assignRefusal = "hop-needs-relay-mode"
 )
 
 // resolveFirstHop answers a connect that names its own first peeling hop (issue

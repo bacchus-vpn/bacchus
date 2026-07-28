@@ -106,8 +106,14 @@ priority and better exits *within* a country) and not as a debug affordance.
 `connect{exitId}` is gone from the wire, not deprecated.
 
 That removes pinning as an **entitlement**. It does not, on its own, remove it as an
-**outcome** — see the retransmission residual at the end of this section, which is the
-honest boundary of what §2 delivers.
+**outcome** — see the retransmission residual at the end of this section, and §9's
+`firstHop` residual, which together are the honest boundary of what §2 delivers.
+
+`connect{firstHop}` (#142, ADR-0038) later added the one field a client may use to
+name a node. It is accepted **only on a relay-mode connect** and refused otherwise
+(`hop-needs-relay-mode`), because outside relay mode there is no onion and the node
+named would be the node the client egresses from — this section's removal, undone
+through §9's field. That guard is not a claim that naming is now harmless: see §9.
 
 The reply must carry the chosen exit's id, and this is not informational: an exit's id
 **is** its Noise static public key (ADR-0009), so a client cannot bring up the
@@ -449,6 +455,36 @@ coordinator**, which is a tracking handle for an untrusted coordinator (ADR-0020
 defeat of load balancing. In chained mode the coordinator learns the first hop and never
 the exit, so there is no handle to present. The two features trade the same piece of
 information in opposite directions, and both are coherent for the same reason.
+
+**What that argument assumes, and what is actually enforced.** It assumes the client
+is chaining. The coordinator cannot check that, and the reason it cannot is the
+feature itself: the terminating exit lives inside an onion layer it must not be able
+to read. So the argument above holds for an honest client and states a *convention*,
+not a guarantee.
+
+What is enforced is narrower, and it is the whole of the guard: `firstHop` is honoured
+**only on a relay-mode connect**, and any other mode — `direct`, or unset — is refused
+with `hop-needs-relay-mode` before anything is paired
+(`TestConnectFirstHopIsRefusedOutsideRelayMode`). That closes the case where the wire
+itself asks to be paired directly with a named node, which is pinning with no cover
+story and the only form of it this record can detect.
+
+What remains open, stated rather than argued away: a client may ask for relay mode,
+name the node it wants, and simply terminate there instead of peeling. The coordinator
+sees a well-formed chained connect and pairs it. Such a client has reconstructed a
+stable exit preference and presented it — so for that client, and only that client,
+§2's property does not hold. Two consequences follow and neither is theoretical:
+load balancing can be gamed by a client willing to do this, and the tracking handle
+§2 calls out exists again, though now only for a client that chose to create it.
+
+This was a decision, not an oversight. Closing it properly means the coordinator
+assembling the chain rather than the client naming its head — which hands path
+selection to the single party multi-hop exists to defend against, and would let a
+coordinator answer with three nodes it runs and watch the whole route. Trading a
+bounded load-balancing and self-inflicted-fingerprint problem for that was judged the
+worse deal. Revisit it if per-hop admission credentials (#175) ever make a hop's role
+checkable, since a head that must prove it is serving as a relay is a different
+question from one that merely says so.
 
 ## Consequences
 
