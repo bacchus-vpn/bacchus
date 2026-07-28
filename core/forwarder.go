@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core/accounting"
@@ -90,6 +89,15 @@ func (e *Engine) exitDirect(sid string, st Stream) { e.exitTerminate(sid, st) }
 // TCP CONNECT — same overloaded-target-field trick as acctSentinel/
 // probeSentinel, branching to exitTerminateUDP (core/udprelay.go) instead of
 // dialing TCP.
+//
+// A target carrying hopTargetPrefix (issue #142, ADR-0038) is an onion forward:
+// this node is an INTERMEDIATE hop in a client-assembled chain, so it splices to
+// the next Bacchus node rather than egressing. That branch is what makes this
+// function serve two roles — the exit's egress and a relay's onion ingress (see
+// Start's RelayIngress listener) — and it is why the internet-egress paths below
+// are now gated on actually holding the exit role. The distinction is carried by
+// the client's encrypted target, so a hop is the same Noise_NK exchange as every
+// other and needs no new message type and no coordinator involvement.
 func (e *Engine) exitTerminate(sid string, raw io.ReadWriteCloser) {
 	defer raw.Close()
 	// The exit presents its admission credential (issue #60) in the handshake so
@@ -112,8 +120,29 @@ func (e *Engine) exitTerminate(sid string, raw io.ReadWriteCloser) {
 		e.handleProbeStream(nc)
 		return
 	}
-	if strings.HasPrefix(target, udpTargetPrefix) {
-		e.exitTerminateUDP(sid, nc, strings.TrimPrefix(target, udpTargetPrefix))
+	prefix, addr := splitTargetPrefix(target)
+	if prefix == hopTargetPrefix {
+		// An onion forward (issue #142, ADR-0038): splice to the next Bacchus node
+		// instead of egressing. relayForward enforces that the next hop is a node in
+		// the signed directory and that this node opted into forwarding at all — see
+		// its doc for why neither check is optional.
+		e.relayForward(nc, addr)
+		return
+	}
+	// Everything below this line EGRESSES to the internet under this operator's
+	// address, and only an exit may do that. The gate matters because this function
+	// now also serves a relay-only node's onion ingress (see Start): without it, a
+	// relay would dial any host:port a client named and the mesh's relay/exit safety
+	// line — a relay forwards ciphertext and never egresses (ADR-0038 principle #4,
+	// rendezvous-cold-start §5.3) — would hold only by the accident of relays not
+	// having had a listener before. The sentinel branches above are deliberately
+	// outside it: they dial nothing.
+	if !e.roles[RoleExit] {
+		e.emit(EventError, "", "onion: refusing to egress — this node is a relay, not an exit")
+		return
+	}
+	if prefix == udpTargetPrefix {
+		e.exitTerminateUDP(sid, nc, addr)
 		return
 	}
 	remote, err := net.DialTimeout("tcp", target, 10*time.Second)

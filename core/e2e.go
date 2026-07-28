@@ -34,6 +34,22 @@ const e2eLabel = "e2e"
 // core/udprelay.go for both sides of the branch this enables.
 const udpTargetPrefix = "udp:"
 
+// hopTargetPrefix marks an E2E target as an onion FORWARD to another Bacchus
+// node (issue #142, ADR-0038) rather than an egress to the internet: the client
+// sends "hop:"+host:port, naming the next hop's forwarding ingress
+// (coldstart.Entry.Ingress, issue #124). It overloads the same target field as
+// udpTargetPrefix/acctSentinel/probeSentinel — so a chain needs no new message
+// type, no handshake change, and no coordinator change; a hop is the existing
+// Noise_NK exchange with a different target string.
+//
+// The prefix is what separates the two egresses a node can offer, and that
+// separation is load-bearing rather than cosmetic: a bare target means "dial the
+// internet" (exit role only) while this means "splice to the next mesh node"
+// (relay role only, and only to a node in the signed directory). See
+// core/relaychain.go's relayForward for the constraint, and ADR-0038 principle
+// #4 — a relay must never become an open internet proxy.
+const hopTargetPrefix = "hop:"
+
 const (
 	maxPlain = 16384 // plaintext chunk per Noise message
 	maxFrame = 65535 // ciphertext/handshake frame cap (uint16 length prefix)
@@ -177,15 +193,36 @@ func exitHandshake(raw io.ReadWriteCloser, key noise.DHKey, cred []byte) (*noise
 }
 
 // validTarget rejects obviously malformed destinations before the exit dials.
-// A udpTargetPrefix is stripped first, so a UDP relay request (issue #41)
-// validates the same host:port shape underneath it.
+// A routing prefix is stripped first, so a UDP relay request (issue #41) and an
+// onion forward (issue #142) both validate the same host:port shape underneath
+// theirs. Exactly one prefix is stripped: the prefixes are distinct 4-byte
+// literals, so "udp:hop:…" is not a valid nesting and does not validate — the
+// only shapes that pass are a bare host:port and one prefix in front of one.
 func validTarget(target string) bool {
-	if len(target) == 0 || len(target) > 255+len(udpTargetPrefix) {
+	if len(target) == 0 || len(target) > 255+maxTargetPrefixLen {
 		return false
 	}
-	target = strings.TrimPrefix(target, udpTargetPrefix)
+	_, target = splitTargetPrefix(target)
 	_, _, err := net.SplitHostPort(target)
 	return err == nil
+}
+
+// maxTargetPrefixLen is the longest routing prefix validTarget allows in front
+// of a host:port, so the length bound stays correct as prefixes are added.
+const maxTargetPrefixLen = len(udpTargetPrefix) // == len(hopTargetPrefix)
+
+// splitTargetPrefix separates a routing prefix from the address behind it,
+// returning the prefix ("" when the target is a bare address) and the remainder.
+// It is the single place the target vocabulary is parsed, so the exit-side
+// dispatch (exitTerminate) and the validator agree by construction rather than
+// by two copies of the same TrimPrefix chain.
+func splitTargetPrefix(target string) (prefix, addr string) {
+	for _, p := range []string{udpTargetPrefix, hopTargetPrefix} {
+		if strings.HasPrefix(target, p) {
+			return p, target[len(p):]
+		}
+	}
+	return "", target
 }
 
 // noiseConn is a length-prefixed, Noise-encrypted byte stream over raw. The same

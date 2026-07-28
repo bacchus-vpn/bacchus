@@ -167,8 +167,283 @@ client hop selection, diversity, and the telescoping dialer (§2/§4); everythin
 §9 list. This change stays inside `core/coldstart` + `cmd/coordinator`; it is **Part of #76**
 and does not close it.
 
+## Amendment (issue #142, 2026-07-25): the onion is implemented — and the chain starts one hop later than the spike assumed
+
+> **Partly superseded — read the 2026-07-27 amendment at the end of this file before
+> acting on anything here.** The mechanism described below (the client naming its
+> first peeling hop in `connect{exitId}`) no longer exists: ADR-0042 removed that
+> field's client direction. Three claims in this section are also corrected there —
+> "the coordinator never learns your real exit" was false on every connect, "operator
+> diversity is enforced" described nothing at depth 2, and the both-endpoints
+> guarantee needs a proviso about the assigned relay. What this section says about
+> the onion construction, per-hop authentication, and E2E survival of #60/#69 is
+> unaffected and stands.
+
+The construction this record accepted is now built and wired: `core/relaychain.go`
+(client chain assembly + telescoping dial), the `hop:` branch of `exitTerminate`
+(the peel), a relay onion ingress in `Start`, and `Config.RelayHops` /
+`-relay-hops`, default `1`. Decisions 1, 3, 4, 5 and 6 landed as written. **Decision
+2 landed with a materially different mechanism**, described below, which is why this
+amendment exists rather than a note that the work shipped.
+
+### The spike's first hop could not be built, and did not need to be
+
+§4.1 assumed the coordinator-assigned relay `R₁` **peels** the outermost layer.
+Implementation showed it cannot, for a reason the spike missed: Noise_NK
+authenticates the responder by a static key the **initiator supplies up front**, and
+the client never learns the assigned relay's key. The coordinator names that relay to
+the client only through `wire.RelayTag`, which #56/ADR-0035 deliberately defines as
+opaque and non-routable. Making `R₁` peelable therefore needs the coordinator to
+publish the assigned relay's identity — a coordinator protocol change this issue was
+scoped to avoid, and one that would hand a hostile coordinator a new lever.
+
+**What shipped instead.** Exit ids already *are* X25519 public keys (#12/#60), and
+the client already chooses which exit the coordinator pairs it with. So the client
+names its **first peeling hop** in `connect{ExitID}`. The assigned relay
+blind-splices to that node exactly as ADR-0033 ships today — `relayPipe`,
+`handlerFor`, and `serveExit` are **not modified at all** — and the onion begins at
+the node it was spliced to. The real exit is named only inside the onion.
+
+So for `RelayHops = n` the path is one coordinator-assigned blind relay plus `n-1`
+client-chosen peeling hops:
+
+```
+client → R₁ (blind splice, coordinator-assigned) → H₁ → … → Hₙ₋₁ → exit
+```
+
+`n` still counts the nodes between client and exit, so the property this ADR was
+accepted for — at `n ≥ 2` no single node in the path sees both endpoints — holds
+exactly as stated, and `n = 1` is still literally today's code path.
+
+### This makes decision 2 *stronger* than the spike claimed, and one §4.2 sentence was wrong
+
+§4.2 asserted the coordinator "learns **nothing** about `R₂…Rₙ` or the exit." Under
+the spike's own mechanism that was **false**: the client would still have sent
+`connect{ExitID: <real exit>}`, so the coordinator would have learned the exit on
+every connect, exactly as it does at n=1. The shipped mechanism makes the sentence
+true — the coordinator is told the first peeling hop and never sees the real exit.
+The claim is retained because what ships now supports it, not because it was right.
+
+**What the coordinator still sees, stated exactly:** that this client asked to
+connect to node H₁ and was assigned relay R₁. It cannot tell a chained connect from
+an ordinary one, does not choose H₂…Hₙ₋₁ or the exit, and cannot MITM any of them.
+
+### Fail closed — the rule that governs every failure in the feature
+
+Every way of failing to build the requested chain **fails the path**. None falls back
+to a shorter one. A user who asked for a path no single relay can link, and silently
+received a linkable one, is worse off than one who received an error, because they
+would act on an assurance they no longer hold. Concretely, these all fail the
+candidate and let selection move on: no signed directory; a directory with too few
+distinct hops for the requested depth; an exit the directory has no address for; and
+a coordinator that answered with the **TURN fallback** instead of a peer relay (on
+that disposition the client is wired straight to H₁, which would then see the
+client's own address *and* the real exit — precisely the linkage being bought away).
+
+### Two safety lines the implementation had to add
+
+- **A relay is not an exit.** A forwarding relay runs the same accept loop an exit
+  does, so `exitTerminate`'s internet-egress paths are now gated on actually holding
+  the exit role. Without it a relay would dial any `host:port` a client named. The
+  gate also refuses a **hostile coordinator** that assigns a relay-only node a direct
+  session — it cannot conscript a residential volunteer into egressing under their
+  own ip.
+- **A relay is not an open proxy.** A hop's next-hop address is attacker-chosen
+  (completing the handshake needs only the hop's public key, which is public), so a
+  forward is admitted only to an address named in the node's **signed** directory,
+  and a node with no directory forwards nothing. `RelayIngress` without
+  `RelayDirectory` is a construction error, not a listener that rejects everything.
+
+### Other implementation facts worth recording
+
+- **A relay that serves as a hop gets an X25519 identity**, derived exactly as an
+  exit's is, because the client authenticates each hop against the key the signed
+  directory publishes for it. Relays that serve no ingress keep their opaque random
+  id, so no existing relay's identity moves.
+- **The relay's ingress port is self-reported on register** (`wire.IngressPort`,
+  consumed by the already-merged #124/#126 coordinator side). Only the port is a
+  self-report; the coordinator joins it to the source ip it observes.
+- **Operator diversity is enforced; AS diversity is not.** Hop selection spreads
+  hops across the signed `Entry.Operator` tag and falls back to allowing a repeat
+  only when the directory cannot supply enough distinct operators. The IP-derived AS
+  diversity this ADR's #124 amendment calls the load-bearing anchor is **not
+  implemented** and remains a child issue.
+- **Chaining covers every client data path** — SOCKS CONNECT, UDP ASSOCIATE, and the
+  pool's sustained-flow probe — through one seam (`dialE2E`), so no traffic class
+  silently takes a shorter path than the user configured.
+- **Direct-tier paths are untouched**, per decision 4: hop count applies only once
+  the ladder reaches the relay tier.
+
+### Still deferred
+
+Per-hop relay-role admission credentials (§4.3); IP-derived AS diversity; relay-side
+DoS controls; in-place directory refresh (a restart currently adopts a new one);
+chain-aware liveness beyond the existing stall detection; and NAT-traversed middle
+hops. This change is **Part of #76** and does not close it.
+
 ## Relationship
 
 Extends ADR-0033 (single hop is n=1) and ADR-0028 (the `ModeRelay` tier); preserves
 ADR-0009 and ADR-0026/#69 through the chain; selects from ADR-0037's signed snapshot;
 reuses ADR-0030/#96/#105 for failover.
+
+## Amendment (issue #142, 2026-07-27): rebuilt on the ADR-0042 wire, and three claims corrected
+
+The #142 amendment above records a mechanism that no longer exists, and three
+statements in it — two of them repeated in user-facing flag help — were false as
+written. This amendment supersedes it on those points. Everything it says about the
+onion construction itself, the per-hop authentication, and the E2E survival of
+#60/#69 stands unchanged and is unaffected by any of this.
+
+### The client no longer names its hop in `connect{exitId}`
+
+ADR-0042 removed the client's ability to name an exit at all: `connect{exitId}` is
+the coordinator's answer, never the client's request. That deleted the mechanism the
+#142 amendment describes. It also anticipated the replacement — §9 of that record
+reserved a `firstHop` request field for this work and committed three things about it
+before this code existed.
+
+What ships now, matching those commitments exactly:
+
+- **The client names its head in `connect{firstHop}`.** The coordinator pairs it with
+  that node instead of choosing an exit, and `resolveFirstHop` consults no country, no
+  ranking and no exclusion — the client is not asking it to choose.
+- **The session records `exitID = ""`.** The coordinator does not know where a chained
+  path terminates, and recording the head there would charge a hop with a terminator's
+  load in the §3 ranking whose only discriminating term is the session count. A
+  chained session is invisible to exit ranking rather than misattributed.
+- **`connect{country}` is omitted on a chained request.** It means the terminating
+  exit's country and nothing else, and a chaining client resolves its own exit, so the
+  coordinator has no use for it — and not sending it keeps the user's egress
+  jurisdiction off the wire.
+- **Exit discovery is the signed coldstart snapshot.** `core/` reads exits out of it
+  now (`relayDirectory.exitsIn`), filtered by the user's country, one chosen at random
+  per connect. Random rather than best: a deterministic rule would give every client
+  running this build the same answer for a given country and directory, which is both
+  a fingerprint and a load magnet no coordinator could move.
+
+A named refusal (`no-such-hop`) is added for a head this coordinator does not have
+registered, which is the actionable case — it means the client's cached directory has
+drifted and should be refreshed.
+
+### Correction 1 — "the coordinator never learns your real exit" was false on every connect
+
+The #142 amendment claims the shipped mechanism made §4.2's sentence true.
+`cmd/node`'s `-relay-hops` help asserted the same thing to users. Both were wrong,
+for a reason neither noticed: `reconnectModes` returns `[direct, relay]`, `chainFor`
+returns no plan for a direct attempt, and the helper that produced the id to pair on
+returned the **real exit** when there was no plan. So a client configured for three
+hops put `connect{exitId: <real exit>, mode: "direct"}` on the wire — three times,
+against UDP loss — before any chained attempt happened, and the coordinator logged
+it against the client's source address.
+
+Two changes make the claim true rather than restating it:
+
+- **There is no exit id on the connect wire in any mode.** ADR-0042 removed the
+  field's client direction outright, and `firstHopID` on an absent plan returns the
+  empty string rather than falling back to an exit id. A method with no exit id to
+  leak cannot leak one; the previous shape kept the most sensitive value in the design
+  one nil-check away from the wire.
+- **A chaining client is not offered the direct tier at all**, on either ladder. This
+  is not about the leak — it survives the leak's removal. A direct path carries no
+  chain, so taking one is a silent downgrade, and it was the *first* thing tried.
+
+The cost is real and is now stated in the help text and the design doc: a chaining
+client is slower and less available, because the tier that works when no relay is
+free is gone.
+
+### Correction 2 — "operator diversity is enforced" described nothing at depth 2
+
+The sentence "Operator diversity is enforced; AS diversity is not" was true only in
+the sense that code ran. `buildSnapshot` stamped `Entry.Operator` on **relay** entries
+only, and a chain's head must be exit-role — it is reached by being named to the
+coordinator — so the head always carried an empty tag, which is neither recorded as
+used nor collided against. At depth 2 the head is the only peeling hop, so the control
+did literally nothing at the depth most clients will run.
+
+Exits now carry their operator tag; the `operators` map was never role-scoped, so this
+reads a value that was already loaded. The claim is still narrower than "enforced" and
+is now written that way in `selectHops` and in the design doc's §0.5 table: it
+constrains a pair, so it starts to bite at depth 3, and `operators[id]` is empty for
+every node absent from a curated operators file, so on an uncurated deployment it is
+**inert**. Refusing to build chains on an uncurated network was considered and
+rejected as the worse trade; saying so plainly is the correction.
+
+### Correction 3 — "at n ≥ 2 no single node sees both endpoints" needs a proviso
+
+`R₁` is coordinator-chosen and the client never learns its identity, so nothing
+stopped `R₁` from also being one of the client's own peeling hops. `R₁` sees the
+client; the last hop sees the exit; one node in both roles is one node holding both
+ends, at any depth.
+
+This is not only a hostile-coordinator concern. `pickRelay` excludes the node it
+paired — the head — but not the client's later hops, which it cannot see. So an
+**honest** coordinator can produce the collision by accident at depth 3 and above.
+
+`verifyChainDisjoint` closes the accident. `wire.RelayTag` is a published function of
+the relay's id, so the client recomputes it for every hop it selected and fails the
+path on a match. The derivation is duplicated in `core` rather than imported (the two
+binaries deliberately do not import each other) and both copies are pinned to the same
+known-answer vectors, because a drift would silently stop the check from ever matching
+rather than fail anything.
+
+It does **not** close the attack. A coordinator that wants the collision reports a tag
+that does not match the relay it wired, and no client-side signal contradicts it.
+Against a coordinator actively colluding with a node in the path, this ADR's
+unlinkability property does not hold at any depth. That is now stated in the design
+doc's §7 and filed as issue #190 rather than claimed away.
+
+### Smaller corrections
+
+- **`firstHop` is honoured only on a relay-mode connect** (`hop-needs-relay-mode`).
+  The client half already worked this way — `chainFor` builds a plan for no other
+  mode — but the coordinator inferred "chained" from the field's presence alone, so
+  the wire accepted `{mode:"direct", firstHop:X}` and paired the client straight to
+  the node it named. That is exact-exit pinning (#146, ADR-0042 §2) reconstructed
+  through the field ADR-0042 §9 opened, reachable by any modified client. It is now
+  refused before anything is paired, for `direct` and for an absent mode alike — the
+  latter because the handler's dispatch treats an unset mode as relay, so a guard
+  written against the literal `"direct"` would leave the field open to a client that
+  simply omits it. What this does **not** close, and ADR-0042 §9 now states rather
+  than argues away: a client may ask for relay mode, name a node, and terminate there
+  instead of peeling. No coordinator can detect that without reading the onion it
+  exists not to read.
+- **A depth above `RelayHopsMax` is refused at construction**, not clamped with a
+  logged notice. Clamping is the silent downgrade the fail-closed rule forbids
+  everywhere else in this feature: an operator who asked for 6 and was given 4 without
+  an error has a weaker path than they requested. The ceiling is now checked in exactly
+  one place.
+- **`RelayIngress` requires a persistent `ExitKeyHex`.** A forwarding hop's node id is
+  the key clients authenticate it against, published in a directory clients cache, so
+  deriving it from a fresh keypair each start made the node unreachable as a hop until
+  a new snapshot propagated — intermittently broken rather than visibly misconfigured.
+  `-exit-key`'s help was scoped to exits, so a relay-only operator had no reason to set
+  it; both the refusal and the help text are fixed.
+- **A hop refuses to dial itself.** Its own addresses are in the directory it checks
+  targets against, so a self-target passed the allow-list and the node spliced to
+  itself, peeling and forwarding again — one attacker socket becoming two at every
+  pass. The check is against the node's own **directory** entry, not its local
+  listener: a hop binds a wildcard or an OS-assigned port while upstreams dial the
+  address the coordinator observed, so a guard written against the listener would pass
+  every real self-dial. This is the cheap half of #174 and does not bound a ring of
+  nodes pointed at each other.
+- **"At depth 1 every code path in this file is unreachable" was false.**
+  `setupRelayChaining`, `loadRelayDirectory` and `relayForward` all run at depth 1, and
+  `relayForward` is an intermediate hop's entire hot path. The claim is about the
+  client's dial path, and is now written that way.
+
+### On the test suite, because the corrections above were not found by it
+
+A mutation audit found that five independent edits switching chaining **off** in
+production left the whole suite green. The cause was structural rather than a set of
+gaps: every onion test called `dialChain` directly with a hand-built `chainPlan`, on
+an `Engine` literal whose `RelayHops` was zero — so `chaining()` was false on the very
+engines used to prove chaining worked, and nothing reached the selection, wrapping or
+wire code at all.
+
+The fix is an acceptance test built the other way round: through `New()` with
+`RelayHops` set, driving traffic in through the SOCKS listener `Connect` bound, with
+only the coordinator and the peer relay's transport faked. A second suite drives the
+real coordinator handler, because the client half had been tested against a fake
+coordinator and the coordinator half against nothing — so a build that ignored
+`firstHop` entirely passed the repository. 19 mutations now run with no survivors.

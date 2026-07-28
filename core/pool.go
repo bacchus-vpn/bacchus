@@ -187,13 +187,13 @@ func (e *Engine) selectPath(ctx context.Context) (dialedPath, selection.Candidat
 	if c, ok := e.store.Best(net, geo, now); ok {
 		learned = &c
 	}
-	ladder := selection.Ladder(selection.LadderInput{
+	ladder := e.chainableLadder(selection.Ladder(selection.LadderInput{
 		Geo:        geo,
 		Countries:  sel,
 		Transports: e.transportOrder,
 		Learned:    learned,
 		Cooling:    e.candidateCooling,
-	})
+	}))
 	if len(ladder) == 0 {
 		return dialedPath{}, selection.Candidate{}, fmt.Errorf("core: no candidates for geo %q (%d country(ies) offered, all busy or out of scope)", geo, len(countries))
 	}
@@ -383,14 +383,25 @@ func (e *Engine) dialAndValidate(ctx context.Context, c selection.Candidate) (di
 	if c.Mode == selection.ModeRelay {
 		timeout = e.relayTimeout
 	}
-
 	// Sessions whose exits failed validation this pass. Named to the coordinator on
 	// the retry so it does not hand back the exit we just proved is not carrying
 	// traffic — sessions rather than exit ids, see wire.ExcludeSessions.
 	var exclude []string
 	var lastErr error
 	for attempt := 0; attempt < countryAttempts; attempt++ {
-		r, err := e.pairInCountry(ctx, c, tr, timeout, exclude)
+		// A relay-tier candidate on a chaining client carries an onion (issue #142),
+		// assembled before pairing because its first peeling hop is the node the
+		// coordinator is asked to wire us to. Rebuilt on each attempt rather than once
+		// per candidate, because a fresh plan is the only thing that can move a chained
+		// path off an exit that did not carry traffic: the client picked that exit
+		// itself, so ExcludeSessions — which asks the coordinator to avoid an exit IT
+		// chose — has nothing to act on. A chain that cannot be built fails the
+		// candidate rather than quietly connecting unchained; the race moves on.
+		plan, err := e.chainFor(c.Mode, c.Country)
+		if err != nil {
+			return dialedPath{}, fmt.Errorf("core: candidate chain not built: %w", err)
+		}
+		r, err := e.pairInCountry(ctx, c, tr, timeout, exclude, plan)
 		if err != nil {
 			if lastErr != nil {
 				// A first attempt already failed validation; report that rather than
@@ -415,10 +426,33 @@ func (e *Engine) dialAndValidate(ctx context.Context, c selection.Candidate) (di
 	return dialedPath{}, lastErr
 }
 
+// chainableLadder drops every direct-mode candidate when the client is chaining
+// (issue #142), which is the pool's half of the same rule modeLadder applies to the
+// single-transport ladder: a direct candidate cannot carry an onion, so racing one
+// would mean a chaining client's fastest path is the unchained one — a silent
+// downgrade of exactly the property the user configured. See modeLadder.
+//
+// The result can legitimately be empty, on a client whose transports offer no relay
+// tier at all. selectPath already treats an empty ladder as "no candidates", which
+// says the right thing: this client cannot connect the way it was configured to.
+func (e *Engine) chainableLadder(l []selection.Candidate) []selection.Candidate {
+	if !e.chaining() {
+		return l
+	}
+	out := l[:0:0]
+	for _, c := range l {
+		if c.Mode != selection.ModeDirect {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // pairInCountry asks each coordinator in turn to pair a session in c's country,
 // returning the first that comes up. exclude names this client's own just-failed
-// sessions so the coordinator avoids their exits.
-func (e *Engine) pairInCountry(ctx context.Context, c selection.Candidate, tr Transport, timeout time.Duration, exclude []string) (attemptResult, error) {
+// sessions so the coordinator avoids their exits. plan, when non-nil, makes the
+// request name the chain's first hop instead of a country (issue #142).
+func (e *Engine) pairInCountry(ctx context.Context, c selection.Candidate, tr Transport, timeout time.Duration, exclude []string, plan *chainPlan) (attemptResult, error) {
 	for _, l := range e.orderLinks() {
 		select {
 		case <-ctx.Done():
@@ -430,7 +464,7 @@ func (e *Engine) pairInCountry(ctx context.Context, c selection.Candidate, tr Tr
 		e.greet(l)
 		// nil dedupe: the pool has its own cross-transport failover (issue #15), so
 		// it does not use the single-transport rotation skip-set (issue #56).
-		r := e.attemptWith(ctx, l, connectReq{country: c.Country, mode: c.Mode, exclude: exclude}, tr, timeout, nil)
+		r := e.attemptWith(ctx, l, connectReq{country: c.Country, mode: c.Mode, exclude: exclude, plan: plan}, tr, timeout, nil)
 		if r.outcome == connectOK {
 			return r, nil
 		}
@@ -465,7 +499,12 @@ func (e *Engine) validateSession(ctx context.Context, sess Session, exitPub []by
 		}
 	}()
 
-	nc, err := clientHandshake(st, exitPub, probeSentinel, e.exitVerifyFunc(exitPub))
+	// Probe over the SAME chain the real traffic will use (issue #142), not over a
+	// shortcut to the exit: the point of sustained-flow validation is that the path
+	// the pool is about to commit to actually carries bytes, and on a chained path
+	// that includes every hop. A probe that skipped the hops could pass while the
+	// chain itself was dead.
+	nc, err := e.dialE2E(st, planOf(sess), exitPub, probeSentinel)
 	if err != nil {
 		_ = st.Close()
 		return 0, err

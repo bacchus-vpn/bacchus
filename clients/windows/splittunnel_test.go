@@ -13,7 +13,7 @@ import (
 
 func TestNewBypassPolicyClassifiesEntries(t *testing.T) {
 	p := newBypassPolicy("", []string{
-		" 192.0.2.4 ", "10.0.0.0/8", "sberbank.ru", "www.Gosuslugi.RU.", "", "  ",
+		" 1.2.3.4 ", "10.0.0.0/8", "sberbank.ru", "www.Gosuslugi.RU.", "", "  ",
 	})
 	if got, want := len(p.nets), 2; got != want {
 		t.Fatalf("len(nets) = %d, want %d", got, want)
@@ -21,14 +21,14 @@ func TestNewBypassPolicyClassifiesEntries(t *testing.T) {
 	if got, want := p.domains, []string{"sberbank.ru", "www.gosuslugi.ru"}; !equalStrings(got, want) {
 		t.Fatalf("domains = %v, want %v", got, want)
 	}
-	if !p.inSet(net.ParseIP("192.0.2.4")) {
-		t.Error("192.0.2.4 should match its literal /32")
+	if !p.inSet(net.ParseIP("1.2.3.4")) {
+		t.Error("1.2.3.4 should match its literal /32")
 	}
 	if !p.inSet(net.ParseIP("10.1.2.3")) {
 		t.Error("10.1.2.3 should match 10.0.0.0/8")
 	}
-	if p.inSet(net.ParseIP("198.51.100.3")) {
-		t.Error("198.51.100.3 should not match any entry")
+	if p.inSet(net.ParseIP("11.1.2.3")) {
+		t.Error("11.1.2.3 should not match any entry")
 	}
 }
 
@@ -48,21 +48,21 @@ func TestParseSplitTunnelMode(t *testing.T) {
 }
 
 func TestBypassPolicyDirectExcludeMode(t *testing.T) {
-	p := newBypassPolicy("exclude", []string{"192.0.2.4"})
-	if !p.direct(net.ParseIP("192.0.2.4")) {
+	p := newBypassPolicy("exclude", []string{"1.2.3.4"})
+	if !p.direct(net.ParseIP("1.2.3.4")) {
 		t.Error("listed entry should go direct in exclude mode")
 	}
-	if p.direct(net.ParseIP("198.51.100.9")) {
+	if p.direct(net.ParseIP("9.9.9.9")) {
 		t.Error("unlisted entry should tunnel in exclude mode")
 	}
 }
 
 func TestBypassPolicyDirectIncludeMode(t *testing.T) {
-	p := newBypassPolicy("include", []string{"192.0.2.4"})
-	if p.direct(net.ParseIP("192.0.2.4")) {
+	p := newBypassPolicy("include", []string{"1.2.3.4"})
+	if p.direct(net.ParseIP("1.2.3.4")) {
 		t.Error("listed entry should tunnel in include mode")
 	}
-	if !p.direct(net.ParseIP("198.51.100.9")) {
+	if !p.direct(net.ParseIP("9.9.9.9")) {
 		t.Error("unlisted entry should go direct in include mode")
 	}
 }
@@ -93,12 +93,12 @@ func TestBypassPolicyLearnFiresOnLearnOnce(t *testing.T) {
 	var learned []string
 	p.onLearn = func(ip string, armed bool) { learned = append(learned, ip) }
 
-	ip := net.ParseIP("192.0.2.8")
+	ip := net.ParseIP("5.6.7.8")
 	p.learn(ip)
 	p.learn(ip) // second call for the same IP must not fire onLearn again
 
-	if !equalStrings(learned, []string{"192.0.2.8"}) {
-		t.Fatalf("onLearn calls = %v, want a single call for 192.0.2.8", learned)
+	if !equalStrings(learned, []string{"5.6.7.8"}) {
+		t.Fatalf("onLearn calls = %v, want a single call for 5.6.7.8", learned)
 	}
 	if !p.inSet(ip) {
 		t.Error("learned IP should be in the set")
@@ -110,12 +110,12 @@ func TestBypassPolicySeedDoesNotFireOnLearn(t *testing.T) {
 	fired := false
 	p.onLearn = func(string, bool) { fired = true }
 
-	p.seed(net.ParseIP("192.0.2.8"))
+	p.seed(net.ParseIP("5.6.7.8"))
 
 	if fired {
 		t.Error("seed should not fire onLearn")
 	}
-	if !p.inSet(net.ParseIP("192.0.2.8")) {
+	if !p.inSet(net.ParseIP("5.6.7.8")) {
 		t.Error("seeded IP should be in the set")
 	}
 }
@@ -126,7 +126,7 @@ func TestBypassPolicyLearnReportsArmedFalseBeforeArm(t *testing.T) {
 	var called bool
 	p.onLearn = func(ip string, armed bool) { called = true; gotArmed = armed }
 
-	p.learn(net.ParseIP("192.0.2.8"))
+	p.learn(net.ParseIP("5.6.7.8"))
 
 	if !called {
 		t.Fatal("onLearn was not called")
@@ -144,7 +144,7 @@ func TestBypassPolicyLearnReportsArmedTrueAfterArm(t *testing.T) {
 
 	var gotArmed bool
 	p.onLearn = func(ip string, armed bool) { gotArmed = armed }
-	p.learn(net.ParseIP("192.0.2.8"))
+	p.learn(net.ParseIP("5.6.7.8"))
 
 	if !gotArmed {
 		t.Error("onLearn should report armed=true once arm() has already run")
@@ -153,8 +153,8 @@ func TestBypassPolicyLearnReportsArmedTrueAfterArm(t *testing.T) {
 
 func TestBypassPolicyArmSnapshotIncludesPriorLearns(t *testing.T) {
 	p := newBypassPolicy("", nil)
-	p.seed(net.ParseIP("192.0.2.11"))
-	p.learn(net.ParseIP("192.0.2.22"))
+	p.seed(net.ParseIP("1.1.1.1"))
+	p.learn(net.ParseIP("2.2.2.2"))
 
 	var snapshot []string
 	if err := p.arm(func(dynamicSnapshot []string) error {
@@ -164,7 +164,7 @@ func TestBypassPolicyArmSnapshotIncludesPriorLearns(t *testing.T) {
 		t.Fatalf("arm() error: %v", err)
 	}
 
-	want := map[string]bool{"192.0.2.11": true, "192.0.2.22": true}
+	want := map[string]bool{"1.1.1.1": true, "2.2.2.2": true}
 	if len(snapshot) != len(want) {
 		t.Fatalf("arm() snapshot = %v, want keys %v", snapshot, want)
 	}
@@ -186,7 +186,7 @@ func TestBypassPolicyArmPropagatesInstallErrorAndStaysUnarmed(t *testing.T) {
 
 	var gotArmed bool
 	p.onLearn = func(ip string, armed bool) { gotArmed = armed }
-	p.learn(net.ParseIP("192.0.2.8"))
+	p.learn(net.ParseIP("5.6.7.8"))
 	if gotArmed {
 		t.Error("a failed arm() must not leave the policy armed")
 	}
@@ -250,10 +250,10 @@ func TestBypassPolicyArmLearnRaceNeverLosesAnIP(t *testing.T) {
 
 func TestBypassPolicyDynamicSnapshot(t *testing.T) {
 	p := newBypassPolicy("", nil)
-	p.seed(net.ParseIP("192.0.2.11"))
-	p.learn(net.ParseIP("192.0.2.22"))
+	p.seed(net.ParseIP("1.1.1.1"))
+	p.learn(net.ParseIP("2.2.2.2"))
 	got := p.dynamicSnapshot()
-	want := map[string]bool{"192.0.2.11": true, "192.0.2.22": true}
+	want := map[string]bool{"1.1.1.1": true, "2.2.2.2": true}
 	if len(got) != len(want) {
 		t.Fatalf("dynamicSnapshot = %v, want keys %v", got, want)
 	}
@@ -265,9 +265,9 @@ func TestBypassPolicyDynamicSnapshot(t *testing.T) {
 }
 
 func TestBypassPolicyStaticEntries(t *testing.T) {
-	p := newBypassPolicy("", []string{"192.0.2.4", "10.0.0.0/8", "example.ru"})
+	p := newBypassPolicy("", []string{"1.2.3.4", "10.0.0.0/8", "example.ru"})
 	got := p.staticEntries()
-	want := map[string]bool{"192.0.2.4/32": true, "10.0.0.0/8": true}
+	want := map[string]bool{"1.2.3.4/32": true, "10.0.0.0/8": true}
 	if len(got) != len(want) {
 		t.Fatalf("staticEntries = %v, want %v", got, want)
 	}
@@ -284,7 +284,7 @@ func TestObserveDNSSkipsNonBypassDomains(t *testing.T) {
 	p.onLearn = func(ip string, armed bool) { learned = append(learned, ip) }
 
 	query := buildDNSQuery(t, "example.com.")
-	resp := buildDNSAnswer(t, "example.com.", [4]byte{198, 51, 100, 9})
+	resp := buildDNSAnswer(t, "example.com.", [4]byte{9, 9, 9, 9})
 	p.observeDNS(query, resp)
 
 	if len(learned) != 0 {
@@ -298,20 +298,20 @@ func TestObserveDNSLearnsBypassDomainAnswers(t *testing.T) {
 	p.onLearn = func(ip string, armed bool) { learned = append(learned, ip) }
 
 	query := buildDNSQuery(t, "www.bank.ru.")
-	resp := buildDNSAnswer(t, "www.bank.ru.", [4]byte{192, 0, 2, 4}, [4]byte{192, 0, 2, 5})
+	resp := buildDNSAnswer(t, "www.bank.ru.", [4]byte{1, 2, 3, 4}, [4]byte{1, 2, 3, 5})
 	p.observeDNS(query, resp)
 
-	want := []string{"192.0.2.4", "192.0.2.5"}
+	want := []string{"1.2.3.4", "1.2.3.5"}
 	if !equalStrings(learned, want) {
 		t.Fatalf("learned = %v, want %v", learned, want)
 	}
-	if !p.inSet(net.ParseIP("192.0.2.5")) {
+	if !p.inSet(net.ParseIP("1.2.3.5")) {
 		t.Error("resolved answer should be in the set")
 	}
 }
 
 func TestObserveDNSNoDomainsIsNoopWithoutParsing(t *testing.T) {
-	p := newBypassPolicy("", []string{"192.0.2.4"}) // IP/CIDR only, no domains
+	p := newBypassPolicy("", []string{"1.2.3.4"}) // IP/CIDR only, no domains
 	// Garbage input: if observeDNS tried to parse this, dnsQuestionName/
 	// dnsAnswerIPs would just fail closed anyway, but hasDomains() should
 	// short-circuit before either is even called.
@@ -332,10 +332,10 @@ func TestDNSQuestionNameGarbageInput(t *testing.T) {
 }
 
 func TestDNSAnswerIPs(t *testing.T) {
-	resp := buildDNSAnswer(t, "example.com.", [4]byte{192, 0, 2, 4}, [4]byte{192, 0, 2, 8})
+	resp := buildDNSAnswer(t, "example.com.", [4]byte{1, 2, 3, 4}, [4]byte{5, 6, 7, 8})
 	got := dnsAnswerIPs(resp)
-	if len(got) != 2 || !got[0].Equal(net.IPv4(192, 0, 2, 4)) || !got[1].Equal(net.IPv4(192, 0, 2, 8)) {
-		t.Fatalf("dnsAnswerIPs = %v, want [192.0.2.4 192.0.2.8]", got)
+	if len(got) != 2 || !got[0].Equal(net.IPv4(1, 2, 3, 4)) || !got[1].Equal(net.IPv4(5, 6, 7, 8)) {
+		t.Fatalf("dnsAnswerIPs = %v, want [1.2.3.4 5.6.7.8]", got)
 	}
 }
 

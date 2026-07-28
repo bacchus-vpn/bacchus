@@ -18,22 +18,19 @@ A single window: a full-width color band showing one of four states —
 English, following the OS locale; see i18n below), plus one button that's always
 "the one thing you can do right now" (Connect, wait, or Disconnect).
 
-**Connect** names no exit and no country: country-only assignment (issue #146,
-[ADR-0042](../../docs/adr/0042-country-only-exit-assignment.md)) means the
-coordinator picks the exit, and leaving `Geo` unset lets `core` take the first
-country the coordinator reports as assignable. The country picker that would let
-a user choose is issue #150, still open. Everything below that (dialing the
-coordinator, the transport handshake, tearing a session down) is exactly
-`core.Engine`'s ordinary client-role lifecycle (`core.New` → `Start` → `Connect`
-→ `Stop`), driven by `internal/appstate.Controller` and rendered by
-`main.go`/`ui.go` — see `internal/appstate`'s package doc for the exact threading
-contract between the two.
+**Connect** resolves exits from the coordinator and auto-selects the first one
+advertised — there is no picker yet (issue #150 needs country-only assignment,
+issue #146, which doesn't exist). Everything below that (dialing the coordinator,
+the transport handshake, tearing a session down) is exactly `core.Engine`'s ordinary
+client-role lifecycle (`core.New` → `Start` → `ListExits` → `Connect` → `Stop`),
+driven by `internal/appstate.Controller` and rendered by `main.go`/`ui.go` — see
+`internal/appstate`'s package doc for the exact threading contract between the two.
 
 ### Connection states (issue #149)
 | State | Meaning | Driven by |
 |---|---|---|
 | Disconnected | No tunnel. Not protected. | Initial state; after Disconnect or a failed connect attempt |
-| Connecting… | Resolving a country and negotiating a session. | Set the moment Connect is pressed |
+| Connecting… | Resolving an exit and negotiating a session. | Set the moment Connect is pressed |
 | Proxy ready | A session is up and the SOCKS5 proxy is listening on `127.0.0.1:1080`. **Not** device-wide protection — see below. | `core.Engine.Connect` returned successfully |
 | Blocked | The proxy was ready and the live path just died. | A transport-level ICE disconnect/failed/closed while the session was up — the same signal `clients/windows`'s tray status line already uses for this state (see ADR-0039) |
 
@@ -169,8 +166,7 @@ run, matching `clients/windows`'s own CI job.
 - No kill-switch enforcement in this client yet — see the Connection states table
   above. Nothing here prevents a leak; `Blocked` reports that the path died, and does
   not claim anything about what is or is not leaving the machine.
-- Connect names no country, so `core` takes the first assignable one the
-  coordinator reports. A user cannot choose where they egress (#150).
+- Connect always picks the first exit the coordinator advertises.
 - Exit admission (ADR-0026/#60) and CRL revocation (#69) are **off unless configured**
   — set `admissionPubKey` (and optionally `admissionCrlPath`) in the config file. Left
   unset, core fails open and the client accepts any exit it can complete a handshake
@@ -178,80 +174,3 @@ run, matching `clients/windows`'s own CI job.
   disabled. If you run an admission authority, set it: it is the client's only
   end-to-end check against a coordinator handing out an exit it controls.
 - Requires a C toolchain to build (new; see Build above).
-
-## Working on this client
-
-Everything below is for someone who has just cloned the repo.
-
-### Prerequisites
-
-| What | Why |
-|---|---|
-| **Go ≥ the `go` directive in `go.mod`** (1.26.4 at time of writing) | One Go module for the whole repo. |
-| **A C toolchain** | Required, not optional — see Build above. Without one, `go build ./clients/fyne` fails with `build constraints exclude all Go files in …/go-gl/gl`, which is cgo being disabled rather than a missing source file. That error message is confusing enough to have cost people an afternoon; it means "install gcc". |
-| **A display** to run it | Or `xvfb-run` on Linux. See the verification recipe below. |
-
-### The package split, and why it matters for testing
-
-```
-clients/fyne/
-├── main.go, ui.go, settings.go, theme.go   ← Fyne. Needs cgo. Cannot be unit-tested here.
-└── internal/appstate/                      ← Fyne-FREE. Pure Go. Fully testable.
-```
-
-`internal/appstate` holds the connection state machine, the config format, the
-autostart reconciliation, and the `core.Engine` lifecycle. It imports **no Fyne
-package at all**, which is the whole point: it builds and tests without a C
-toolchain, so the logic worth testing is testable on any machine, and CI can
-cover it even where a GUI cannot run.
-
-```bash
-go test -count=1 ./clients/fyne/internal/appstate/...   # works anywhere, no cgo
-go build ./clients/fyne                                 # needs the C toolchain
-```
-
-If you are adding behaviour, put it in `internal/appstate` and let `main.go`/
-`ui.go` render it. Logic that drifts up into the Fyne layer becomes untestable
-without a display, which in practice means untested.
-
-### Verifying a GUI change without a desktop
-
-The technique used to prove this seam (ADR-0039) and reused since: build inside
-the project's Docker buildenv, run under `Xvfb`, and screenshot. That covers
-"does it start and render" — which is the failure mode that matters for a
-skeleton — without needing a desktop session or a signed build. CI's
-`linux-client` job does the same thing minus the screenshot: it launches the
-binary under `xvfb-run` and confirms it is still alive five seconds later.
-
-**On this dev machine `clients/fyne` cannot be built at all** (no C toolchain),
-so changes here are verified through `internal/appstate`'s tests plus CI. Anyone
-claiming to have verified a Fyne-layer change should say which of those two they
-actually ran.
-
-### Enforced by code vs. upheld by convention
-
-Trust this table over any comment, and the code over this table.
-
-**Enforced — a violation fails to build, or fails a test that exists:**
-
-- `internal/appstate` imports no Fyne package. A violation breaks the cgo-free
-  build immediately.
-- Launch-on-boot is *reconciled* against the saved config at every startup, not
-  merely read, so an entry deleted out of band is corrected. Tested against a
-  redirected registry key / XDG directory, never the developer's real one.
-- The settings window states, in its own body text, that split-tunnel,
-  kill-switch and DNS are saved but not enforced. That label is asserted.
-- `go vet`, `go test ./clients/fyne/internal/appstate/...`, and a real
-  `xvfb-run` launch are CI gates.
-
-**Convention only — nothing will stop you:**
-
-- *The state banner never over-claims.* `Proxy ready` deliberately does not say
-  "protected", because this client routes no device traffic. Nothing enforces
-  that a future state string stays as careful; it is the single most important
-  convention in this package.
-- *Settings that do nothing say so.* Same class of promise, same lack of
-  enforcement.
-- *Reserved (RFC 5737/3849) addresses in examples and fixtures.*
-- *Parity with `clients/windows`.* The two clients share `core` and nothing
-  else. A fix in one does not propagate; several have had to be made twice.

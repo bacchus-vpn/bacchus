@@ -96,7 +96,7 @@ func TestExitTerminateUDPRoundTrip(t *testing.T) {
 	cConn, sConn := net.Pipe()
 	deadline(t, cConn, sConn)
 
-	e := &Engine{exitKey: key, udpIdleTimeout: 5 * time.Second}
+	e := &Engine{roles: map[string]bool{RoleExit: true}, exitKey: key, udpIdleTimeout: 5 * time.Second}
 	go e.exitTerminate("", sConn)
 
 	nc, err := clientHandshake(cConn, key.Public, udpTargetPrefix+target, nil)
@@ -137,7 +137,7 @@ func TestExitTerminateUDPIdleTimeout(t *testing.T) {
 	cConn, sConn := net.Pipe()
 	deadline(t, cConn, sConn)
 
-	e := &Engine{exitKey: key, udpIdleTimeout: 40 * time.Millisecond}
+	e := &Engine{roles: map[string]bool{RoleExit: true}, exitKey: key, udpIdleTimeout: 40 * time.Millisecond}
 	go e.exitTerminate("", sConn)
 
 	nc, err := clientHandshake(cConn, key.Public, udpTargetPrefix+target, nil)
@@ -214,7 +214,7 @@ func TestHandleSocksUDPAssociateRoundTrip(t *testing.T) {
 	echoAddr := echo.LocalAddr().(*net.UDPAddr)
 
 	sess := newPipeSession()
-	e := &Engine{exitKey: key, udpIdleTimeout: 5 * time.Second}
+	e := &Engine{roles: map[string]bool{RoleExit: true}, exitKey: key, udpIdleTimeout: 5 * time.Second}
 	go func() {
 		st, err := sess.AcceptStream(context.Background())
 		if err != nil {
@@ -333,7 +333,7 @@ func TestHandleSocksUDPAssociateDropsCrossDestinationDatagram(t *testing.T) {
 	echoBAddr, echoBReceived := echoUDPCapture(t)
 
 	sess := newPipeSession()
-	e := &Engine{exitKey: key, udpIdleTimeout: 5 * time.Second}
+	e := &Engine{roles: map[string]bool{RoleExit: true}, exitKey: key, udpIdleTimeout: 5 * time.Second}
 	go func() {
 		st, err := sess.AcceptStream(context.Background())
 		if err != nil {

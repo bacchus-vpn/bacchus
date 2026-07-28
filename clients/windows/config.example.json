@@ -20,5 +20,6 @@
   "bypassMode": "exclude",
   "disableKillSwitch": false,
   "geo": "",
+  "exitId": "",
   "transportPool": []
 }

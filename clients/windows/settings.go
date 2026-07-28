@@ -1,19 +1,12 @@
 //go:build windows
 
 // Connection settings window (issue #75, ADR-0036): the client-side surface
-// over core's transport pool / per-user failover (ADR-0028) — a geo picker,
-// transport-ladder reordering, a node-count control, and a "reset learned
-// paths" button. It edits the package-level cfg (config.go) and calls only
-// core's existing exported config API (Config.Geo/TransportPool/
-// SelectionDir, Engine.ResetSelection) — no selection logic is reimplemented
-// here.
-//
-// No manual exit-ID pin, and no exit selection at all: a client names a COUNTRY
-// and the coordinator picks the exit inside it (issue #146, ADR-0042). The geo
-// box here is the persisted preference that seeds the tray picker
-// (seedCountryFromConfig, main.go); the picker is the authority for the live
-// session from then on, and saving a new geo re-seeds it rather than becoming a
-// second, competing input.
+// over core's transport pool / per-user failover (ADR-0028) — a geo picker, a
+// manual exit pin, transport-ladder reordering, a node-count control, and a
+// "reset learned paths" button. It edits the package-level cfg (config.go)
+// and calls only core's existing exported config API (Config.Geo/ExitID/
+// TransportPool/SelectionDir, Engine.ResetSelection) — no selection logic is
+// reimplemented here.
 //
 // allowedPoolTransports vs. knownPoolTransports: the full-device tunnel
 // (tunnel.go) can only carry a transport whose underlay address it can exclude
@@ -35,11 +28,7 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/hex"
 	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -82,83 +71,6 @@ func validateAdmissionConfig(pubKey, crlPath string) (trimmedPubKey, trimmedCRLP
 		return "", "", admissionConfigErr
 	}
 	return pubKey, crlPath, nil
-}
-
-// meshConfigErr is returned by validateMeshConfig for a partially-configured
-// mesh-recovery triad (issue #129) — the same "fails loudly on a
-// half-configured setup" contract cmd/node's loadMeshRecovery enforces on its
-// own flags (courier.go), applied here before it ever reaches core.Config:
-// core.Engine's own meshRecoveryConfigured instead fails SILENTLY closed on a
-// partial set (by design — see engine.go's meshRecoveryPartial doc — it just
-// never engages, with only a logged diagnostic), which would leave a
-// Settings user who filled in two of three fields believing recovery is on.
-var meshConfigErr = errors.New("mesh-walk recovery needs peers, a proof file, and the coordinator's public key together, or all three left blank")
-
-// validateMeshConfig reports whether peers/proofPath/pubKeyHex describe a
-// mesh-recovery config core would actually use: all three set, or all three
-// blank (recovery off). pubKeyHex, when present, must decode to exactly an
-// ed25519 public key — mirroring cmd/node's own -mesh-pubkey check
-// (loadMeshRecovery, cmd/node/courier.go). Returns the trimmed path/hex so
-// the caller persists what was actually validated. Testable without opening
-// the dialog.
-//
-// It does not *read* proofPath's file — like validateAdmissionConfig's CRL
-// path above, a since-moved or unreadable file is left to connect() / core to
-// fail on (see meshRecoveryFields in main.go), not the dialog to pre-check,
-// so a path configured before the file lands still saves. It does stat it for
-// the one case that would otherwise pass every check and still silently
-// disable recovery: a zero-byte proof. core.Engine's meshRecoveryConfigured
-// requires len(MeshProof) > 0 and cmd/node rejects the same file outright
-// ("-mesh-proof %s is empty"), so a truncated download would leave a Settings
-// user believing recovery is on for the whole session — the exact outcome
-// meshConfigErr's own doc says this validator exists to prevent.
-func validateMeshConfig(peers []string, proofPath, pubKeyHex string) (trimmedProofPath, trimmedPubKeyHex string, err error) {
-	proofPath = strings.TrimSpace(proofPath)
-	pubKeyHex = strings.TrimSpace(pubKeyHex)
-	switch {
-	case len(peers) == 0 && proofPath == "" && pubKeyHex == "":
-		return "", "", nil
-	case len(peers) == 0 || proofPath == "" || pubKeyHex == "":
-		return "", "", meshConfigErr
-	}
-	pub, err := hex.DecodeString(pubKeyHex)
-	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return "", "", fmt.Errorf("mesh-recovery public key must be a %d-byte ed25519 public key in hex", ed25519.PublicKeySize)
-	}
-	if fi, statErr := os.Stat(proofPath); statErr == nil && !fi.IsDir() && fi.Size() == 0 {
-		return "", "", fmt.Errorf("mesh-recovery proof %s is empty", proofPath)
-	}
-	return proofPath, pubKeyHex, nil
-}
-
-// splitMeshPeers parses the settings dialog's multi-line peer list, one
-// courier "host:port" address per line — blank lines and surrounding
-// whitespace are dropped. cmd/node's own -mesh-peers flag is comma-split
-// (splitCSV, courier.go) for the same data; this is newline-split instead to
-// fit a multi-line box rather than a single command-line flag. Splits on a
-// bare "\n": Win32's native multi-line edit control (walk.TextEdit) reports
-// typed line breaks as "\r\n", but TrimSpace already strips the trailing
-// "\r" that leaves on each line, so this handles both without caring which
-// one produced the text — the widget's own input, or joinMeshPeers' output.
-func splitMeshPeers(text string) []string {
-	var peers []string
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			peers = append(peers, line)
-		}
-	}
-	return peers
-}
-
-// joinMeshPeers is splitMeshPeers' inverse, for seeding the dialog's text
-// box from a saved config. Joins on "\r\n", not a bare "\n": confirmed by a
-// manual visual check that Win32's native multi-line edit control only
-// renders a bare "\n" as a line break when the *user* types Enter, not when
-// the text is set programmatically via SetWindowText — a bare-"\n" join
-// rendered every peer run together on one line.
-func joinMeshPeers(peers []string) string {
-	return strings.Join(peers, "\r\n")
 }
 
 // allowedPoolTransports is the set safe to actually enable for this client's
@@ -279,10 +191,9 @@ func openSettingsDialog() {
 	var dlg *walk.Dialog
 	var poolCheck *walk.CheckBox
 	var geoCombo *walk.ComboBox
+	var exitEdit *walk.LineEdit
 	var ladderBox *walk.ListBox
 	var admissionPubKeyEdit, admissionCRLPathEdit *walk.LineEdit
-	var meshPeersEdit *walk.TextEdit
-	var meshProofPathEdit, meshPubKeyEdit *walk.LineEdit
 	var upBtn, downBtn, resetBtn, saveBtn, cancelBtn *walk.PushButton
 	var statusLbl *walk.Label
 
@@ -321,6 +232,11 @@ func openSettingsDialog() {
 						Model:        geoModel,
 						CurrentIndex: geoIdx,
 					},
+					Label{Text: "Manual exit ID (optional — overrides the tray picker; leave blank to auto-select):"},
+					LineEdit{
+						AssignTo: &exitEdit,
+						Text:     snap.ExitID,
+					},
 				},
 			},
 			GroupBox{
@@ -357,7 +273,7 @@ func openSettingsDialog() {
 						MaxValue: 1,
 						Value:    1,
 						Enabled:  false,
-						Suffix:   " hop (not configurable from this client yet)",
+						Suffix:   " hop (multi-hop chaining not yet available — issue #76)",
 					},
 				},
 			},
@@ -374,33 +290,6 @@ func openSettingsDialog() {
 					LineEdit{
 						AssignTo: &admissionCRLPathEdit,
 						Text:     snap.AdmissionCRLPath,
-					},
-				},
-			},
-			GroupBox{
-				Title:  "Mesh-walk recovery (optional)",
-				Layout: VBox{},
-				ToolTipText: "Self-heals a session if every coordinator becomes " +
-					"unreachable mid-connection, by asking a peer courier for a " +
-					"fresher directory. All three fields are required together, " +
-					"or leave all three blank to keep this off.",
-				Children: []Widget{
-					Label{Text: "Peer courier addresses, one host:port per line (relay/exit nodes met in a prior session, running -courier-listen):"},
-					TextEdit{
-						AssignTo: &meshPeersEdit,
-						Text:     joinMeshPeers(snap.MeshPeers),
-						VScroll:  true,
-						MinSize:  Size{Height: 60},
-					},
-					Label{Text: "Cached proof file path (a signed snapshot from cmd/coldstart-bootstrap -cache, presented as proof of prior contact):"},
-					LineEdit{
-						AssignTo: &meshProofPathEdit,
-						Text:     snap.MeshProofPath,
-					},
-					Label{Text: "Coordinator snapshot-signing public key, hex (from cmd/coordinator -print-bootstrap-pubkey):"},
-					LineEdit{
-						AssignTo: &meshPubKeyEdit,
-						Text:     snap.MeshPubKey,
 					},
 				},
 			},
@@ -456,6 +345,7 @@ func openSettingsDialog() {
 			g = ""
 		}
 		next.Geo = g
+		next.ExitID = exitEdit.Text()
 
 		pubKey, crlPath, err := validateAdmissionConfig(admissionPubKeyEdit.Text(), admissionCRLPathEdit.Text())
 		if err != nil {
@@ -464,16 +354,6 @@ func openSettingsDialog() {
 		}
 		next.AdmissionPubKey = pubKey
 		next.AdmissionCRLPath = crlPath
-
-		meshPeers := splitMeshPeers(meshPeersEdit.Text())
-		meshProofPath, meshPubKey, err := validateMeshConfig(meshPeers, meshProofPathEdit.Text(), meshPubKeyEdit.Text())
-		if err != nil {
-			statusLbl.SetText(err.Error())
-			return
-		}
-		next.MeshPeers = meshPeers
-		next.MeshProofPath = meshProofPath
-		next.MeshPubKey = meshPubKey
 
 		mu.Lock()
 		cfg = next
@@ -486,12 +366,6 @@ func openSettingsDialog() {
 			statusLbl.SetText("Save failed: " + err.Error())
 			return
 		}
-		// A saved country is an explicit choice, so it overrides whatever the
-		// tray picker had selected — and, if a session is live, switches it
-		// (issue #137), exactly as clicking that country in the tray would.
-		// Without this the box would appear to accept a new country while the
-		// session kept egressing in the old one.
-		adoptCountryPreference(next.Geo)
 		refreshSelectedCountryLabel()
 		dlg.Accept()
 	})

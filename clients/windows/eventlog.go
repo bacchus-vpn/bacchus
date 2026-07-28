@@ -19,24 +19,15 @@ import (
 	"github.com/bacchus-vpn/bacchus/core"
 )
 
-// logOnce is a *sync.Once rather than a value so the whole singleton can be
-// reset — see logPath's doc for why a test needs that.
 var (
-	logOnce = new(sync.Once)
+	logOnce sync.Once
 	logger  *log.Logger
 	logFile *os.File
 )
 
 // logPath mirrors configPaths' fallback order (config.go): the per-user
 // app-data directory first, next to the executable if APPDATA isn't set.
-//
-// Indirected through a var, the same way clients/fyne's runKeyPath is
-// (autostart_windows.go): every path through connect()/switchCountry()/
-// watchMeshRecovery() reaches logEvent or logLine, so a test driving those
-// would otherwise append to the developer's own real
-// %APPDATA%\Bacchus\bacchus.log. redirectEventLogForTest points this at a
-// temp dir and restores the singleton afterwards.
-var logPath = func() string {
+func logPath() string {
 	if ad := os.Getenv("APPDATA"); ad != "" {
 		return filepath.Join(ad, "Bacchus", "bacchus.log")
 	}
@@ -65,23 +56,13 @@ func openLog() {
 }
 
 // formatEvent renders one engine event as a single log line (no trailing
-// newline — the logger adds one), with every IP literal redacted. Split out
-// from logEvent so the formatting itself is testable without going through the
-// process-wide log singleton.
-//
-// The redaction is not decorative and it does not belong at the call sites.
-// core's event messages carry real addresses as a matter of course — a skipped
-// coordinator, a mesh peer, a reality dial error all name one — and under
-// censorship "the coordinator I could not reach" is exactly the address a user
-// most needs kept out of a file they are about to paste into a bug report.
-// Applying it here means a future event source cannot reintroduce the leak by
-// forgetting a helper, which is precisely how abortSession's failure log came to
-// write the entire configured coordinator list verbatim.
+// newline — the logger adds one). Split out from logEvent so the formatting
+// itself is testable without going through the process-wide log singleton.
 func formatEvent(ev core.Event) string {
 	if ev.Session != "" {
-		return redactIPs(fmt.Sprintf("[%s] %s: %s", ev.Kind, ev.Session, ev.Message))
+		return fmt.Sprintf("[%s] %s: %s", ev.Kind, ev.Session, ev.Message)
 	}
-	return redactIPs(fmt.Sprintf("[%s] %s", ev.Kind, ev.Message))
+	return fmt.Sprintf("[%s] %s", ev.Kind, ev.Message)
 }
 
 // logEvent appends one engine event to the event log. Every kind is
@@ -101,22 +82,13 @@ func logEvent(ev core.Event) {
 // logLine appends a plain diagnostic line to the event log — for client-side
 // steps the engine event stream doesn't cover, notably the full-device tunnel
 // bring-up (tunnel.go), which otherwise leaves no trace when a step blocks.
-// Best-effort, same as logEvent, and redacted for the same reason: this and
-// logEvent are the only two writers into bacchus.log, so redacting both is what
-// makes "addresses do not reach the log" a property of the file rather than a
-// habit of its callers.
-//
-// runPS additionally passes its command and output through logSafe (routes.go)
-// before calling this. That is not redundant: logSafe also cuts to the first
-// line and catches the partial dotted-quad a PowerShell hard wrap leaves behind,
-// neither of which is an IP literal redactIPs can see. Redaction is idempotent,
-// so the overlap costs nothing.
+// Best-effort, same as logEvent.
 func logLine(format string, args ...any) {
 	openLog()
 	if logger == nil {
 		return
 	}
-	logger.Print(redactIPs(fmt.Sprintf(format, args...)))
+	logger.Printf(format, args...)
 }
 
 // closeLog flushes and closes the event log, best-effort, on shutdown.

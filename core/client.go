@@ -357,7 +357,7 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 			return connPath{}, err
 		}
 		e.greet(l)
-		modes := reconnectModes(prefer, !triedDirect)
+		modes := e.modeLadder(prefer, !triedDirect)
 		if modesHaveDirect(modes) {
 			triedDirect = true
 		}
@@ -557,11 +557,33 @@ func sameCoordSet(a, b []string) bool {
 	return true
 }
 
+// modeLadder is reconnectModes for THIS engine: the same ordering, minus modeDirect
+// whenever the client is chaining (issue #142).
+//
+// A direct path has no relay in it, so there is nothing for an onion to be built on
+// — chainFor returns no plan for it and the attempt would come up as an ordinary
+// unchained connection. That is a silent downgrade, which is the one outcome
+// core/relaychain.go's fail-closed rule exists to forbid: a user who configured a
+// path no single node can link, and got a path where one node sees both ends,
+// would go on acting on an assurance they no longer have. Since direct is tried
+// FIRST in the default order, leaving it in meant a chaining client's very first
+// attempt was the unchained one — and, before ADR-0042 §9 moved exit selection off
+// the wire, that attempt also put the real exit id on it.
+//
+// Dropping the tier costs a chaining client the direct path's lower latency and its
+// independence from relay availability. That is the price of the property, it is
+// stated in -relay-hops' help, and it is why the default depth of 1 leaves the
+// ladder exactly as it was.
+func (e *Engine) modeLadder(prefer string, allowDirect bool) []string {
+	return reconnectModes(prefer, allowDirect && !e.chaining())
+}
+
 // reconnectModes orders the candidate modes for one coordinator pass. allowDirect
-// (true only on the first member of a pass) offers direct once, since its P2P
-// hole-punch outcome is coordinator-independent. prefer == modeRelay retries relay
-// before direct so a dropped relay path is re-tried before falling back to direct;
-// any other prefer keeps the initial direct-then-relay order.
+// (true only on the first member of a pass, and never for a chaining client — see
+// modeLadder) offers direct once, since its P2P hole-punch outcome is
+// coordinator-independent. prefer == modeRelay retries relay before direct so a
+// dropped relay path is re-tried before falling back to direct; any other prefer
+// keeps the initial direct-then-relay order.
 func reconnectModes(prefer string, allowDirect bool) []string {
 	if prefer == modeRelay {
 		if allowDirect {
@@ -642,18 +664,37 @@ func mergeOutcome(a, b connectOutcome) connectOutcome {
 }
 
 // connectReq is one pairing request: the country to egress in, the mode to pair,
-// and which of this client's own recent sessions failed so the coordinator avoids
-// their exits.
+// which of this client's own recent sessions failed so the coordinator avoids their
+// exits, and — for a chaining client — the assembled chain whose head it wants to be
+// wired to.
 //
 // country always names where the client wants to EGRESS — the terminating exit's
-// country. That is a wire commitment rather than a local convention: client-assembled
-// onion routing (#142, ADR-0038) will add a first hop the client names itself, and it
-// must be able to do so without changing what country means to anything already
-// reading it. See ADR-0042 §9.
+// country. That is a wire commitment rather than a local convention (ADR-0042 §9),
+// and it is why a chained request omits the field rather than repurposing it: on a
+// chained path the client resolves its own terminating exit, so there is no country
+// for the coordinator to act on, and sending one would hand it the user's egress
+// jurisdiction for nothing. See wireCountry.
 type connectReq struct {
 	country string
 	mode    string
 	exclude []string // session ids, not exit ids — see wire.ExcludeSessions
+
+	// plan, when non-nil, is a relay chain (issue #142, ADR-0038). It changes what
+	// goes out — connect{firstHop} names the chain's first peeling hop instead of
+	// asking the coordinator to choose an exit — and it makes the reply's relay
+	// disposition load-bearing rather than informational (see the relayPeer and
+	// verifyChainDisjoint checks below). A nil plan, which is every path at the
+	// default depth, leaves the request byte-identical to what it was.
+	plan *chainPlan
+}
+
+// wireCountry is the country this request puts on the wire: the requested one
+// normally, and NOTHING on a chained request. See the type doc.
+func (r connectReq) wireCountry() string {
+	if r.plan != nil {
+		return ""
+	}
+	return r.country
 }
 
 // attemptResult is one pairing attempt's outcome. The exit fields are the reason this
@@ -662,10 +703,15 @@ type connectReq struct {
 // forgets to carry it forward runs the end-to-end handshake against the wrong static
 // key, which surfaces as an authentication failure rather than as the plumbing mistake
 // it is — so the value is placed where it cannot be dropped by omission.
+//
+// On a CHAINED attempt the exit fields are the client's own choice rather than the
+// coordinator's answer, read back out of the plan. They mean the same thing to every
+// reader — "the exit this path terminates at" — which is what lets accounting, the
+// connected-via line and the pool's learned store stay unaware that chaining exists.
 type attemptResult struct {
 	sess    Session
 	sid     string
-	exitID  string // the exit the coordinator assigned (issue #146)
+	exitID  string // the exit the coordinator assigned (issue #146), or the chain's own (#142)
 	exitPub []byte // exitID decoded; validated once here, at the wire boundary
 	relay   string // relay disposition (issue #17): relayPeer / relayTURN / ""
 	outcome connectOutcome
@@ -676,7 +722,16 @@ type attemptResult struct {
 // dials the transport over the resulting session. dedup is the per-pass relay skip-set
 // (issue #56).
 func (e *Engine) attempt(ctx context.Context, l *coordLink, mode string, timeout time.Duration, dedup *relayDedup) attemptResult {
-	return e.attemptWith(ctx, l, connectReq{country: e.connectCountry, mode: mode}, e.transport, timeout, dedup)
+	plan, err := e.chainFor(mode, e.connectCountry)
+	if err != nil {
+		// The user asked for a chained relay path and one could not be assembled. That
+		// fails this attempt rather than falling back to an unchained relay: see
+		// core/relaychain.go on why a silent downgrade is the one outcome this feature
+		// must never produce.
+		e.emit(EventError, "", "[relay] chain not built: %v", err)
+		return attemptResult{outcome: transportFailed}
+	}
+	return e.attemptWith(ctx, l, connectReq{country: e.connectCountry, mode: mode, plan: plan}, e.transport, timeout, dedup)
 }
 
 // attemptWith is attempt generalized over the request and transport, so the pool
@@ -693,7 +748,8 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	e.drainMsgCh(l)
 	l.sendN(wire{
 		Type:            "connect",
-		Country:         req.country,
+		Country:         req.wireCountry(),
+		FirstHop:        req.plan.firstHopID(),
 		Mode:            req.mode,
 		Cred:            e.cfg.AdmissionCred,
 		ExcludeSessions: req.exclude,
@@ -711,17 +767,32 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 		e.emit(EventError, "", "coordinator refused to pair in %s: %s", req.country, refusalText(reply.reason))
 		return attemptResult{outcome: coordinatorRefused}
 	}
-	// An exit's id IS its Noise static public key (ADR-0009), so a mint without a
-	// usable one cannot be connected over at all. Validate at the wire boundary and
-	// treat a bad or missing id as a refusal rather than carrying it inward to fail as
-	// a confusing handshake error several layers down.
-	exitPub, err := hex.DecodeString(reply.exitID)
-	if err != nil || len(exitPub) != 32 {
-		e.emit(EventError, reply.sid, "coordinator assigned session %s without a usable exit id (%q) — cannot establish the end-to-end channel", reply.sid, reply.exitID)
-		return attemptResult{outcome: coordinatorRefused}
+	// Which exit this path terminates at, and its static key.
+	//
+	// On an ordinary attempt the coordinator's answer is the only source: an exit's id
+	// IS its Noise static public key (ADR-0009), and under country-only assignment the
+	// client did not choose the exit, so it cannot know the key unless told. Validate
+	// at the wire boundary and treat a bad or missing id as a refusal rather than
+	// carrying it inward to fail as a confusing handshake error several layers down.
+	//
+	// On a CHAINED attempt the plan is the only source, and the reply is ignored
+	// entirely — not merely preferred. The coordinator was asked to wire a hop and was
+	// never told the exit, so it has nothing truthful to say here; reading a key out of
+	// its reply would let it redirect a chained path's innermost layer to a node of its
+	// choosing, which is the whole attack the chain exists to prevent.
+	exitID, exitPub := reply.exitID, []byte(nil)
+	if req.plan != nil {
+		exitID, exitPub = req.plan.exitID, req.plan.exitPub
+	} else {
+		var err error
+		exitPub, err = hex.DecodeString(exitID)
+		if err != nil || len(exitPub) != 32 {
+			e.emit(EventError, reply.sid, "coordinator assigned session %s without a usable exit id (%q) — cannot establish the end-to-end channel", reply.sid, reply.exitID)
+			return attemptResult{outcome: coordinatorRefused}
+		}
 	}
 	sid := reply.sid
-	e.emit(EventSession, sid, "[%s] session: %s (exit %s)", req.mode, sid, shortID(reply.exitID))
+	e.emit(EventSession, sid, "[%s] session: %s (exit %s)", req.mode, sid, shortID(exitID))
 	// Surface which data-plane path a relay-mode request actually got (issue #17):
 	// the preferred Bacchus peer relay, or the TURN fallback when none was free.
 	switch reply.relay {
@@ -741,6 +812,27 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	// well-behaved coordinator leaves the tag empty off the peer path, so this
 	// changes nothing for it (an empty tag is already a dedupe no-op).
 	isPeerRelay := reply.relay == relayPeer
+
+	// A chained path requires a genuine peer relay in front of it, so a TURN
+	// fallback fails the attempt instead of being chained (issue #142). On that
+	// disposition the coordinator wires us straight to the node we named — which is
+	// the chain's first peeling hop — so that hop would see our own address AND, one
+	// layer in, the real exit: exactly the linkage the chain was bought to prevent.
+	// Failing here lets selection try another member or candidate, whereas building
+	// the chain anyway would hand the user an assurance it does not have.
+	// This is the same fail-closed rule as the rest of core/relaychain.go: never
+	// silently give back a weaker path than the one that was asked for.
+	if req.plan != nil && !isPeerRelay {
+		e.emit(EventInfo, sid, "[relay] %v", errChainNoTURN)
+		return attemptResult{sid: sid, outcome: transportFailed}
+	}
+	// And it requires that relay to be a DIFFERENT node from every hop it is about to
+	// telescope through, or one node holds both ends of the chain. Checked here rather
+	// than in chainFor because the relay is not known until the reply arrives.
+	if err := verifyChainDisjoint(req.plan, reply.tag); err != nil {
+		e.emit(EventInfo, sid, "[relay] %v", err)
+		return attemptResult{sid: sid, outcome: transportFailed}
+	}
 
 	// If this peer relay already failed a dial this pass, an earlier pool member
 	// handed back the SAME relay — skip re-dialing a known-bad splice and rotate on.
@@ -765,10 +857,15 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 		}
 		// The sid rides out on the failure too: it is what a retry names in
 		// ExcludeSessions so the coordinator does not hand back the same exit.
-		return attemptResult{sid: sid, exitID: reply.exitID, outcome: transportFailed}
+		return attemptResult{sid: sid, exitID: exitID, outcome: transportFailed}
 	}
-	e.trackSession(sid, sess, false) // client's own tunnel: reconnectLoop owns its lifetime, never the reaper
-	return attemptResult{sess: sess, sid: sid, exitID: reply.exitID, exitPub: exitPub, relay: reply.relay, outcome: connectOK}
+	// Tag the session with the chain it was paired through, so every end-to-end
+	// channel opened over it later telescopes the same hops without any separate
+	// bookkeeping to keep in step across a failover (see planOf). A nil plan
+	// returns sess itself, unwrapped.
+	chained := withChain(sess, req.plan)
+	e.trackSession(sid, chained, false) // client's own tunnel: reconnectLoop owns its lifetime, never the reaper
+	return attemptResult{sess: chained, sid: sid, exitID: exitID, exitPub: exitPub, relay: reply.relay, outcome: connectOK}
 }
 
 // refusalText renders a coordinator refusal reason for a human. The two country
@@ -781,6 +878,14 @@ func refusalText(reason string) string {
 		return "country-busy (every exit there is at capacity or out of quota — try again shortly, or choose another country)"
 	case "no-such-country":
 		return "no-such-country (this coordinator knows no exit in that country — check the country code)"
+	case "no-such-hop":
+		return "no-such-hop (this coordinator has no exit registered under the node this chain names as its first hop — your signed directory may be stale)"
+	case "hop-needs-relay-mode":
+		// Not reachable from an honest client — chainFor builds a plan only in relay
+		// mode, so this build never names a hop outside it. Rendered anyway: reaching
+		// it means the engine is sending a combination it believes it cannot send,
+		// and a bare reason string in a log is a poor way to find that out.
+		return "hop-needs-relay-mode (a first hop may only be named on a relay-mode connect; this is a client bug, not a network condition)"
 	case "":
 		return "no reason given"
 	default:
@@ -1213,12 +1318,16 @@ func (e *Engine) handleSocksConnect(c net.Conn, buf []byte, sess Session, exitPu
 		c.Write([]byte{5, 1, 0, 1, 0, 0, 0, 0, 0, 0})
 		return
 	}
-	nc, err := clientHandshake(st, exitPub, target, e.exitVerifyFunc(exitPub))
+	// dialE2E is clientHandshake when this path carries no chain, which is every
+	// path at the default hop count; when it does carry one it telescopes the hops
+	// first and ends in the same clientHandshake call (core/relaychain.go).
+	nc, err := e.dialE2E(st, planOf(sess), exitPub, target)
 	if err != nil {
 		_ = st.Close()
 		// A rejected exit credential (issue #60) lands here like any other
 		// handshake failure: the stream is dropped, SOCKS reports a general
-		// failure, and the reason is surfaced as an event for the user.
+		// failure, and the reason is surfaced as an event for the user. A chain
+		// that failed to build a hop layer surfaces the same way.
 		e.emit(EventError, "", "exit rejected: %v", err)
 		c.Write([]byte{5, 1, 0, 1, 0, 0, 0, 0, 0, 0})
 		return

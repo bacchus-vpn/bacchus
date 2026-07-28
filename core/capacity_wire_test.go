@@ -218,7 +218,7 @@ func TestUDPRelayIsMetered(t *testing.T) {
 	}
 	cConn, sConn := net.Pipe()
 	deadline(t, cConn, sConn)
-	e := &Engine{exitKey: key, udpIdleTimeout: 5 * time.Second, quota: q, limiterCtx: context.Background()}
+	e := &Engine{roles: map[string]bool{RoleExit: true}, exitKey: key, udpIdleTimeout: 5 * time.Second, quota: q, limiterCtx: context.Background()}
 	go e.exitTerminate("", sConn)
 
 	nc, err := clientHandshake(cConn, key.Public, udpTargetPrefix+echo.LocalAddr().String(), nil)

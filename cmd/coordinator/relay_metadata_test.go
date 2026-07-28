@@ -303,3 +303,35 @@ func TestLoadOperators(t *testing.T) {
 		t.Fatal("malformed file must be an error")
 	}
 }
+
+// TestSnapshotExitCarriesItsOperator pins the operator tag on EXIT entries, which
+// is what makes operator-diversity hop selection work at the depth most clients run
+// (issue #142, ADR-0038 §6).
+//
+// It was relay-only, and that quietly reduced the control to a no-op. A chain's head
+// must be exit-role — it is the node the coordinator pairs the client to, via
+// connect{firstHop} — so an unlabeled head was neither recorded as a used operator
+// nor collided against. At depth 2 the head is the only peeling hop there is, so
+// "operator diversity is enforced" described nothing at all.
+//
+// The operators map has never been role-scoped; it is keyed by node id. So this
+// reads a value that was already loaded and was simply not being stamped.
+func TestSnapshotExitCarriesItsOperator(t *testing.T) {
+	setPC(t)
+	resetRegistry(t)
+	setOperators(t, map[string]string{"exit-known": "op-acme"}) // exit-unknown deliberately absent
+	knownP, unknownP := fakePeer(t), fakePeer(t)
+
+	registerExit("exit-known", "NL", "203.0.113.7:20000", knownP)
+	registerExit("exit-unknown", "NL", "203.0.113.8:20000", unknownP)
+
+	snap := buildSnapshot("203.0.113.1:3478")
+	if e := findEntry(t, snap, "exit-known"); e.Operator != "op-acme" {
+		t.Fatalf("exit operator = %q, want op-acme — an unlabeled chain head makes ADR-0038 §6 diversity inert at depth 2", e.Operator)
+	}
+	// The same coordinator-side-truth rule exits inherit from relays: a node the
+	// coordinator has no assignment for stays unlabeled rather than self-reporting.
+	if e := findEntry(t, snap, "exit-unknown"); e.Operator != "" {
+		t.Fatalf("unassigned exit must have an empty operator (coordinator-side truth), got %q", e.Operator)
+	}
+}
