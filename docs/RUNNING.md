@@ -248,6 +248,54 @@ another id); client credentials are bearer, so their safety is the out-of-band
 channel they're delivered over. See
 [node-admission.md](design/node-admission.md).
 
+## Device entitlement at connect (issue #50, ADR-0045)
+
+A **second, separate** gate from admission above, and both are checked. Admission
+asks "may this party be on the network at all?"; this asks "does this device hold
+a live entitlement right now?". They anchor to different keys on purpose — do not
+configure one expecting it to cover the other.
+
+Off by default: with no `-device-root-pubkey` the gate is disabled and connects are
+gated by admission alone. To enforce it, give the coordinator the **offline root's**
+public key (hex) — the account service's root, not the admission authority's:
+```
+bacchus-coordinator -turn-public-ip <IP> -turn-user <u> -turn-pass <p> \
+    -admission-pubkey <ADMISSION_PUBKEY> \
+    -device-root-pubkey <ROOT_PUBKEY> \
+    -advertise <host:port>
+
+# Revoke a device credential or issuer cert by serial (hot-reloaded, no restart).
+# A flat JSON list of serials, same shape as the admission revocation file.
+$EDITOR secrets/device-revocations.json
+```
+The coordinator holds only the root **public** key, verifies the whole chain
+offline, and never calls the account service — so this keeps working when that
+service is unreachable, and leaks nothing to it when it is not. The cost is
+revocation latency, bought back by short credential lifetimes.
+
+Two startup failures are **fatal rather than degraded**, both because they would
+otherwise look exactly like success:
+- a malformed `-device-root-pubkey` (a coordinator told to enforce entitlement with
+  an unusable anchor must not fall through to serving everyone), and
+- an enabled gate with no audience: set `-advertise` (or `-device-audience`) to the
+  identity clients dial this coordinator by, or a device's assertion would be bound
+  to nothing.
+
+The audience must be what a client knows **independently**, because it chose to
+dial it. Bacchus runs a pool of coordinators, and an audience a coordinator merely
+announced would let a hostile pool member announce someone else's, relay the
+challenge, and spend another account's entitlement.
+
+Note the failure direction is the same as `-admission-pubkey` (unset = off) and the
+**opposite** of `-policy-root-pubkey`, which stops assigning new work once its
+policy goes stale. ADR-0045 §2 records why. Once a root *is* configured there is no
+soft mode: a chain that fails verification is refused.
+
+**Clients must be updated first.** The wire fields are additive, so a client
+predating #50 connects exactly as it does today — but it does not perform the
+challenge exchange, so enabling the gate on a network with such clients refuses
+them.
+
 ## Verify
 On the client device:
 ```

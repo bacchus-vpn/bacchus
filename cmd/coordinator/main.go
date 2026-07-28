@@ -185,6 +185,20 @@ type wire struct {
 	QuotaState      string                 `json:"quotaState,omitempty"`  // quotaOK | quotaExhausted (issue #143, ADR-0040): whether this forwarder's declared monthly quota — its operator's own ISP data cap — is spent for the current billing cycle. Re-sent on EVERY register (core/engine.go registerLoop) because the handler below replaces the registry entry wholesale, so a state carried once would be forgotten 10s later. One BIT rather than the byte counts, deliberately: matchmaking needs only "may I assign to you", and a per-node monthly usage curve would hand this coordinator — untrusted by standing assumption (ADR-0020, #60) — a linkability signal about a residential operator's household in exchange for nothing. Empty = no declared quota; additive/optional.
 	Receipt         *accounting.Receipt    `json:"receipt,omitempty"`     // capacity-report payload (issue #158, ADR-0041): a co-signed usage receipt (ADR-0021) the CLIENT sends to feed the coordinator-side capacity estimator. Carries the client-asserted Saturated bit; bound to the co-signing client by ReportSig. Absent on every other message. A leaf import (core/accounting), like admission — not the transport stack this binary avoids.
 	ReportSig       []byte                 `json:"reportSig,omitempty"`   // client signature over the capacity-report receipt + its saturation bit (accounting.SignReport, issue #158): proves the un-co-signed Saturated bit came from the client that co-signed the receipt, so a node that merely holds the receipt cannot forge or flip it.
+
+	// Connect-time device-credential verification (issue #50, ADR-0045). These four
+	// carry the account service's two-tier entitlement chain, which is a DIFFERENT
+	// credential from Cred above: Cred is the network's own membership (one tier,
+	// bearer, operator-anchored), these are an entitlement bound to one device
+	// (two tiers, challenge-bound, anchored to a root the operator does not hold).
+	// Both are checked on a connect and neither replaces the other.
+	//
+	// All four are additive/optional: with -device-root-pubkey unset the gate is off
+	// and a client predating #50 connects exactly as it does today.
+	Challenge    string `json:"challenge,omitempty"`    // standard base64. Coordinator -> client on a "challenge" reply: the fresh nonce a device must sign. Client -> coordinator on a "connect": the nonce it signed, echoed back so a mismatch is a clear refusal rather than an opaque assertion failure. Single use — spending it removes it, so a captured connect cannot be replayed inside the nonce's own lifetime.
+	DeviceCred   string `json:"deviceCred,omitempty"`   // the device credential in its "bacchusd1:" envelope form: tier two, signed by the issuer key, carrying the device pubkey, the account generation and a short window.
+	IssuerCert   string `json:"issuerCert,omitempty"`   // the issuer cert in its "bacchusi1:" envelope form: tier one, signed by the OFFLINE ROOT, delegating "may issue device credentials" with a cap on what it may mint. Verified against the anchored root before anything inside it is trusted.
+	DeviceAssert string `json:"deviceAssert,omitempty"` // standard base64. The device's signature over purpose || audience || challenge, proving it holds the key inside DeviceCred. The audience and challenge bindings are what stop this being replayed at another coordinator or a later connect.
 }
 
 // Declared-quota dispositions (issue #143, ADR-0040) carried in wire.QuotaState.
@@ -355,6 +369,9 @@ func main() {
 	bootstrapSecretsPath := flag.String("bootstrap-secrets", "secrets/bootstrap-secrets.json", "path to the per-user bootstrap secrets file (see cmd/coldstart-issue); reloaded periodically")
 	admissionPubKey := flag.String("admission-pubkey", "", "admission authority public key (hex, from cmd/admission-issue). When set, every node (register) and client (list/connect) must present a credential this key signed (issue #42). Empty DISABLES admission — the network serves anyone.")
 	admissionRevocations := flag.String("admission-revocations", "secrets/admission-revocations.json", "path to the revoked-credential-serials file (hot-reloaded); a missing file means nothing is revoked")
+	deviceRootPubKey := flag.String("device-root-pubkey", "", "offline ROOT public key (hex) that the account service's device-credential chain anchors to (issue #50, ADR-0045). When set, every client connect must additionally present a device credential, the issuer cert it chains through, and an assertion over a challenge this coordinator issued — all verified OFFLINE, so this coordinator never calls the account service. Empty DISABLES the gate and leaves connects gated by -admission-pubkey alone. This is a DIFFERENT credential from -admission-pubkey's: that one is the network's own membership, this one is an entitlement bound to one device, and both are checked. Direction of failure matches -admission-pubkey (unset = off) and is deliberately the opposite of -policy-root-pubkey; see ADR-0045 for why an absent anchor is not sheddable the way a stale policy is.")
+	deviceAudienceFlag := flag.String("device-audience", "", "the audience string a device must bind its connect assertion to (issue #50). Defaults to -advertise, which is what a client knows independently because it chose to dial it. Set explicitly only when clients reach this coordinator under a name it does not advertise itself as. An assertion bound to an audience the coordinator merely announced would bind nothing — a hostile pool member would announce someone else's and relay.")
+	deviceRevocations := flag.String("device-revocations", "secrets/device-revocations.json", "path to the revoked device-credential and issuer-cert serials file (hot-reloaded); a missing file means nothing is revoked. Separate from -admission-revocations because the two credentials come from different authorities and their serial namespaces are unrelated.")
 	operatorsPath := flag.String("operators", "secrets/operators.json", "path to the node->operator-tag assignment file (JSON object {\"nodeID\":\"operatorTag\"}), advertised in the signed directory for operator-diversity hop selection (issue #124, ADR-0038); a missing file means no operator tags")
 	geoipDir := flag.String("geoip", "", "path to an unzipped MaxMind GeoLite2-Country-CSV directory, used to derive each node's country from the source address this coordinator OBSERVES it register from (issue #136). Staged out of band and never committed; see docs/RUNNING.md. Empty DISABLES derivation and falls back to each node's self-reported -country tag.")
 	geoipRequired := flag.Bool("geoip-required", false, "refuse to fall back to a node's self-reported -country when its observed address does not resolve (issue #136). The hardened posture: no node self-report can reach a client's country choice. Off by default because every node in a local stack registers from loopback, which no database resolves. Requires -geoip.")
@@ -401,6 +418,22 @@ func main() {
 		log.Printf("WARNING: admission DISABLED (-admission-pubkey not set) — any client or node can join this network (issue #42)")
 	} else {
 		log.Printf("admission ENABLED — nodes and clients must present a credential signed by the configured authority")
+	}
+	// Connect-time device-credential verification (issue #50, ADR-0045). Started
+	// here, next to admission, because it is the same kind of thing — a gate on the
+	// connect path built from an operator-configured public key — and NOT folded
+	// into admission, because it answers a different question against a different
+	// trust anchor. A malformed key, or an enabled gate with no audience to bind
+	// assertions to, is fatal rather than degraded.
+	dv, audience, err := setupDeviceCred(context.Background(), *deviceRootPubKey, *deviceAudienceFlag, coordAdvertise(*advertise, *addr), *deviceRevocations)
+	if err != nil {
+		log.Fatal(err)
+	}
+	deviceVerifier, deviceAudience = dv, audience
+	if dv == nil {
+		log.Printf("device-credential gate DISABLED (-device-root-pubkey not set) — connects are gated by admission alone; no entitlement is checked (issue #50)")
+	} else {
+		log.Printf("device-credential gate ENABLED — every connect must present a credential chaining to the configured offline root, bound to audience %q (issue #50)", audience)
 	}
 	// Signed network policy (issue #39, ADR-0043). Started before the packet loop so
 	// the cached policy is restored — and the fail-closed state is established —
@@ -630,6 +663,27 @@ func handle(m wire, src *net.UDPAddr) {
 		// Advertise this coordinator's release too, so the client can apply the
 		// force-major / skip-minor rule (issue #36, ADR-0015).
 		send(src, wire{Type: "countries", Countries: countrySnapshot(now), Release: coordRelease})
+	case "challenge":
+		// Device-credential challenge (issue #50, ADR-0045). A device cannot prove
+		// possession of its credential's key without a nonce THIS coordinator chose,
+		// so it asks for one immediately before connecting.
+		//
+		// Gated by admission like every other client message, so an uncredentialed
+		// party cannot spin the challenge store. The nonce is single use and
+		// short-lived; see admitDevice.
+		if !admit(m, src, admission.RoleClient, "") {
+			return
+		}
+		c := issueDeviceChallenge(src)
+		if c == "" {
+			// Either the gate is off — in which case a client that asks anyway gets an
+			// empty challenge and simply has nothing to sign — or the store is at
+			// capacity, which is a refusal to issue rather than an eviction of someone
+			// else's live nonce. Both are reported the same way: no challenge.
+			send(src, wire{Type: "challenge"})
+			return
+		}
+		send(src, wire{Type: "challenge", Challenge: c})
 	case "connect":
 		// Client admission (issue #42): matchmaking is gated too, so a leaked
 		// exit list can't be turned into a live session without a credential.
@@ -648,6 +702,18 @@ func handle(m wire, src *net.UDPAddr) {
 			const reason = "coordinator has no enforceable network policy — not assigning new sessions; retry shortly or use another coordinator"
 			log.Printf("connect from %s: refused (%s)", src, reason)
 			send(src, wire{Type: "reject", Reason: reason})
+			return
+		}
+		// Connect-time device-credential verification (issue #50, ADR-0045). The
+		// account service's entitlement chain, verified offline against the anchored
+		// root and bound to the challenge issued to this source above.
+		//
+		// After the drain check deliberately: a coordinator that is not assigning
+		// anything should not spend ed25519 verifications on connects it is going to
+		// refuse regardless, and the client's response to a drain is to rotate away
+		// rather than to fix its credential. Before any assignment work, because a
+		// connect that fails here mints nothing at all.
+		if !admitDevice(m, src) {
 			return
 		}
 		// Per-connect idempotency (issue #1, ADR-0042 §2). Each connect is sent

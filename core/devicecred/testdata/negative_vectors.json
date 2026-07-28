@@ -1,0 +1,268 @@
+{
+  "note": "Frozen NEGATIVE wire vectors for the root -> issuer cert -> device credential chain. Every case here MUST be rejected, and rejected with the error named in expect_error. Every key is a published throwaway (internal/devroot and fixed phrases). A coordinator's verifier must reject each case with the named error; passing these plus the positive vectors is what makes conformance mean a correct verifier rather than a byte match. issuer_cert/device_cred are envelope strings; assertion/challenge/root_pub are standard base64. revoked_serial, when set, is the serial the verifier's revocation predicate must report revoked. Regenerate only alongside a deliberate format change: go test ./internal/chain -update.",
+  "root_pub": "G3qe/RAaWSSOU+NMl5UUj9/E2nEr2PfgFGzbL9aHisY=",
+  "cases": [
+    {
+      "name": "credential expired",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-17T12:00:01Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "expired"
+    },
+    {
+      "name": "credential expired exactly on NotAfter (strict boundary)",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-17T12:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "expired"
+    },
+    {
+      "name": "credential not yet valid beyond clock skew",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T11:57:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "not_yet_valid"
+    },
+    {
+      "name": "issuer cert expired, credential still live",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJlMTdjNGUwOGMzYTlhMzdhIiwiaXB1YiI6Ik80c1JCaWlYRDRoK29aam04cUZYWXRWckpjNlZENjltWGYzNXBOVWNEdDg9IiwibmJmIjoiMjAyNi0wNy0xNVQxMTowMDowMFoiLCJleHAiOiIyMDI2LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6ImxhcHNlZCJ9DJKr7pA6NSa3P4qZqBJnZrgFV7oMDqiNRgnxUoG3wQCGXtDl6t9Zl2Rl2YS-HvlwQtHxIdV7a2rtdoE93kOcCA",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiJjM2MzYzNjM2MzYzNjM2MzIiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xNVQxNDowMDowMFoifekojn5NsyhJ9mGjUS6AJY3zt1ViYT2qyE2v8iuRsCdNyu3iu1bGhWSSNGo_mYxi2Ouw0I9nq9rUEjP35A3FPgA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "expired"
+    },
+    {
+      "name": "credential lifetime exceeds the cert's cap",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiJhMWExYTFhMWExYTFhMWExIiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xOFQxMzowMDowMFoifdPD_qlM0qctHK8nq1f8DJIK29XfxyEWYcMp2HXXByZt3_38Xv2zNrFWAIcwCdfCqldNwcGzCSZAGng_5K7Obw4",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "cred_ttl_too_long"
+    },
+    {
+      "name": "credential forged with an attacker's key",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiJmMGYwZjBmMGYwZjBmMGYwIiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifbrgu4_UuY0XEj5nk0ITT7q7Eq05Ee3hOt2789zRN-EhiKx6mm3sLnCIwmr0QYBqwcKitd0E9RQoXB0UQ_FfAQE",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_signature"
+    },
+    {
+      "name": "credential from a different issuer the same root delegates",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI4YWM1ZjIwZDFkZjQyODg4IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifYtnKV3_ibOzmMB-qz7oi3d2jZ7ZyF7co_PNYTSm0iG5d8r20w46eYbeEm8HPMMPDTaV62EqtRB31OWOQikSGwk",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_signature"
+    },
+    {
+      "name": "issuer cert signed by a key that is not the root",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiIxM2JiMmI0NDI4ZmQ5MTc2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6ImZvcmdlZCJ9c8AlXQPIcObdvWPL8BdpDdX-dKdR2_Jf0g8OXjpNJo10jXYpXrlxaF-CsK4iNN85_d6xbbHWbOBB17OmN8CsAg",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_signature"
+    },
+    {
+      "name": "credential body tampered after signing",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:hCJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_signature"
+    },
+    {
+      "name": "credential signature tampered",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKP8",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_signature"
+    },
+    {
+      "name": "issuer cert body tampered after signing",
+      "issuer_cert": "bacchusi1:hCJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_signature"
+    },
+    {
+      "name": "issuer cert presented as a device credential",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_signature"
+    },
+    {
+      "name": "device credential presented as an issuer cert",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_signature"
+    },
+    {
+      "name": "entire parallel chain under an attacker's own root",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiIwOGM3YjVjMGQ4OTQ1OWM0IiwiaXB1YiI6IitsVE8zZW03eUZqeklMS0pXc0dUSFY5ampzdUFURGhDaDRxZ1NydjhSOTQ9IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6ImV2aWwifaFF8mBjjd9IkoN5vgG2ORCPQJjopXx4a4mOBlKMBMwA336x6wbu7blMZ3D1nPU8lKV8o3dwfpPIMAYdaXInBgY",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiJkODBkZGZlZTQ5M2ExNjQ4IiwiZHB1YiI6IklOQ0g4NzNIN2N2clBUZCtkVVRXaThZNzIwL0lBMUVSM0VJblVJYzRCTVk9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifQ_K-V6ec7_rpNQICjL9cXcFXRe8KqypiIRC22ASnQhBLuOu0Q69pwdpYsTGSCLePolB4ZdVx0SPZQidgaXPSg8",
+      "assertion": "mEdnu3aFY7r3zK1yQuUk4w48YQ2pYMBijuzam0VALZTxjvALjy6rWE4uvDhPSukM3vubB6aSjtNkSU/4J8qMAg==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_signature"
+    },
+    {
+      "name": "assertion signed for a different purpose",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "g2rNbX5+SFAFSIhXcTjyaAlrkYxi6AbDMWxCpiZzKhZlC7iuyLdaR3lgtj8MU0EPK0hae6nz59jx1d3NH7ybDQ==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_assertion"
+    },
+    {
+      "name": "assertion signed for a different audience",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "dtjDot9Kum5dA4FOenqvOXb2HAPaLEzBYyMrNNpj2S/tPW72u7Bk+uxbTopC7maH2cNRJQ0FkQulFckAoOTxCA==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_assertion"
+    },
+    {
+      "name": "assertion by a device key that is not the credential's",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "AKg++ykiy5P4tIQQvebk/1ipztX7K8RidJvdJuUj0HCXI9YgfqNOuj7wRVTtMlw3YBDJHDbx4DOaDKncokCKDA==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "bad_assertion"
+    },
+    {
+      "name": "assertion replayed against a fresh challenge",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "dS8tC2SUYuy8TghBqU17KmKDKb7BQqoeclDSTy86oEY=",
+      "expect_error": "bad_assertion"
+    },
+    {
+      "name": "challenge shorter than the minimum",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "dGlueQ==",
+      "expect_error": "bad_assertion"
+    },
+    {
+      "name": "credential of an unsupported version",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoyLCJzZXJpYWwiOiJiMmIyYjJiMmIyYjJiMmIyIiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoiffAA7_3Pzd-frX2fleb0aX0lT3ZPepJ3L8BUECrTmMZeVUXG42z-XfwSAxo6DrqFptlxTbCu1x0xZRiQRsS72wI",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "unsupported_version"
+    },
+    {
+      "name": "credential carrying a malformed device public key",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiJkNGQ0ZDRkNGQ0ZDRkNGQ0IiwiZHB1YiI6IkFBQUFBQUFBQUFBQUFBPT0iLCJlcG9jaCI6MCwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI2LTA3LTE3VDEyOjAwOjAwWiJ96Nd9LPsdiL0W956-HrQM83gB2yH8q6EUs2bqYieayhHOA6MuDMrIxa71IMAmA8WMB7QJRJM5K-NxWQCQ4QjjCg",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "malformed"
+    },
+    {
+      "name": "credential truncated below a signature",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZS",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "malformed"
+    },
+    {
+      "name": "empty credential",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "malformed"
+    },
+    {
+      "name": "empty issuer cert",
+      "issuer_cert": "bacchusi1:",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "expect_error": "malformed"
+    },
+    {
+      "name": "credential revoked",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "revoked_serial": "7bfde41485fa23e4",
+      "expect_error": "revoked"
+    },
+    {
+      "name": "issuer cert revoked",
+      "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiJiZWJmOWM5M2UxNjNjM2E2IiwiaXB1YiI6ImY0eDJSdk0yWkpqaGd5dzlZM1l5SDhwbGcyZ0dOQU9maUVLK1Z3YzVjOW89IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Im5lZ3ZlY3RvciBpc3N1ZXIifZbWgYMD_9zpJbxLO81L7QjUa9B7Hfbidk7u0-Kxj9PZMS2WxpaOo-X_qBydnRrD-mnahL5lwGNFR58WC-mQPQc",
+      "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI3YmZkZTQxNDg1ZmEyM2U0IiwiZHB1YiI6ImNNRXQ4Q1ZUb3JCUGJqcHRBNFZSYkFjdWJ4cnE5dkFxRzJENXFnOUJyR0k9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaZ-odGXQjs37hFDNBOywsTb3JPD5tafDIZ38Sw31Rl3btlRZZIPjcBmIO2MrbqGqM5iw73TaFOJRxvsJ-CHKAA",
+      "assertion": "hADnpfIFSntSDT2oYOjGAcwZghrQBdWSSYpK2bkvLjPTIhTQ8aenl1wORpRPS5muBlc+4DBIhrqNzPdvK/HBAw==",
+      "now": "2026-07-15T13:00:00Z",
+      "audience": "coordinator-vector-1",
+      "challenge": "x7Ek3xgZ0PnXjD57hcOG5RjnwZiByJvkxE6TkOsDMhs=",
+      "revoked_serial": "bebf9c93e163c3a6",
+      "expect_error": "revoked"
+    }
+  ]
+}
