@@ -277,9 +277,10 @@ client's own address *and* the real exit — precisely the linkage being bought 
 ### Still deferred
 
 Per-hop relay-role admission credentials (§4.3); IP-derived AS diversity; relay-side
-DoS controls; in-place directory refresh (a restart currently adopts a new one);
-chain-aware liveness beyond the existing stall detection; and NAT-traversed middle
-hops. This change is **Part of #76** and does not close it.
+DoS controls; in-place directory refresh (a restart currently adopts a new one —
+**shipped by the issue #27 amendment at the end of this file**); chain-aware
+liveness beyond the existing stall detection; and NAT-traversed middle hops. This
+change is **Part of #76** and does not close it.
 
 ## Relationship
 
@@ -447,3 +448,85 @@ only the coordinator and the peer relay's transport faked. A second suite drives
 real coordinator handler, because the client half had been tested against a fake
 coordinator and the coordinator half against nothing — so a build that ignored
 `firstHop` entirely passed the repository. 19 mutations now run with no survivors.
+
+## Amendment (issue #27, 2026-07-28): in-place directory refresh
+
+The "Still deferred" list above named this the neighbourhood of §9 item 6; it turned
+out to be its own, smaller, independent change. §9 item 6 (chain liveness + rebuild)
+is about a hop *dying mid-session*; this is about the directory a client selects hops
+*from*, or a relay admits forwards against, going stale while the process keeps
+running — the rough edge §10.5 of the design doc named plainly: "restart to adopt a
+fresh snapshot."
+
+**What shipped.** `Config.RelayDirectoryPath` (core, `cmd/node`'s `-relay-directory`
+help text, and the Windows client's Settings "Relay hops" directory field, issue #28)
+names a file `reloadRelayDirLoop` re-reads on an interval (`core/relaychain.go`),
+started from `Start` exactly where `reloadCRLLoop` (issue #90) is — the client-side
+CRL-reload shape this record already cites as precedent, applied to the directory
+instead of the revocation bundle, and the same `atomic.Pointer`-swap shape
+`cmd/coordinator`'s `reloadRevocationsLoop` uses for its revocation list. A reload
+runs the fresh bytes through the *identical* `loadRelayDirectory` call construction
+uses — same signature verification under `RelayDirectoryKey`/`MeshPubKey`, same
+expiry check, same "a node id that is not a key cannot be authenticated as a hop"
+filtering — so a reload can only ever produce a directory exactly as strict as a
+fresh `New()` would, never a looser one. `RelayDirectory` itself (the inline bytes)
+must still be set and still gates construction exactly as before; the path only says
+where a *later* copy comes from.
+
+**Fail-closed, unchanged.** A reload that cannot read the file, cannot verify it, or
+finds it itself expired is logged and the *previous* directory keeps being enforced
+— never a partial one, never nothing. This is the same posture `reloadCRLLoop`
+already established and this file's own doc comment calls "the single most important
+behavioural property in this file": a hop that quietly started admitting forwards to
+`nil`, or a client that quietly stopped chaining, on a transient misread (an operator
+mid-write) or a late re-sign, would be a worse failure than the staleness this issue
+fixes. `core/relaychain_reload_test.go` pins this per failure mode (unreadable,
+unverifiable, expired) and the pickup and Start-wiring paths; every one of those five
+tests was mutation-checked by hand against the shipped code — the specific mutation
+each catches, and its result, is recorded in the PR that shipped this amendment.
+
+**The mesh-walk courier was considered as the refresh source, and rejected.** The
+design doc's Dependency consequence and this record's §9 both point at "the
+mesh-walk courier the node may already run" as a plausible source of a live
+directory. It does not fit this seam, for two independent reasons:
+
+1. **Courier-serving is a `cmd/node`-only concern.** A node opts into serving its
+   cached snapshot to recovering peers via `-courier-listen`/`startCourier`
+   (`cmd/node/main.go`); `core` itself never runs a courier, so `core.Engine` has
+   nothing to read a live snapshot out of even when the process it's embedded in
+   happens to also be running one.
+2. **Mesh-walk *recovery* (the client half `core` does own — `MeshPeers`/`MeshProof`,
+   `Engine.NeedsRecovery`) is a one-shot, fail-cold escape hatch for "every
+   coordinator is unreachable," not a standing cache of a live directory.** It exists
+   to answer a different question — can this client reach *any* rendezvous point at
+   all — and is wired through the connect path (`core/pool.go`'s dead-pool handling),
+   which this change does not touch. Sourcing directory freshness from it would
+   couple two failure domains that are orthogonal in practice: a coordinator can be
+   perfectly reachable for years while a relay directory quietly ages past its
+   validity window, and conversely a client recovering from a dead coordinator pool
+   has nothing to say about whether its *chaining* directory is fresh.
+
+   A plain re-read of the same signed-snapshot source construction already trusts —
+   with no new failure coupling, no dependency on whether this node also runs
+   mesh-walk recovery, and reusing `loadRelayDirectory` verbatim — is simpler and
+   strictly no less safe. If a future change wants push-based freshness (the courier
+   or coordinator notifying a node rather than a poll), it can still layer on top of
+   `reloadRelayDir`'s verify-and-swap without revisiting this decision.
+
+**What this did not need to touch, and what it did.** The chain-building and
+onion-forwarding logic in `core/relaychain.go` is unchanged — `loadRelayDirectory`,
+`selectHops`, `dialChain`, `relayForward` read exactly the fields they always did.
+What changed is how `Engine` *holds* the directory: `relayDir` became
+`atomic.Pointer[relayDirectory]` instead of a plain `*relayDirectory` (`core/
+engine.go`), so a reload can swap in a freshly verified directory without a lock and
+without a reader ever observing a torn or partially-updated one — every
+`*relayDirectory` a `Load()` can return is itself immutable, exactly as it was before
+this issue, so the only new invariant is that *which* immutable directory `Load()`
+returns can now change between two calls in the same process's lifetime, and a chain
+build loads it once and threads that single snapshot through its own call rather than
+re-reading `Load()` per field.
+
+**Still deferred:** chain liveness + rebuild (§9 item 6); IP-derived AS diversity;
+relay-side DoS controls; per-hop relay admission credentials; NAT-traversed
+intermediate hops; coordinator-independent relay identity (#190). This change is
+**Part of #76** and does not close it.

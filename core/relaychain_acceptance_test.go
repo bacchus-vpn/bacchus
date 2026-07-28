@@ -646,11 +646,11 @@ func TestRelayForwardRefusesToDialItself(t *testing.T) {
 	}
 
 	e := &Engine{
-		roles:    map[string]bool{RoleRelay: true},
-		exitKey:  key,
-		relayDir: dir,
-		cfg:      Config{ID: selfID, RelayIngress: selfAddr},
+		roles:   map[string]bool{RoleRelay: true},
+		exitKey: key,
+		cfg:     Config{ID: selfID, RelayIngress: selfAddr},
 	}
+	e.relayDir.Store(dir)
 	e.relayForward(nil, selfAddr)
 
 	select {
