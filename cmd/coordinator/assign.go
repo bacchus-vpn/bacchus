@@ -456,13 +456,7 @@ func chooseExit(country string, exclude map[string]bool, now time.Time) (*exitNo
 	// `candidates` was built in randomized order, "first within the tier" is an
 	// arbitrary choice among the indistinguishable ones that varies per call — which
 	// is the property, not an accident.
-	var best capacity.Rate
-	for _, e := range candidates {
-		if s := rankShare(e, load[e.id]); s > best {
-			best = s
-		}
-	}
-	floor := capacity.OctaveFloor(best)
+	floor := tierFloor(candidates, load)
 	for _, e := range candidates {
 		if rankShare(e, load[e.id]) >= floor {
 			return e, refuseNone
@@ -471,6 +465,33 @@ func chooseExit(country string, exclude map[string]bool, now time.Time) (*exitNo
 	// Unreachable: the candidate at exactly `best` always clears the floor, and mu is
 	// held throughout so nothing changed between the passes.
 	return nil, refuseCountryBusy
+}
+
+// tierFloor is the minimum rank share a candidate must offer to be in the best tier —
+// one octave below the roomiest of them (capacity.OctaveFloor).
+//
+// It is the whole of what the RANKING decides. Which member of the tier is then returned
+// is deliberately arbitrary (see chooseExit), so this floor is the only part of
+// assignment that has a definite answer, and it is therefore the only part a test can
+// assert on without depending on a distribution the design does not promise.
+//
+// Named rather than inlined for exactly that reason: the property "the load term moved
+// this exit into/out of contention" had no name, so a test could only observe it
+// indirectly by sampling winners — which needs the arbitrary pick to be near-uniform,
+// and it is not (see TestChooseExitDoesNotConcentrateOnOneNode). Extracting it changes
+// no behaviour; chooseExit computes exactly what it computed before.
+//
+// The band is measured FROM the best candidate rather than from fixed power-of-two
+// buckets, which is what stops a node sitting just beneath an absolute boundary and
+// crossing it for a marginal gain (ADR-0042 §3).
+func tierFloor(candidates []*exitNode, load map[string]int) capacity.Rate {
+	var best capacity.Rate
+	for _, e := range candidates {
+		if s := rankShare(e, load[e.id]); s > best {
+			best = s
+		}
+	}
+	return capacity.OctaveFloor(best)
 }
 
 // rankShare is the per-exit ranking number: the bandwidth one more session could
