@@ -1,0 +1,23 @@
+{
+ "note": "Frozen POSITIVE wire vectors for the root -\u003e policy delegation -\u003e policy document chain (control-plane.md §7, ADR-0006). Every key here is a published throwaway; see internal/devroot. A coordinator's verifier must accept this bundle at `now`, holding root_pub alone, and must parse the expect_* values from it. signer_seed regenerates the document bytes and is NEVER an input to verification — a verifier learns the signer's key from the delegation cert. Durations are integer NANOSECOND counts. Pair this with negative_vectors.json: accepting these proves nothing on its own. Regenerate only alongside a deliberate format change: go test ./internal/policy -update.",
+ "now": "2026-08-15T12:00:00Z",
+ "root_pub": "G3qe/RAaWSSOU+NMl5UUj9/E2nEr2PfgFGzbL9aHisY=",
+ "bundle": {
+  "policy": "eyJ2IjoxLCJzZXEiOjQyLCJpc3N1ZWQiOiIyMDI2LTA4LTE1VDExOjAwOjAwWiIsImV4cCI6IjIwMjYtMDktMTRUMTI6MDA6MDBaIiwiZ3JhY2UiOjE3MjgwMDAwMDAwMDAwMCwibm90ZSI6IndpcmUgdmVjdG9yIHBvbGljeSAtIHRocm93YXdheSByb290Iiwic2VydmVfZmxvb3IiOnsibWluX21lYXN1cmVkX2JwcyI6MjUwMDAwMDAsIm1pbl9kZWNsYXJlZF9xdW90YV9ieXRlcyI6MTAwMDAwMDAwMDAwLCJtaW5fc2VydmluZ192ZXJzaW9uIjoiMC4yLjAifSwiYmFja3ByZXNzdXJlIjp7Im1pbl9jb3VudHJ5X2hlYWRyb29tX2JwcyI6NTAwMDAwMDAsIm1pbl9ub2RlX2hlYWRyb29tX2JwcyI6NTAwMDAwMH0sInZvdWNoIjp7ImsiOjMsInYiOjYsInBlcmlvZCI6MzE1MzYwMDAwMDAwMDAwMDAsInRlbnVyZSI6MTU3MjQ4MDAwMDAwMDAwMDAsImFkbWl0X2NhcCI6MTAwMDB9LCJ0aWVycyI6W3sidHJ1c3QiOiJlcGhlbWVyYWwiLCJwbGFuIjoiIiwic3BlZWRfY2FwX2JwcyI6MTAwMDAwMDAsInByaW9yaXR5IjoxLCJlbmRwb2ludF9xdWFsaXR5IjoxfSx7InRydXN0Ijoic3RhYmxlIiwicGxhbiI6IiIsInNwZWVkX2NhcF9icHMiOjUwMDAwMDAwLCJwcmlvcml0eSI6NSwiZW5kcG9pbnRfcXVhbGl0eSI6Mn0seyJ0cnVzdCI6InN0YWJsZSIsInBsYW4iOiJwcm8iLCJzcGVlZF9jYXBfYnBzIjoyMDAwMDAwMDAsInByaW9yaXR5Ijo5LCJlbmRwb2ludF9xdWFsaXR5IjozfV198coBqGJF1Bkq4an0iSvOCFvSPSdqO+gN07+ylep2yX9P51VN64U895c68+JRqu/5QLBXSsUiPwJBwIqWGL8cCA==",
+  "cert": "eyJ2IjoxLCJzZXJpYWwiOiJjMDQ4MmI2ODFmMGUyNDlkIiwicm9sZSI6InBvbGljeSIsInB1YiI6IlhxWXRwenF5TWxxVXp5Z2lpQ1VDYXJacFBLMGZpamxpWFN0bWJUSTNuc0E9IiwibmJmIjoiMjAyNi0wOC0xNFQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA4LTE1VDEyOjAwOjAwWiIsIm5vdGUiOiJ3aXJlIHZlY3RvciBwb2xpY3kgc2lnbmVyIC0gdGhyb3dhd2F5IHJvb3QifSET7bV0YviQOFE7bUJxAavhbUlHmxiip6b+rK2k5b0/1I5C6DMrAyuY/W5UwTU96BTzzY9xv0Bm++/seEW5VwM="
+ },
+ "signer_seed": "B6zED08ByesPONNnhZ9RkpM1d7Sn+ypXWDtAUmmIvFc=",
+ "expect_seq": 42,
+ "expect_signer_pub": "XqYtpzqyMlqUzygiiCUCarZpPK0fijliXStmbTI3nsA=",
+ "expect_delegation_serial": "c0482b681f0e249d",
+ "expect_min_measured_bps": 25000000,
+ "expect_min_declared_quota_bytes": 100000000000,
+ "expect_min_serving_version": "0.2.0",
+ "expect_min_country_headroom_bps": 50000000,
+ "expect_vouch_k": 3,
+ "expect_vouch_budget": 6,
+ "expect_vouch_period_nanos": 31536000000000000,
+ "expect_stable_pro_speed_cap_bps": 200000000,
+ "expect_stable_pro_priority": 9,
+ "expect_deadline": "2026-09-16T12:00:00Z"
+}

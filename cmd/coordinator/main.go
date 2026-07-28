@@ -359,6 +359,9 @@ func main() {
 	geoipDir := flag.String("geoip", "", "path to an unzipped MaxMind GeoLite2-Country-CSV directory, used to derive each node's country from the source address this coordinator OBSERVES it register from (issue #136). Staged out of band and never committed; see docs/RUNNING.md. Empty DISABLES derivation and falls back to each node's self-reported -country tag.")
 	geoipRequired := flag.Bool("geoip-required", false, "refuse to fall back to a node's self-reported -country when its observed address does not resolve (issue #136). The hardened posture: no node self-report can reach a client's country choice. Off by default because every node in a local stack registers from loopback, which no database resolves. Requires -geoip.")
 	minServingVersion := flag.String("min-serving-version", "0.0.0", "minimum node release (MAJOR.MINOR.PATCH) this coordinator will assign work to; nodes below it are fenced from matchmaking until they update (issue #36, ADR-0015). Raise it past the grace window after a release to pull stragglers up. 0.0.0 disables the fence — every node serves regardless of version.")
+	policyRootPubKey := flag.String("policy-root-pubkey", "", "offline ROOT public key (hex) the signed network policy chains to (issue #39, ADR-0043). When set, this coordinator fetches a signed policy bundle and enforces the floors, fences and reserves inside it — numbers it cannot author, because it does not hold the key that signs them. Empty DISABLES signed policy and leaves this coordinator enforcing only its own flags. NOTE the direction of failure flips here: unlike -admission-pubkey and -min-serving-version, which fail OPEN when unset, a coordinator WITH a policy root configured stops assigning new work once its policy goes stale. Coordinators are a pool with client rotation, so one failing closed sheds to its peers.")
+	policySource := flag.String("policy-source", "", "where to fetch the signed policy bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at. Required when -policy-root-pubkey is set. Re-fetched every 10s and re-verified from scratch every time, delegation included.")
+	policyStatePath := flag.String("policy-state", "secrets/policy-state.json", "path to this coordinator's persistent policy state (issue #39): the last VERIFIED bundle, so a restart does not begin unpoliced, and the highest policy sequence ever accepted, which is what refuses a rollback. The sequence floor cannot be re-derived from signed data, so write access to this file is equivalent to being able to roll this coordinator back one generation — keep it with the other secrets.")
 	printBootstrapPub := flag.Bool("print-bootstrap-pubkey", false, "load (or generate) the snapshot-signing key at -bootstrap-key, print its public key (hex) to stdout, and exit. Provision this to mesh-walk clients (bacchus-node -mesh-pubkey) so they can verify coordinator-signed snapshots recovered via a peer (issue #31, design §4.3). Couriers get the same key inside their -courier-invite.")
 	flag.Parse()
 
@@ -398,6 +401,15 @@ func main() {
 		log.Printf("WARNING: admission DISABLED (-admission-pubkey not set) — any client or node can join this network (issue #42)")
 	} else {
 		log.Printf("admission ENABLED — nodes and clients must present a credential signed by the configured authority")
+	}
+	// Signed network policy (issue #39, ADR-0043). Started before the packet loop so
+	// the cached policy is restored — and the fail-closed state is established —
+	// before the first register or connect is handled. A misconfigured root or a
+	// missing source is fatal; a source that is merely unreachable right now is not,
+	// because the cache may still carry a usable policy and the refresh loop keeps
+	// trying.
+	if err := startPolicy(context.Background(), *policyRootPubKey, *policySource, *policyStatePath); err != nil {
+		log.Fatal(err)
 	}
 	// Load the operator/vouch-subtree assignments once, before any goroutine that reads
 	// the map (the snapshot refresh loop) starts. Failing hard on a malformed file keeps
@@ -500,6 +512,17 @@ func handle(m wire, src *net.UDPAddr) {
 		// because a stale or hostile node cannot be trusted to fence itself.
 		if reason, ok := servingCheck(m.Release); !ok {
 			log.Printf("register %s (%s): fenced (%s)", m.ID, src, reason)
+			send(src, wire{Type: "reject", Reason: reason})
+			return
+		}
+		// Fail-closed drain (issue #39, ADR-0043): with signed policy configured but
+		// none currently enforceable — never loaded, or past exp + grace — this
+		// coordinator adds NO new nodes to the serve pool. A node that is already
+		// registered keeps its entry and its sessions; it simply stops being refreshed
+		// into the pool, and ages out on the normal prune. Nothing is torn down here.
+		if !policyAllowsAssignment() {
+			const reason = "coordinator has no enforceable network policy — not accepting new nodes into the serve pool; retry shortly or use another coordinator"
+			log.Printf("register %s (%s): refused (%s)", m.ID, src, reason)
 			send(src, wire{Type: "reject", Reason: reason})
 			return
 		}
@@ -611,6 +634,20 @@ func handle(m wire, src *net.UDPAddr) {
 		// Client admission (issue #42): matchmaking is gated too, so a leaked
 		// exit list can't be turned into a live session without a credential.
 		if !admit(m, src, admission.RoleClient, "") {
+			return
+		}
+		// Fail-closed drain (issue #39, ADR-0043): with signed policy configured but
+		// none currently enforceable, no NEW session is matched. Established sessions
+		// are untouched and run to their natural end — matchmaking and live sessions
+		// are decoupled here, so the drain needs no teardown and no timer.
+		//
+		// The client's response to this is to rotate to another coordinator (ADR-0020),
+		// which is exactly why failing closed is affordable here: the failure sheds to
+		// the pool rather than darkening the network.
+		if !policyAllowsAssignment() {
+			const reason = "coordinator has no enforceable network policy — not assigning new sessions; retry shortly or use another coordinator"
+			log.Printf("connect from %s: refused (%s)", src, reason)
+			send(src, wire{Type: "reject", Reason: reason})
 			return
 		}
 		// Per-connect idempotency (issue #1, ADR-0042 §2). Each connect is sent
@@ -976,22 +1013,28 @@ func validIngressPort(p int) bool { return p >= 1 && p <= 65535 }
 // servingCheck applies the min-serving-version fence (issue #36, ADR-0015) to a
 // registering node's reported release. ok is false, with a safe-to-log reason
 // (protocol/version data only, never anything identifying the node), when the
-// node must be fenced. With the fence disabled (servingFloor is the zero 0.0.0)
-// it serves everyone, including nodes from before this field existed, so
+// node must be fenced. With the fence disabled (the effective floor is the zero
+// 0.0.0) it serves everyone, including nodes from before this field existed, so
 // enabling the fence is opt-in and backward compatible. With a floor set, a node
 // that reports no parseable release, or one below the floor, is fenced — which
 // is exactly how an operator forces the fleet onto a new release once the grace
 // window has elapsed.
+//
+// The floor comes from policyServingFloor, which is the ONE place the precedence
+// between a loaded policy and the -min-serving-version flag is decided (issue #39,
+// ADR-0043). It is read here rather than compared here so there is exactly one
+// answer to "what is the fence right now", wherever it is asked.
 func servingCheck(release string) (reason string, ok bool) {
-	if servingFloor == (version.Version{}) {
+	floor := policyServingFloor()
+	if floor == (version.Version{}) {
 		return "", true
 	}
 	nv, err := version.Parse(release)
 	if err != nil {
-		return fmt.Sprintf("node reports no valid release (%q); minimum serving version is %s — update", release, servingFloor), false
+		return fmt.Sprintf("node reports no valid release (%q); minimum serving version is %s — update", release, floor), false
 	}
-	if !version.ServingAllowed(nv, servingFloor) {
-		return fmt.Sprintf("node version %s is below the minimum serving version %s — update to serve", nv, servingFloor), false
+	if !version.ServingAllowed(nv, floor) {
+		return fmt.Sprintf("node version %s is below the minimum serving version %s — update to serve", nv, floor), false
 	}
 	return "", true
 }
