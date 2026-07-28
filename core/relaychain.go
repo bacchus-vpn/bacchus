@@ -110,6 +110,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bacchus-vpn/bacchus/core/asn"
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 	"github.com/bacchus-vpn/bacchus/core/geoip"
 )
@@ -208,6 +209,20 @@ type relayDirectory struct {
 	// exitAddr maps an exit's id to the address a hop dials to reach it, so the
 	// last layer can tell its hop how to reach the real exit.
 	exitAddr map[string]string
+
+	// as resolves a hop's OBSERVED address to the autonomous system announcing it,
+	// for selectHops' diversity control (issue #23). Nil means no table, which every
+	// build ships with today and which resolves every hop to unknown — see
+	// selectHops for what that does and ADR-0044 for why the client cannot have a
+	// table until the distribution question is answered.
+	//
+	// It is deliberately NOT loaded from the signed snapshot alongside the rest of
+	// this struct. The whole point of #23 is that the AS is derived by the party
+	// relying on it, from an address the coordinator observed but did not choose; a
+	// table the coordinator also shipped would be a tag with extra steps. It is a
+	// field here rather than on *Engine so the seam lands without reshaping the
+	// engine's configuration around a distribution mechanism nobody has picked yet.
+	as asn.Lookup
 
 	// own is every address the directory publishes for THIS node, and it is how a
 	// forwarding hop recognizes a target as itself (relayForward's self-dial guard).
@@ -620,9 +635,26 @@ func (e *Engine) buildChain(n int, country string) (*chainPlan, error) {
 	if err != nil {
 		return nil, err
 	}
-	hops, err := selectHops(d.hops, n-1, exit.id)
+	hops, div, err := selectHops(d.hops, n-1, exit.id, d.as)
 	if err != nil {
 		return nil, err
+	}
+	// Say so when the chain is weaker than its depth implies. A fallback nobody can
+	// see is indistinguishable from the control working, which is the failure mode
+	// #23 names — so the degradation is REPORTED, not just permitted.
+	//
+	// The level splits on whether the table was working. A staged table that could
+	// not keep two hops apart is a real weakening on a real deployment and an
+	// operator can act on it (add a hop in another network); no table at all is the
+	// state every build ships in until the distribution question is settled
+	// (ADR-0044), so raising it as an error would cry wolf on every connect, for
+	// every user, about a decision none of them can take.
+	if div.degraded() {
+		kind := EventError
+		if div.resolved == 0 {
+			kind = EventInfo
+		}
+		e.emit(kind, "", "relay chain (%d hops): %s", n, div.describe())
 	}
 	return &chainPlan{
 		hops:    hops,
@@ -698,16 +730,86 @@ func (e *Engine) chooseChainExit(d *relayDirectory, country string) (relayHop, e
 // And it is not the load-bearing signal even when it does apply. Real network
 // diversity is AS diversity, and an AS number is deliberately absent from the
 // signed directory because neither a node nor a coordinator can be trusted to
-// assert one (the ADR-0038 #124 amendment says so explicitly). Deriving each hop's
-// AS from its OBSERVED ip against an independent routing table, client-side, is the
-// child issue this leaves open; until it lands, one operator spread across several
-// unlabeled entries is not detected here.
+// assert one (the ADR-0038 #124 amendment says so explicitly).
+//
+// # AS diversity, which IS the load-bearing signal (issue #23)
+//
+// Each hop's AS is derived here, from the OBSERVED address the directory carries for
+// it, against an independent table the coordinator did not supply (core/asn). That
+// address is the coordinator's own observation joined to a self-reported PORT — a
+// node cannot assert the host half, so it cannot claim to sit in an AS it does not
+// occupy (cmd/coordinator's buildSnapshot, coldstart.Entry.Ingress). Deriving rather
+// than reading is the whole of #23: a signed AS tag would be free for a Sybil
+// operator to fabricate, and an address is not, because the address has to actually
+// route or the hop is simply unreachable.
+//
+// Two hops of one chain must not sit in one AS, for the same first-and-last-hop
+// correlation reason operator diversity exists — but this catches the case operator
+// diversity structurally cannot: one operator spread across several UNLABELED
+// directory entries, which is precisely what a Sybil looks like.
+//
+// # The unknown AS is pooled, never treated as diverse
+//
+// A hop whose address the table cannot place (no table staged, an address absent
+// from it, or a loopback/RFC1918 address no AS announces) is ACCEPTED but CONTRIBUTES
+// NO DIVERSITY, which is two rules working together:
+//
+//   - It cannot satisfy a diversity pass. Only a hop with a resolved, unused AS
+//     can, so a resolvable candidate is always preferred while one exists and an
+//     attacker gains nothing by occupying address space the table does not cover.
+//   - Unresolved hops share ONE bucket, so two of them collide with each other
+//     rather than counting as two ASes.
+//
+// It is still placeable by the relaxed passes, which is what makes this
+// accept-but-do-not-count rather than reject — and any chain leaning on one is
+// reported as degraded, because "these hops are in different networks" is precisely
+// the claim that has not been established about it.
+//
+// This is the opposite of how the operator tag above treats an empty value, and the
+// asymmetry is deliberate rather than an inconsistency. An absent operator tag means
+// the COORDINATOR has not curated a file — an administrative gap that applies to
+// honest and hostile nodes alike, and one no attacker chooses. An unresolvable
+// address is different in kind: the attacker picks the address. Counting unknown as
+// diverse would therefore hand a Sybil operator a whole chain's worth of free
+// diversity for the cost of using address space the table does not cover, inverting
+// the exact control it is feeding. Pooling costs an honest node in unmapped space
+// the chance to sit beside another such node; that is the cheaper mistake, and it is
+// the one this makes.
+//
+// It also lands the no-table case where it belongs. With no table every hop is
+// unknown, so every hop collides, so the ladder below falls through to its relaxed
+// pass and produces exactly the chain this function produced before #23 — degraded
+// through the documented, REPORTED path rather than by accident. See hopDiversity.
+//
+// # The ladder, and why the two constraints degrade independently
+//
+// Four passes rather than the two operator diversity used alone — the honest lattice
+// of two constraints that can each hold or not, ordered by which is worth more:
+//
+//  0. AS-distinct AND operator-distinct — the chain worth having.
+//  1. AS-distinct only.
+//  2. operator-distinct only.
+//  3. neither.
+//
+// Passes 1 and 2 are both needed, and collapsing either into "strict, then relaxed"
+// breaks something real. Without pass 1, a directory that can supply AS diversity
+// but not operator diversity gives up BOTH — sacrificing the load-bearing control to
+// satisfy the advisory one. Without pass 2, the no-table case is worse than useless:
+// every hop pools into unknown, so no pass demanding AS distinctness can place
+// anything, and the fill would fall straight through to unconstrained — silently
+// switching OFF the operator diversity that has been running since #124. Adding a
+// control must not remove one, so the ladder keeps a rung where operator diversity
+// stands alone.
+//
+// The order between them is the ranking, and it is the one #23 states: AS diversity
+// is load-bearing and operator diversity is advisory, so operator is dropped first
+// (pass 1) and AS last (pass 2).
 //
 // The first hop gets one extra constraint: it must be pairable (exit-registered),
 // because it is reached by being named in connect{firstHop}.
-func selectHops(cand []relayHop, want int, excludeID string) ([]relayHop, error) {
+func selectHops(cand []relayHop, want int, excludeID string, lookup asn.Lookup) ([]relayHop, hopDiversity, error) {
 	if want <= 0 {
-		return nil, nil
+		return nil, hopDiversity{}, nil
 	}
 	pool := make([]relayHop, 0, len(cand))
 	for _, h := range cand {
@@ -716,7 +818,7 @@ func selectHops(cand []relayHop, want int, excludeID string) ([]relayHop, error)
 		}
 	}
 	if err := shuffleHops(pool); err != nil {
-		return nil, err
+		return nil, hopDiversity{}, err
 	}
 
 	// The head is chosen FIRST, on its own, because it carries a constraint no
@@ -728,9 +830,27 @@ func selectHops(cand []relayHop, want int, excludeID string) ([]relayHop, error)
 	out := make([]relayHop, 0, want)
 	usedOp := map[string]bool{}
 	usedID := map[string]bool{}
+	usedAS := map[string]bool{}
+	var div hopDiversity
 	take := func(h relayHop) {
+		key, resolved := hopASKey(h, lookup)
+		// The collision is recorded where it HAPPENS rather than inferred from which
+		// pass placed the hop, so the report describes the chain that was built and
+		// not the route the loop took to build it.
+		if usedAS[key] {
+			div.asRepeated = true
+		}
+		if h.operator != "" && usedOp[h.operator] {
+			div.opRepeated = true
+		}
+		if resolved {
+			div.resolved++
+		} else {
+			div.unresolved++
+		}
 		out = append(out, h)
 		usedID[h.id] = true
+		usedAS[key] = true
 		if h.operator != "" {
 			usedOp[h.operator] = true
 		}
@@ -742,16 +862,19 @@ func selectHops(cand []relayHop, want int, excludeID string) ([]relayHop, error)
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("%w: no directory entry can head a chain (the head must be one the coordinator can pair a client to)", errChainTooShort)
+		return nil, hopDiversity{}, fmt.Errorf("%w: no directory entry can head a chain (the head must be one the coordinator can pair a client to)", errChainTooShort)
 	}
 
-	// Then fill the rest: operator-distinct first, and only if the directory cannot
-	// supply enough of those, allow an operator to repeat rather than refuse to
-	// connect. A repeated operator is a weaker chain, but it still hides the exit
-	// from the coordinator and from every node that operator does not run; in a
-	// small mesh, refusing outright would be the worse trade. Both outcomes are
-	// reachable, so neither is silently assumed.
-	for pass := 0; pass < 2 && len(out) < want; pass++ {
+	// Then fill the rest down the ladder documented above: the best chain the
+	// directory can supply, dropping the advisory constraint before the load-bearing
+	// one, and allowing a repeat rather than refusing to connect. A repeated AS is a
+	// weaker chain, but it still hides the exit from the coordinator and from every
+	// node that operator does not run; in a small mesh, refusing outright would be
+	// the worse trade. Every outcome is reachable, so none is silently assumed — and
+	// the one that was reached is returned, not discarded.
+	for pass := 0; pass < 4 && len(out) < want; pass++ {
+		needAS := pass == 0 || pass == 1
+		needOp := pass == 0 || pass == 2
 		for _, h := range pool {
 			if len(out) == want {
 				break
@@ -759,16 +882,111 @@ func selectHops(cand []relayHop, want int, excludeID string) ([]relayHop, error)
 			if usedID[h.id] {
 				continue
 			}
-			if pass == 0 && h.operator != "" && usedOp[h.operator] {
+			if needAS {
+				// An unresolved hop can never SATISFY a diversity pass — "does not
+				// count toward diversity" is the whole decision, and a hop the table
+				// could not place contributes no diversity to count. It stays
+				// available to the relaxed passes below, which is what makes it
+				// accepted-but-not-counted rather than rejected outright.
+				key, resolved := hopASKey(h, lookup)
+				if !resolved || usedAS[key] {
+					continue
+				}
+			}
+			if needOp && h.operator != "" && usedOp[h.operator] {
 				continue
 			}
 			take(h)
 		}
 	}
 	if len(out) < want {
-		return nil, fmt.Errorf("%w: need %d, found %d", errChainTooShort, want, len(out))
+		return nil, hopDiversity{}, fmt.Errorf("%w: need %d, found %d", errChainTooShort, want, len(out))
 	}
-	return out, nil
+	return out, div, nil
+}
+
+// unknownASKey is the single bucket every hop the table cannot place falls into.
+//
+// One shared value, so two unresolved hops collide with each other — see selectHops
+// on why unknown must never read as diverse. It is not a valid asn.AS rendering
+// (those are always "AS" followed by digits), so it can never collide with a
+// resolved answer.
+const unknownASKey = "?"
+
+// hopASKey is the diversity bucket a hop falls in, and whether the table actually
+// placed it.
+//
+// The address is the hop's dial address, which is where the directory says this hop
+// RECEIVES traffic — a relay's coordinator-observed ingress, or an exit's advertised
+// address. That is the right input and not merely the available one: correlation
+// risk is a property of the network a hop's traffic actually crosses, so the address
+// upstream dials is exactly the address whose AS matters.
+func hopASKey(h relayHop, lookup asn.Lookup) (string, bool) {
+	if a, ok := asn.OfHostPort(lookup, h.dial); ok {
+		return a.String(), true
+	}
+	return unknownASKey, false
+}
+
+// hopDiversity is what selectHops ACHIEVED, as opposed to what it was asked for.
+//
+// It exists because a degraded chain and a strong one are otherwise the same value —
+// a []relayHop of the right length — and a security control that can quietly stop
+// applying while its caller reports success is not a control. Operator diversity has
+// degraded silently this way since it was written; #23 does not extend that to the
+// signal it calls load-bearing. buildChain reports it.
+//
+// Every field describes the chain that was returned, so the zero value means "asked
+// for nothing, achieved nothing" and is only correct for want <= 0.
+type hopDiversity struct {
+	// asRepeated: two hops share an AS bucket — either one resolved AS, or the
+	// pooled unknown. The chain was built anyway; this is the fallback being taken.
+	asRepeated bool
+
+	// opRepeated: two hops share a coordinator-assigned operator tag.
+	opRepeated bool
+
+	// resolved and unresolved count the chosen hops the table could and could not
+	// place. resolved == 0 on a non-empty chain is the no-table state every build
+	// ships in today, and it is worth telling apart from a staged table that failed
+	// on one address: the first is a distribution question nobody has answered yet,
+	// the second is an operator's to look at.
+	resolved, unresolved int
+}
+
+// degraded reports whether this chain's AS diversity is something the client can
+// actually vouch for, which is the condition worth saying out loud.
+//
+// An unplaced hop counts as degraded even when no bucket visibly repeated: the
+// control's claim is "these hops are in different networks", and about a hop the
+// table could not place, that claim has not been established. Reporting only literal
+// collisions would let a chain whose diversity is merely UNKNOWN read as one whose
+// diversity is known-good, which is the same silent overstatement the whole card is
+// about.
+//
+// A repeated operator alone is not degradation here: that control is advisory, it is
+// inert on any deployment with no operators file, and reporting it would fire
+// constantly while saying nothing about the load-bearing signal.
+func (d hopDiversity) degraded() bool { return d.asRepeated || d.unresolved > 0 }
+
+// describe renders the degradation for an operator or a user reading the event log.
+// Empty when nothing was given up.
+//
+// The three cases are three different people's problems, so they do not share a
+// sentence: nothing resolving is the distribution decision nobody has taken
+// (ADR-0044), a partial resolution is an address an operator can look at, and a
+// clean collision is a directory too small to spread this chain.
+func (d hopDiversity) describe() string {
+	if !d.degraded() {
+		return ""
+	}
+	if d.resolved == 0 {
+		return fmt.Sprintf("AS diversity is NOT being enforced: no hop resolved to an autonomous system (no table is loaded, or none of these addresses is in it), so all %d hop(s) are treated as ONE network (issue #23, ADR-0044). The chain is what it was before AS diversity existed — operator diversity only", d.unresolved)
+	}
+	if d.unresolved > 0 {
+		return fmt.Sprintf("AS diversity RELAXED: %d hop(s) resolved, but %d could not be placed in any autonomous system and count as ONE network, so two hops of this chain may share one", d.resolved, d.unresolved)
+	}
+	return fmt.Sprintf("AS diversity RELAXED: the directory could not supply %d hops in distinct autonomous systems, so two hops of this chain share one network — weaker against first-and-last-hop correlation than the depth suggests", d.resolved)
 }
 
 // shuffleHops randomizes hop order with a crypto/rand Fisher-Yates. A fresh

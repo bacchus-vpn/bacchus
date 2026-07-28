@@ -1,0 +1,40 @@
+# Synthetic AS table fixture — issue #23 / ADR-0044.
+#
+# EVERY address here is documentation space and every AS number is documentation
+# space. Nothing in this file describes real allocations, and nothing in it
+# describes this project's infrastructure:
+#
+#   - 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24  TEST-NET-1/2/3 (RFC 5737)
+#   - 2001:db8::/32                                   documentation prefix (RFC 3849)
+#   - AS64496–AS64511                                 documentation ASNs (RFC 5398)
+#
+# A real routing-table excerpt would carry real allocations into a public repo, so
+# this is built by hand instead. It is shaped to exercise the cases the diversity
+# control actually turns on, not to resemble a real table:
+#
+#   - AS64496 announces TWO disjoint ranges, in different /24s. That is the shape
+#     the whole control exists to catch: one operator behind two directory entries
+#     that share no visible label. A test that only ever puts one prefix in one AS
+#     never proves the check rejects anything.
+#   - Several single-range ASes, so a diverse chain is actually available and a
+#     rejection can be told apart from an empty candidate set.
+#   - IPv6, so the v6 family is not dead code.
+#   - Deliberate GAPS (192.0.2.192/26, 198.51.100.128/25, 203.0.113.128/25,
+#     2001:db8:ffff::/48 and everything else) so the unknown answer is reachable
+#     from an address that is otherwise perfectly ordinary.
+
+# --- AS64496: one AS, two ranges, two different /24s ---
+192.0.2.0/26		64496
+198.51.100.0/26		64496
+
+# --- distinct single-range ASes ---
+192.0.2.64/26		64497
+192.0.2.128/26		64498
+198.51.100.64/26	64499
+203.0.113.0/26		64500
+203.0.113.64/26		64501
+
+# --- IPv6 ---
+2001:db8::/48		64502
+2001:db8:1::/48		64503
+2001:db8:2::/48		64502
