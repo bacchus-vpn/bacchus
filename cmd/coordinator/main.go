@@ -510,7 +510,7 @@ func handle(m wire, src *net.UDPAddr) {
 		// a stale node still advertises the old, now-detectable fingerprint and
 		// would burn the users routed through it. Enforced here, at register,
 		// because a stale or hostile node cannot be trusted to fence itself.
-		if reason, ok := servingCheck(m.Release); !ok {
+		if reason, ok := servingCheck(m.Release, m.ID); !ok {
 			log.Printf("register %s (%s): fenced (%s)", m.ID, src, reason)
 			send(src, wire{Type: "reject", Reason: reason})
 			return
@@ -1024,7 +1024,23 @@ func validIngressPort(p int) bool { return p >= 1 && p <= 65535 }
 // between a loaded policy and the -min-serving-version flag is decided (issue #39,
 // ADR-0043). It is read here rather than compared here so there is exactly one
 // answer to "what is the fence right now", wherever it is asked.
-func servingCheck(release string) (reason string, ok bool) {
+//
+// Serve eligibility is more than the version fence (issue #15): the same gate now
+// also applies the policy's measured-throughput floor. Both conditions live here
+// because they answer one question — may this node join the serve pool — and a node
+// that fails either is client-only: it may use the service, it just may not serve.
+// nodeID is needed for the capacity condition, which is per-node.
+func servingCheck(release, nodeID string) (reason string, ok bool) {
+	if reason, ok := versionCheck(release); !ok {
+		return reason, false
+	}
+	return meetsMeasuredFloor(nodeID)
+}
+
+// versionCheck is the min-serving-version half of servingCheck, split out so the
+// version fence keeps a name of its own now that serve eligibility has more than one
+// condition.
+func versionCheck(release string) (reason string, ok bool) {
 	floor := policyServingFloor()
 	if floor == (version.Version{}) {
 		return "", true
