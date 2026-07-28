@@ -15,13 +15,15 @@ func TestSaveConfigRoundTrips(t *testing.T) {
 	path := filepath.Join(dir, "bacchus.config.json")
 
 	want := Config{
-		Coordinators:     []string{"203.0.113.10:51820"}, // TEST-NET-3 (RFC 5737): never a real Bacchus endpoint
-		STUN:             "stun:203.0.113.10:3478",
-		Geo:              "de",
-		ExitID:           "deadbeef",
-		TransportPool:    []string{"webrtc", "reality"},
-		AdmissionPubKey:  "ababababababababababababababababababababababababababababababab", // placeholder hex-shaped string; round-trip doesn't validate key material
-		AdmissionCRLPath: `C:\Bacchus\revocations.crl`,
+		Coordinators:       []string{"203.0.113.10:51820"}, // TEST-NET-3 (RFC 5737): never a real Bacchus endpoint
+		STUN:               "stun:203.0.113.10:3478",
+		ExitID:             "deadbeef",
+		TransportPool:      []string{"webrtc", "reality"},
+		AdmissionPubKey:    "ababababababababababababababababababababababababababababababab", // placeholder hex-shaped string; round-trip doesn't validate key material
+		AdmissionCRLPath:   `C:\Bacchus\revocations.crl`,
+		RelayHops:          2,
+		RelayDirectoryPath: `C:\Bacchus\relay-directory.bin`,
+		RelayDirectoryKey:  "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", // placeholder hex-shaped string; round-trip doesn't validate key material
 	}
 	if err := saveConfig(path, want); err != nil {
 		t.Fatalf("saveConfig: %v", err)
@@ -53,10 +55,10 @@ func TestSaveConfigOverwritesExisting(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bacchus.config.json")
 
-	if err := saveConfig(path, Config{Geo: "us"}); err != nil {
+	if err := saveConfig(path, Config{ExitID: "us"}); err != nil {
 		t.Fatalf("saveConfig (first write): %v", err)
 	}
-	if err := saveConfig(path, Config{Geo: "de"}); err != nil {
+	if err := saveConfig(path, Config{ExitID: "de"}); err != nil {
 		t.Fatalf("saveConfig (second write): %v", err)
 	}
 
@@ -68,7 +70,7 @@ func TestSaveConfigOverwritesExisting(t *testing.T) {
 	if err := json.Unmarshal(b, &readBack); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	if readBack.Geo != "de" {
-		t.Fatalf("after overwrite, Geo = %q, want %q", readBack.Geo, "de")
+	if readBack.ExitID != "de" {
+		t.Fatalf("after overwrite, ExitID = %q, want %q", readBack.ExitID, "de")
 	}
 }

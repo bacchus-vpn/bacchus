@@ -71,9 +71,23 @@ func StateFor(cur ConnState, ev core.Event) ConnState {
 // redundant with the headline state itself once protected, so it is never
 // separately shown. EventSession/EventConnected are plumbing, logged
 // elsewhere, never surfaced here.
+// relayChainFailedPrefix mirrors clients/windows/main.go's constant of the
+// same name: core's one genuinely diagnostic signal for a relay chain that
+// failed to build (docs/design/relay-chaining.md §10.4; core/relaychain.go's
+// file doc — chaining is fail-closed, never silently downgraded to fewer
+// hops). This client has no Settings UI for RelayHops/RelayDirectory yet
+// (issue #28 wired the Windows client only), so nothing produces this
+// message today, but DetailFor already discriminates EventError generically
+// and there's no reason the two clients should recognize different signals
+// from the same core the day this one grows the same control.
+const relayChainFailedPrefix = "[relay] chain not built: "
+
 func DetailFor(ev core.Event, cur ConnState) (text string, show bool) {
 	switch ev.Kind {
 	case core.EventError:
+		if reason, ok := strings.CutPrefix(ev.Message, relayChainFailedPrefix); ok {
+			return "Not connected — no path met your relay-hops setting: " + reason, true
+		}
 		return ev.Message, true
 	case core.EventInfo:
 		if cur == Protected {

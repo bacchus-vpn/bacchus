@@ -11,10 +11,10 @@ to rediscover), and the safe/unsafe transport-pool table.
 
 | File | Contents |
 |---|---|
-| `settings.go` | Pure helpers (`geoOptions`, `sanitizePoolOrder`, `moveLadderItem`, `effectiveExitID`, `ladderDisplayOrder`) + the "Connection settings" `walk.Dialog`. |
+| `settings.go` | Pure helpers (`sanitizePoolOrder`, `moveLadderItem`, `ladderDisplayOrder`, `validateAdmissionConfig`, `validateRelayChainConfig`, `normalizeRelayHops`) + the "Connection settings" `walk.Dialog`. `effectiveExitID` and the geo-picker helpers (`geoOptions`/`geoAny`) existed briefly and are gone — see issue #6: the tray country picker is the only country selector, and a manual exit pin is legacy/disabled (issue #146). |
 | `invite.go` | Pure helpers (`canonicalizeInvite`, `inviteQRImage`, `decodePNG`) + the "Invite QR" `walk.Dialog`. |
-| `main.go` | `runOnUIThread`/`uiWorkerLoop` (the persistent UI thread, below), two new tray items, `connect()`'s pool/pin wiring, `currentExitLabel`/`refreshSelectedExitLabel`. |
-| `config.go` | New `Config` fields (`Geo`, `ExitID`, `TransportPool`) + `saveConfig` (this client's first config *writer* — previously JSON-file-edit-by-hand only). |
+| `main.go` | `runOnUIThread`/`uiWorkerLoop` (the persistent UI thread, below), two new tray items, `connect()`'s pool/relay-chain wiring, `currentCountryLabel`/`refreshSelectedCountryLabel`. |
+| `config.go` | `Config` fields (`ExitID`, `TransportPool`, and — issue #28 — `RelayHops`/`RelayDirectoryPath`/`RelayDirectoryKey`) + `saveConfig` (this client's first config *writer* — previously JSON-file-edit-by-hand only). No `Geo` field (issue #6): the country you exit in comes from the tray picker alone. |
 | `bacchus.exe.manifest` | Common Controls v6 manifest — see below. Required, not cosmetic. |
 
 Every pure helper is table-driven tested (`settings_test.go`, `invite_test.go`,

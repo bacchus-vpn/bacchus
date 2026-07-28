@@ -106,6 +106,13 @@ func TestDetailFor(t *testing.T) {
 			wantShow: true,
 		},
 		{
+			name:     "relay chain-not-built reads distinctly from a generic error (issue #28)",
+			ev:       core.Event{Kind: core.EventError, Message: "[relay] chain not built: core: not enough distinct relay hops in the directory for the requested chain depth: need 2, found 1"},
+			cur:      Connecting,
+			wantText: "Not connected — no path met your relay-hops setting: core: not enough distinct relay hops in the directory for the requested chain depth: need 2, found 1",
+			wantShow: true,
+		},
+		{
 			name: "info is suppressed once protected",
 			ev:   core.Event{Kind: core.EventInfo, Message: "direct failed -> trying relay"},
 			cur:  Protected,

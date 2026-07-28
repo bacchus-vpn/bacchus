@@ -184,3 +184,42 @@ this branch's PR includes a manual smoke-testing step, not just unit tests
     for anything past what a QR code can represent rather than this window
     pre-validating a size budget. Not observed in practice (CRLs are meant to
     be short — see `core/admission.CRL`), flagged rather than solved.
+
+## Amendment (issues #6, #28, 2026-07-28): node-count wired; the geo picker removed
+
+Two changes to the "Connection settings" window this ADR designed, from a followup
+review of the leftover surfaces country-only exit assignment (issue #146, predating
+this ADR) left behind. Neither reopens the toolkit or transport-pool decisions above.
+
+**Node count (issue #28).** §"Consequences" above named this a disabled placeholder
+because "no hop-count concept exists anywhere in core yet." It does now — issue #142
+shipped `Config.RelayHops`/`RelayHopsMax` — so the `NumberEdit` this ADR's PR left at
+a fixed `1` with a `-issue #76` tooltip is real: `MinValue`/`MaxValue` span
+`[1, core.RelayHopsMax]`, and saving it validates (`validateRelayChainConfig`, the
+same shape as `validateAdmissionConfig`, issue #130's precedent) that 2+ hops carries
+a relay directory file and its verification key, both new fields on the same window
+— chaining needs a directory to select hops from (docs/design/relay-chaining.md §10.1),
+so the control cannot be offered without one. `connect()` reads the file fresh at
+every connect and, since issue #27, keeps it fresh for the rest of a long session by
+also passing `RelayDirectoryPath` through — see that issue's ADR-0038 amendment. The
+trade is stated in-window rather than left implicit: more hops is harder to link but
+slower and costs more volunteer bandwidth, and — because chaining is deliberately
+fail-closed (core/relaychain.go's file doc) — a chain that cannot be built fails the
+connection outright, which `eventStatus` (`main.go`) now says in those words rather
+than folding it into a generic `"Error: ..."` line indistinguishable from a transient
+one (issue #28's own text: a user who retries into the same directory gap deserves to
+know retrying won't help).
+
+**The geo picker is gone, not merely left inert (issue #6).** This ADR's own PR added
+a "Preferred geo" `ComboBox` to the same "Exit selection" group as the manual exit-ID
+pin. It was never wired to anything `connect()` reads — `Config.Geo` (core) is set
+from the tray's country picker alone (`currentCountryLabel`), a fact unrelated to
+this ADR's decisions and predating them slightly (the tray picker is older). Rather
+than retrofit a precedence rule between two controls that name the same thing, the
+Settings copy was removed: `geoOptions`/`geoAny` (this window's own helpers) are gone,
+`clients/windows/config.go`'s `Config` carries no `Geo` field, and the tray is
+documented as the sole selector (`clients/windows/README.md`'s "Connection settings"
+section). The manual exit-ID `LineEdit` alongside it stays, but disabled and
+relabeled: naming a specific exit was removed for everyone by #146, `connect()` has
+logged and ignored a saved pin since, and a live-but-inert text box next to a
+newly-live hop-count control would read as "this one still does something."

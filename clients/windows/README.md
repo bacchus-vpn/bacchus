@@ -1,19 +1,20 @@
 # Bacchus — Windows Client UI
 
 Minimal system-tray app that makes the client clickable. Runs the `core` engine
-in-process (client role), lists exits from the coordinator, lets you pick one,
-and routes the **whole device** through the tunnel via a wintun TUN adapter —
-not just the browser.
+in-process (client role), lists the countries the coordinator can assign exits
+in, lets you pick one, and routes the **whole device** through the tunnel via
+a wintun TUN adapter — not just the browser.
 
 > v0 — rebuilt properly later (code-signing).
 
 ## What it does
-- Tray menu: **status · selected exit · Refresh exits · exit list · Connect ·
-  Disconnect · Connection settings… · Show invite QR… · Quit**.
-- **Refresh exits** → starts a throwaway client-role engine, asks the
-  coordinator for its exit list, tears the engine down; populates the menu.
-- **Connect** → builds a `core.Engine` with the picked exit id (forced through
-  the TURN relay — see "Why TURN-only" below) and starts it in-process;
+- Tray menu: **status · selected country · Refresh countries · country list ·
+  Connect · Disconnect · Connection settings… · Show invite QR… · Quit**.
+- **Refresh countries** → starts a throwaway client-role engine, asks the
+  coordinator for its country list, tears the engine down; populates the menu.
+- **Connect** → builds a `core.Engine` with the picked country (the
+  coordinator assigns the exit inside it — issue #146; forced through the
+  TURN relay, see "Why TURN-only" below) and starts it in-process;
   drives UI state from `core.Event`s. Once the tunnel's SOCKS5 server is up,
   brings up a wintun adapter + userspace netstack (`tun2socks.go`) and
   reroutes the device's default route through it (`routes.go`), excluding the
@@ -57,9 +58,9 @@ browser-PAC v0 flow.
 
 ### Connection settings (issue #75)
 Tray → **Connection settings…** opens a window over the transport pool /
-per-user failover core already implements (ADR-0028): a geo picker and a
-manual exit-ID pin (both `core.Config` fields), a reorderable transport
-ladder, a relay-hop count, and a **Reset learned paths** button
+per-user failover core already implements (ADR-0028): a legacy (disabled)
+manual exit-ID pin, a reorderable transport ladder, a relay-hop count with
+its own directory (issue #28), and a **Reset learned paths** button
 (`core.Engine.ResetSelection()`). Design in
 [docs/design/client-connection-ui.md](../../docs/design/client-connection-ui.md)
 and [ADR-0036](../../docs/adr/0036-windows-client-connection-strategy-and-invite-qr-ui.md);
@@ -68,10 +69,16 @@ how reality's underlay is kept leak-safe here in
 
 - **Automatic path selection** (checkbox) turns the pool on/off. Off
   reproduces the exact pre-#75 behavior: a single transport, the tray-picked
-  exit only.
-- **Manual exit ID**, when set, always wins over both the tray picker and the
-  pool's own exit selection — see `connect()`'s doc comment in `main.go` for
-  why a pin forces the pool off rather than just filtering it.
+  country only.
+- **Country precedence (issue #6):** the tray's country picker is the *only*
+  control that decides which country you exit in — it's what `connect()`
+  puts in `core.Config.Geo`. A "preferred geo" control briefly lived here in
+  Settings too; it wrote to the saved config and was read by nothing, so it
+  was removed rather than wired up. There is exactly one country selector.
+- **Manual exit ID** is legacy and disabled: naming a specific exit was
+  removed for everyone (issue #146, ADR-0042) — the coordinator picks the
+  exit inside the country you choose. A value carried over from an older
+  config is shown, greyed out, and has no effect; `connect()` logs why.
 - **Transport ladder** lists every transport core knows (`webrtc`, `reality`)
   and both are usable here. `reality`'s exit address is learned only once a
   session is dialing (via coordinator signaling), so it can't be pre-excluded
@@ -81,8 +88,18 @@ how reality's underlay is kept leak-safe here in
   `poolroutes.go` and "Why TURN-only" above). That holds on a mid-session
   failover too: a re-dial to a different exit excludes its own new address as
   it dials it.
-- **Relay hops** is a disabled placeholder — multi-hop chaining doesn't exist
-  in core yet (issue #76).
+- **Relay hops** (issue #28) routes your relayed traffic through more than
+  one node so no single one links you to your exit (issue #76/#142,
+  ADR-0038) — at the cost of a round trip of latency and more volunteer
+  bandwidth spent per hop. 1 (the default) is unchanged from before this
+  control existed. 2 or more needs a relay directory file (a signed
+  snapshot, e.g. from `cmd/coldstart-bootstrap -cache` — ask your operator)
+  and its public key, both entered here; the client re-reads the file at
+  every connect. Chaining is fail-closed: a chain that can't meet your hop
+  count fails the connection outright rather than silently dropping to fewer
+  hops, and the status line says so distinctly from an ordinary connection
+  error. Once connected, the status line and log show the hop count next to
+  the country, so you can confirm it took effect.
 
 ### Invite QR (issue #32)
 Tray → **Show invite QR…** turns an already-issued `bacchus1:…` coldstart
@@ -221,7 +238,7 @@ committed by accident. In any release bundle, ship `wintun.dll` **and its
 - Put **`bacchus.config.json`** alongside `bacchus.exe` (see Config above). No
   `node.exe` needed — the engine runs in the tray process.
 - Make sure the coordinator + STUN/TURN + at least one exit are up.
-- Double-click `bacchus.exe` → tray icon → **Refresh exits** → pick one → **Connect**.
+- Double-click `bacchus.exe` → tray icon → **Refresh countries** → pick one → **Connect**.
 - Verify: with Connect showing "Protected", `curl.exe https://ifconfig.me` (no
   `--socks5-hostname` needed — it's not just a browser proxy anymore) should
   show the exit's IP, and a packet capture on the physical adapter should show

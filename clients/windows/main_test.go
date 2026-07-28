@@ -34,6 +34,21 @@ func TestEventStatus(t *testing.T) {
 			wantShow:  true,
 		},
 		{
+			// core/relaychain.go's file doc: chaining is fail-closed and this
+			// is docs/design/relay-chaining.md §10.4's one genuinely
+			// diagnostic signal — a user who asked for 2+ hops and gets a
+			// generic "Error: ..." here will retry into the same directory
+			// gap (issue #28). It must read differently from an ordinary
+			// transient dial failure, both pre- and post-protected (a
+			// chained attempt that never builds never reaches protected, but
+			// eventStatus must not accidentally gate this on that).
+			name:      "relay chain-not-built reads distinctly from a generic error (issue #28)",
+			ev:        core.Event{Kind: core.EventError, Message: "[relay] chain not built: core: not enough distinct relay hops in the directory for the requested chain depth: need 2, found 1"},
+			protected: false,
+			wantText:  "Not connected — no path met your relay-hops setting: core: not enough distinct relay hops in the directory for the requested chain depth: need 2, found 1",
+			wantShow:  true,
+		},
+		{
 			name:      "info shows pre-protected",
 			ev:        core.Event{Kind: core.EventInfo, Message: "direct failed -> trying relay…"},
 			protected: false,

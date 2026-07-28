@@ -30,7 +30,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -84,24 +83,51 @@ var (
 	knownPoolTransports   = []string{core.TransportWebRTC, core.TransportReality}
 )
 
-// geoAny is the ComboBox sentinel for "no geo preference" (Config.Geo == "").
-const geoAny = "(any)"
+// relayChainConfigErr is validateRelayChainConfig's error for hops asking for
+// a chain with no directory to build one from.
+var relayChainConfigErr = errors.New("2 or more hops needs both the relay directory file and its public key below")
 
-// geoOptions returns the geo picker's model: every distinct country in items,
-// sorted, prefixed with the "any geo" sentinel. Pure and independent of the live
-// list's ordering so it's testable without a coordinator.
-func geoOptions(items []countryItem) []string {
-	seen := map[string]bool{}
-	var countries []string
-	for _, c := range items {
-		if c.code == "" || seen[c.code] {
-			continue
-		}
-		seen[c.code] = true
-		countries = append(countries, c.code)
+// validateRelayChainConfig reports whether hops/dirPath/dirKey describe a
+// relay-chaining config core would accept at construction: chaining (hops >=
+// 2, issue #142/ADR-0038) is meaningless without a directory to select hops
+// from and a key to verify it — core.Config.RelayDirectory/
+// RelayDirectoryKey, both required together once hops asks for a chain.
+// Mirrors validateAdmissionConfig's shape (issue #130): catching the
+// confusing combination here turns connect()'s otherwise-late construction
+// error into a message in the dialog, before Save ever lets it out. 1 hop
+// (or unset — today's default) never needs a directory, matching
+// core/relaychain.go's chainDepth normalization exactly. Trims both string
+// inputs first, mirroring validateAdmissionConfig. Pure, so it's testable
+// without opening the dialog (see settings_test.go); saveBtn's handler is
+// the only caller.
+func validateRelayChainConfig(hops int, dirPath, dirKey string) (trimmedPath, trimmedKey string, err error) {
+	dirPath = strings.TrimSpace(dirPath)
+	dirKey = strings.TrimSpace(dirKey)
+	if hops >= 2 && (dirPath == "" || dirKey == "") {
+		return "", "", relayChainConfigErr
 	}
-	sort.Strings(countries)
-	return append([]string{geoAny}, countries...)
+	return dirPath, dirKey, nil
+}
+
+// normalizeRelayHops clamps a saved/displayed hop count into NumberEdit's
+// [1, core.RelayHopsMax] range: 0 (a fresh Config's zero value, or an older
+// settings file from before issue #28) reads as "unset", which is today's
+// single relay — the same 0/1-both-mean-1 normalization
+// core/relaychain.go's chainDepth applies server-side, kept in sync here so
+// the control never displays a value core would silently reinterpret.
+// Above the ceiling is clamped only for DISPLAY (a value that high could
+// only get there by hand-editing the config file, since the control itself
+// is capped at core.RelayHopsMax) — core.New's own construction-time refusal
+// is still what enforces the ceiling for real, exactly as it does for every
+// other path to Config.RelayHops (cmd/node's flag included).
+func normalizeRelayHops(hops int) int {
+	if hops < 1 {
+		return 1
+	}
+	if hops > core.RelayHopsMax {
+		return core.RelayHopsMax
+	}
+	return hops
 }
 
 // sanitizePoolOrder filters order down to allowedPoolTransports, preserving
@@ -178,8 +204,6 @@ func openSettingsDialog() {
 		settingsMu.Unlock()
 	}()
 
-	countries := listCountries()
-
 	mu.Lock()
 	snap := cfg
 	snap.TransportPool = append([]string(nil), cfg.TransportPool...)
@@ -190,21 +214,13 @@ func openSettingsDialog() {
 
 	var dlg *walk.Dialog
 	var poolCheck *walk.CheckBox
-	var geoCombo *walk.ComboBox
 	var exitEdit *walk.LineEdit
 	var ladderBox *walk.ListBox
+	var relayHopsEdit *walk.NumberEdit
+	var relayDirPathEdit, relayDirKeyEdit *walk.LineEdit
 	var admissionPubKeyEdit, admissionCRLPathEdit *walk.LineEdit
 	var upBtn, downBtn, resetBtn, saveBtn, cancelBtn *walk.PushButton
 	var statusLbl *walk.Label
-
-	geoModel := geoOptions(countries)
-	geoIdx := 0
-	for i, g := range geoModel {
-		if (g == geoAny && snap.Geo == "") || g == snap.Geo {
-			geoIdx = i
-			break
-		}
-	}
 
 	err := Dialog{
 		AssignTo:      &dlg,
@@ -226,16 +242,12 @@ func openSettingsDialog() {
 				Title:  "Exit selection",
 				Layout: VBox{},
 				Children: []Widget{
-					Label{Text: "Preferred geo (used only with automatic path selection):"},
-					ComboBox{
-						AssignTo:     &geoCombo,
-						Model:        geoModel,
-						CurrentIndex: geoIdx,
-					},
-					Label{Text: "Manual exit ID (optional — overrides the tray picker; leave blank to auto-select):"},
+					Label{Text: "The country you exit in is chosen from the tray menu (issue #6) — there is only ever one country picker, so it isn't repeated here."},
+					Label{Text: "Manual exit ID (legacy, ignored): naming a specific exit was removed — the coordinator picks the exit inside your chosen country (issue #146). A value saved here from an older config has no effect."},
 					LineEdit{
 						AssignTo: &exitEdit,
 						Text:     snap.ExitID,
+						Enabled:  false,
 					},
 				},
 			},
@@ -268,12 +280,24 @@ func openSettingsDialog() {
 				Title:  "Relay hops",
 				Layout: VBox{},
 				Children: []Widget{
+					Label{Text: "How many nodes your relayed traffic routes through, so no single one links you to your exit (issue #76/#142). More hops: harder to link, but slower (a round trip per hop) and costs more volunteer bandwidth."},
 					NumberEdit{
+						AssignTo: &relayHopsEdit,
 						MinValue: 1,
-						MaxValue: 1,
-						Value:    1,
-						Enabled:  false,
-						Suffix:   " hop (multi-hop chaining not yet available — issue #76)",
+						MaxValue: float64(core.RelayHopsMax),
+						Value:    float64(normalizeRelayHops(snap.RelayHops)),
+						Suffix:   " hop(s)",
+					},
+					Label{Text: "1 (the default) is today's behavior: a single relay, which sees both you and your exit. 2+ builds a chain the coordinator never sees past its own first node — but it needs a relay directory below, and it FAILS the connection rather than silently connecting through fewer hops if one can't be built."},
+					Label{Text: "Relay directory file (a signed snapshot, e.g. from cmd/coldstart-bootstrap -cache — ask your operator):"},
+					LineEdit{
+						AssignTo: &relayDirPathEdit,
+						Text:     snap.RelayDirectoryPath,
+					},
+					Label{Text: "Directory public key, hex (the coordinator's snapshot-signing key, verifies the file above):"},
+					LineEdit{
+						AssignTo: &relayDirKeyEdit,
+						Text:     snap.RelayDirectoryKey,
 					},
 				},
 			},
@@ -340,12 +364,16 @@ func openSettingsDialog() {
 		} else {
 			next.TransportPool = nil
 		}
-		g := geoCombo.Text()
-		if g == geoAny {
-			g = ""
-		}
-		next.Geo = g
 		next.ExitID = exitEdit.Text()
+
+		dirPath, dirKey, err := validateRelayChainConfig(int(relayHopsEdit.Value()), relayDirPathEdit.Text(), relayDirKeyEdit.Text())
+		if err != nil {
+			statusLbl.SetText(err.Error())
+			return
+		}
+		next.RelayHops = int(relayHopsEdit.Value())
+		next.RelayDirectoryPath = dirPath
+		next.RelayDirectoryKey = dirKey
 
 		pubKey, crlPath, err := validateAdmissionConfig(admissionPubKeyEdit.Text(), admissionCRLPathEdit.Text())
 		if err != nil {
