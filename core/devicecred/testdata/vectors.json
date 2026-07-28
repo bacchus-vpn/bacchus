@@ -1,0 +1,15 @@
+{
+  "note": "Frozen wire vectors for the root -> issuer cert -> device credential chain. Every key here is a published throwaway; see internal/devroot. A coordinator's verifier must accept this chain at \"now\" and reproduce \"assertion\" byte for byte. Regenerate only alongside a deliberate format change: go test ./internal/chain -update.",
+  "now": "2026-07-15T12:00:00Z",
+  "root_pub": "G3qe/RAaWSSOU+NMl5UUj9/E2nEr2PfgFGzbL9aHisY=",
+  "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiIwZDBlNTZlN2Q3YmM1MGIwIiwiaXB1YiI6IkYxaFJyRHMwTlpONG1MUmFoN3NwWnZpd1dlV0pVSmh6SVpDazMybTNOdlE9IiwibmJmIjoiMjAyNi0wNy0xNVQxMjowMDowMFoiLCJleHAiOiIyMDI3LTA3LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6ImRldmVsb3BtZW50IGlzc3VlciAtIHRocm93YXdheSByb290In3eK-wR8BaS6P6ig6u3HusDWwFB-P4J9hCyQES0nfci6oUJ3rDcfob3EVrAgnzGAxqZjny3iWYKbC0_4JMtSPIN",
+  "device_cred": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiI1YzAzMzA1NTUzMTY5YTFkIiwiZHB1YiI6InFTNjVFVGx3L3hBdGJtbmJRZ2EwVjV2aWFJc1hGUENvUHRFazRMa3NBMGM9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDctMTVUMTI6MDA6MDBaIiwiZXhwIjoiMjAyNi0wNy0xN1QxMjowMDowMFoifaP8RB47IJV3265JUj3FN_rZNo317oAWj4BZ1wkAKKJaOE8sJayu64l2S6anCYwO2yA2UCIo8IXODHylVT1YYAY",
+  "device_seed": "o618IdMMggeGvjgfTn2WHABBoB0KqI9khzIxfKJpQmY=",
+  "audience": "coordinator-vector-1",
+  "challenge": "7SiX1ZL5ynkziju4d11WC0f9LWEU2zd10yIeL5PjPm8=",
+  "assertion": "HTAZJgVtDrsplKqGSBP/pIa8CWN6c+1vqvDB+sYPZ1IxkQdJUutEJ4f5orXDMJJ88wbW6DMlY1WeAauY3z12Cg==",
+  "expect_device_pub": "qS65ETlw/xAtbmnbQga0V5viaIsXFPCoPtEk4LksA0c=",
+  "expect_epoch": 0,
+  "expect_serial": "5c03305553169a1d",
+  "expect_cert_serial": "0d0e56e7d7bc50b0"
+}
