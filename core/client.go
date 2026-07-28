@@ -66,6 +66,11 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 	}
 	links := e.orderLinks()
 	per := perLinkBudget(timeout, len(links))
+	// Whether any member ANSWERED, in a shape this build could not route (issue #5).
+	// That is not silence and must not be reported as it: silence is the mesh-walk
+	// trigger, and mesh-walk rediscovers coordinator ADDRESSES, which is no help
+	// whatsoever against a coordinator whose address is fine and whose dialect is not.
+	unroutable := false
 	for _, l := range links {
 		select {
 		case <-ctx.Done():
@@ -76,6 +81,7 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 		}
 		e.drainMsgCh(l)
 		e.greet(l)
+		mark := l.unroutableMark()
 		l.sendN(wire{Type: "list", Cred: e.cfg.AdmissionCred}, 3)
 		if countries, ok := e.awaitCountries(ctx, l, per); ok {
 			// The reply advertised the network's release; if this client is too
@@ -85,7 +91,24 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 			}
 			return countries, nil
 		}
-		e.markUnhealthy(l.raw) // silent within its slice — deprioritize and rotate
+		if l.answeredUnroutably(mark) {
+			unroutable = true
+		}
+		// Deprioritized either way: a member that cannot give us a country list is one
+		// to rotate past, whether it went silent or answered unintelligibly. What the
+		// two must NOT share is the error below — the health memo only reorders the
+		// next attempt, while the error decides whether the whole engine gets torn down
+		// and rebuilt against a rediscovered directory.
+		e.markUnhealthy(l.raw)
+	}
+	if unroutable {
+		// At least one member is up and talking. Rendezvous is not down, so mesh-walk
+		// is the wrong recovery and the sentinel that triggers it is deliberately NOT
+		// wrapped. The version fence cannot catch this either: observeNetworkVersion
+		// runs only for session/countries/error, so a reply this build cannot route
+		// never reaches the force-major check — which is why the diagnosis has to come
+		// from here.
+		return nil, fmt.Errorf("core: a coordinator answered the country list in a shape this build cannot route: %w", ErrCoordinatorUnroutable)
 	}
 	// Every member was silent — none answered. Wrap the recovery sentinel so the
 	// pooled path (poolCountries/selectPath) can tell this apart from "answered but no
@@ -94,6 +117,25 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 	// descriptive for a human reading a -list failure.
 	return nil, fmt.Errorf("core: no coordinator answered the country list: %w", ErrNoCoordinatorReachable)
 }
+
+// ErrCoordinatorUnroutable is what the client legs return when a coordinator ANSWERED
+// but in a shape this build cannot route — an older member still sending a reply type
+// this version retired, or a newer one sending a type it does not yet know (issue #5).
+//
+// It exists to keep that case out of ErrNoCoordinatorReachable. The two look identical
+// from a leg that only waits for the reply it wants: nothing usable arrives, the
+// deadline expires, and the member reads as blocked. But the recoveries are opposite.
+// Silence means rendezvous itself is unreachable and a live coordinator must be
+// rediscovered through a peer (mesh-walk, issue #115, ADR-0037). An unroutable reply
+// means rendezvous is fine and this build and that coordinator disagree about the
+// protocol — walking the mesh then tears down a working engine to rebuild it against
+// coordinators that would answer exactly the same way, and does so while the configured
+// one was healthy throughout.
+//
+// It is a version problem wearing a reachability problem's clothes, and the difference
+// is only visible at the moment the reply is dropped, which is why coordLink counts it
+// there.
+var ErrCoordinatorUnroutable = errors.New("core: coordinator answered in a shape this build cannot route")
 
 // awaitCountries waits for a "countries" reply on member l's inbox within timeout,
 // skipping any other buffered message. ok is false on timeout, cancellation, or
@@ -166,10 +208,11 @@ func pickCountry(configured string, countries []CountryInfo) (string, error) {
 type connectOutcome int
 
 const (
-	connectOK          connectOutcome = iota // a path was established
-	coordinatorSilent                        // no reply — the member looks blocked
-	coordinatorRefused                       // member replied "error" — up, but wouldn't pair us
-	transportFailed                          // member paired us, but the transport never came up
+	connectOK             connectOutcome = iota // a path was established
+	coordinatorSilent                           // no reply — the member looks blocked
+	coordinatorUnroutable                       // member replied, in a shape this build cannot route — up, but not speaking our protocol (issue #5)
+	coordinatorRefused                          // member replied "error" — up, but wouldn't pair us
+	transportFailed                             // member paired us, but the transport never came up
 )
 
 // modeDirect and modeRelay are the two single-transport candidate modes the
@@ -343,7 +386,14 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 	// all, so a live one must be rediscovered through a peer. A member that answered
 	// (refused/relay-failed) means rendezvous itself is fine, so we surface the
 	// ordinary error and do not walk.
+	//
+	// A member that answered in a shape this build cannot route counts as ANSWERING
+	// (issue #5). It reads as silence to the leg waiting for a session reply, and it is
+	// the opposite condition: rendezvous is up and the protocol is the problem, so
+	// rediscovering coordinator addresses cannot help and would tear down a working
+	// engine to rebuild it against members that answer identically.
 	allSilent := true
+	unroutable := false
 	for _, l := range e.orderLinks() {
 		select {
 		case <-ctx.Done():
@@ -382,10 +432,20 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 			e.markUnhealthy(l.raw)
 		} else {
 			allSilent = false
+			if outcome == coordinatorUnroutable {
+				// Deprioritized like a silent member — it cannot pair us either — but
+				// NOT counted as silence, which is the distinction that decides whether
+				// the engine is torn down and rebuilt (issue #5).
+				e.markUnhealthy(l.raw)
+				unroutable = true
+			}
 		}
 	}
 	if allSilent {
 		return connPath{}, ErrNoCoordinatorReachable
+	}
+	if unroutable {
+		return connPath{}, fmt.Errorf("core: a coordinator answered the connect in a shape this build cannot route: %w", ErrCoordinatorUnroutable)
 	}
 	return connPath{}, errors.New("core: could not connect via any coordinator")
 }
@@ -655,8 +715,13 @@ func (e *Engine) connectVia(ctx context.Context, l *coordLink, modes []string, d
 // mergeOutcome keeps the more informative of two failure outcomes (higher wins,
 // per the connectOutcome ordering): a member that paired us then failed the
 // transport is more clearly reachable than one that only refused, which in turn
-// beats one that stayed silent. connectVia only merges failures, so connectOK
-// (the lowest value) never participates.
+// beats one that answered unintelligibly, which beats one that stayed silent.
+// connectVia only merges failures, so connectOK (the lowest value) never participates.
+//
+// coordinatorUnroutable sits directly above coordinatorSilent because it is the
+// weakest evidence of reachability that is still evidence (issue #5): the member sent
+// us bytes. It sits below coordinatorRefused because a refusal additionally proves the
+// member understood the request.
 func mergeOutcome(a, b connectOutcome) connectOutcome {
 	if b > a {
 		return b
@@ -762,6 +827,9 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	// any left over from a prior mode on this member so awaitSession can't pick
 	// up a stale session id.
 	e.drainMsgCh(l)
+	// Taken after the drain and before the send, so it counts only what THIS attempt
+	// drew (issue #5).
+	mark := l.unroutableMark()
 	l.sendN(wire{
 		Type:            "connect",
 		Country:         req.wireCountry(),
@@ -775,6 +843,17 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	reply, res := e.awaitSession(ctx, l, timeout)
 	switch res {
 	case pairSilent:
+		// Silence and "answered unintelligibly" are the same non-event to a leg
+		// waiting for a session reply, and they are not the same condition (issue #5).
+		// The connect leg has the same hole the country list had: a coordinator sending
+		// a type this build cannot route produces no reply here, times out, and reads
+		// as blocked — which is the mesh-walk trigger. It is worth separating on both
+		// legs, not only the one the issue happened to name, because after #146 a
+		// client with no configured country takes the list leg first and the connect
+		// leg immediately after, against the same member.
+		if l.answeredUnroutably(mark) {
+			return attemptResult{outcome: coordinatorUnroutable}
+		}
 		return attemptResult{outcome: coordinatorSilent}
 	case pairRefused:
 		// Surface WHY (issue #147). "country-busy" and "no-such-country" are

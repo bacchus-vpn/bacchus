@@ -132,13 +132,43 @@ func readCRLFile(path string) (string, error) {
 // holds an admission anchor and therefore requires one. The verifier's error is
 // returned verbatim — admission errors carry only protocol facts (never key
 // material), so they are safe to surface as the user-visible abort reason.
+//
+// An empty exitPub is a rejection too, and that guard is the structural half of issue
+// #29. hex.EncodeToString(nil) is "", and admission.accept reads an empty subject as a
+// BEARER credential and skips the binding check:
+//
+//	if subject != "" && subject != c.Subject { return ErrSubjectMismatch }
+//
+// That default is correct where it comes from — a client has no coordinator-known id, so
+// its own credential genuinely is bearer — and it is exactly wrong here. It means a
+// caller that fails to thread the exit's key through does not get an error; it gets a
+// check that silently passes, so any exit may present any authorized exit's credential.
+// It fails OPEN toward accepting, which is why #29 was invisible: nothing errors,
+// nothing disconnects, and the client routes through an exit the root never authorized
+// under that identity.
+//
+// Reaching this function means clientHandshake just authenticated a static key, so there
+// is always one to bind to and an empty one is a plumbing bug rather than a state the
+// protocol can produce. Refusing it makes the next path that forgets fail closed and
+// loudly instead of open and silently — which is worth more than the one call site that
+// prompted it, since the failure mode has no other symptom.
 func verifyExitCredential(v *admission.Verifier, exitPub, cred []byte, now time.Time) error {
+	if len(exitPub) == 0 {
+		return errUnboundExitKey
+	}
 	if len(cred) == 0 {
 		return errMissingExitCredential
 	}
 	_, err := v.Verify(string(cred), now, admission.RoleExit, hex.EncodeToString(exitPub))
 	return err
 }
+
+// errUnboundExitKey is returned when the client-side admission check is reached with no
+// exit static key to bind the credential to (issue #29). It names a plumbing bug rather
+// than a network condition — an exit cannot cause it — so it is worded for whoever has
+// to find it, and it is deliberately distinct from errMissingExitCredential, which is
+// something an exit really can do to us.
+var errUnboundExitKey = errors.New("core: exit admission check reached with no exit key to bind the credential to — an unbound check would accept any authorized exit's credential")
 
 // exitVerifyFunc returns the per-handshake callback clientHandshake runs on the
 // credential an exit presents, or nil when this client has no admission anchor

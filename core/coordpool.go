@@ -23,6 +23,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,7 +52,38 @@ type coordLink struct {
 	// flooded log is as good as a silent one.
 	unroutableMu sync.Mutex
 	unroutable   map[string]bool
+
+	// unroutableN counts EVERY reply from this member that could not be routed,
+	// including the ones the memo above suppresses from the log. The memo bounds
+	// reporting; this is the control-flow signal, and the two are deliberately
+	// separate — a member whose second unroutable reply went unlogged has still
+	// answered, and a caller that read the memo would conclude it had not (issue #5).
+	//
+	// Atomic rather than mutex-guarded because a client leg samples it around a wait
+	// while readLoop writes it from its own goroutine; there is nothing to keep
+	// consistent with anything else, only a monotonic count to compare against a
+	// snapshot.
+	unroutableN atomic.Uint64
 }
+
+// answeredUnroutably reports whether this member produced a reply readLoop could not
+// route since the caller took `before` from [coordLink.unroutableMark].
+//
+// This is what turns "answered in a language we do not speak" into something a call
+// site can act on. Before it, such a reply was a log line and nothing else: the leg
+// waiting on the member simply timed out, reported it as silent, and — since silence is
+// the mesh-walk trigger (issue #115) — a client walked the mesh looking for a live
+// coordinator while the configured one was up and answering throughout. A version
+// problem and a reachability problem want different recovery, and the first step is
+// being able to tell them apart at the point that decides.
+func (l *coordLink) answeredUnroutably(before uint64) bool {
+	return l.unroutableN.Load() > before
+}
+
+// unroutableMark snapshots the unroutable count so a caller can tell whether THIS
+// attempt drew one. A running total would conflate an attempt against a member that has
+// misbehaved before with one that is misbehaving now.
+func (l *coordLink) unroutableMark() uint64 { return l.unroutableN.Load() }
 
 // noteUnroutable reports, once per distinct message type, that a reply from this
 // member was received and could not be routed anywhere. why names the reason.
@@ -62,6 +94,10 @@ type coordLink struct {
 // "no coordinator reachable" about a healthy one and, worse, triggers mesh-walk
 // recovery against it (issue #115's trigger is that same silence).
 func (l *coordLink) noteUnroutable(e *Engine, msgType, why string) {
+	// Counted before the memo, and every time. The memo below suppresses repeat
+	// LOGGING; suppressing the count as well would mean a member's second unroutable
+	// reply looked, to the leg waiting on it, exactly like silence.
+	l.unroutableN.Add(1)
 	l.unroutableMu.Lock()
 	if l.unroutable == nil {
 		l.unroutable = map[string]bool{}

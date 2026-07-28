@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -191,7 +192,23 @@ func TestClientMethodsRequireClientRole(t *testing.T) {
 	}
 }
 
-func TestConnectRequiresExitID(t *testing.T) {
+// TestConnectWithNoCountryFailsAgainstAnUnreachableCoordinator replaces
+// TestConnectRequiresExitID, which was stale in both halves (issue #4).
+//
+// That test's name and its `t.Fatal("Connect should require ExitID")` asserted a
+// requirement country-only assignment deleted: a client cannot name an exit, and
+// Config.ExitID survives only as an accepted-and-ignored field (ADR-0042's
+// Consequences). It kept passing for a reason unrelated to anything it claimed —
+// resolveCountry calls ListCountries, and testCoord answers nothing, so Connect failed
+// as unreachable. A green test asserting a deleted requirement is worse than no test:
+// it reads as coverage of a rule the code no longer has.
+//
+// What is actually worth pinning at this shape is the surviving fact: with no configured
+// country a client must OBTAIN one before it can pair at all, so it takes the country-list
+// leg first — and against a coordinator that never answers, that is where it fails. The
+// error names the condition rather than merely being non-nil, which is what stops this
+// from passing for an unrelated reason the way its predecessor did.
+func TestConnectWithNoCountryFailsAgainstAnUnreachableCoordinator(t *testing.T) {
 	eng, err := New(Config{Coordinators: []string{testCoord}, Roles: []string{"client"}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -200,8 +217,46 @@ func TestConnectRequiresExitID(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	defer eng.Stop()
-	if err := eng.Connect(context.Background()); err == nil {
-		t.Fatal("Connect should require ExitID")
+	err = eng.Connect(context.Background())
+	if err == nil {
+		t.Fatal("Connect against a coordinator that answers nothing should fail")
+	}
+	if !errors.Is(err, ErrNoCoordinatorReachable) {
+		t.Fatalf("Connect failed with %v; want ErrNoCoordinatorReachable — a client with no configured country resolves one through the country list first, and a coordinator that never answers is exactly the silence that sentinel names", err)
+	}
+}
+
+// TestConfigExitIDIsAcceptedAndIgnored pins the other half of what the stale test
+// gestured at: Config.ExitID no longer requires anything, and a client that sets one is
+// told so loudly.
+//
+// It survives as an accepted-and-ignored field so the client surfaces that still write it
+// keep compiling (ADR-0042's Consequences), and New emits a loud error event when one is
+// set — because a pin that is silently dropped leaves a user believing their traffic
+// leaves through one specific node while the coordinator is choosing. The event is the
+// whole value of keeping the field, so it is what is pinned.
+func TestConfigExitIDIsAcceptedAndIgnored(t *testing.T) {
+	events := make(chan Event, 32)
+	eng, err := New(Config{
+		Coordinators: []string{testCoord},
+		Roles:        []string{"client"},
+		ExitID:       strings.Repeat("ab", 32),
+		OnEvent:      func(ev Event) { events <- ev },
+	})
+	if err != nil {
+		t.Fatalf("New must ACCEPT a configured ExitID rather than refusing it — client surfaces that still write the field have to keep compiling: %v", err)
+	}
+	defer eng.Stop()
+
+	for {
+		select {
+		case ev := <-events:
+			if ev.Kind == EventError && strings.Contains(strings.ToLower(ev.Message), "exit") {
+				return
+			}
+		default:
+			t.Fatal("setting ExitID produced no error event — a pin that is silently dropped leaves a user believing their traffic leaves through one specific node while the coordinator is choosing (ADR-0042)")
+		}
 	}
 }
 
