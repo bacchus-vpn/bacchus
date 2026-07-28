@@ -1,9 +1,11 @@
 # Multi-hop relay chaining — design
 
-- Status: **implemented and shipped** for the client and relay halves (issue #142).
-  Issue #76 remains the open epic; §9 marks what landed and what is still deferred.
+- Status: **implemented and shipped** for the client and relay halves (issue #142),
+  in-place directory refresh (issue #27), and the Windows client's hop-count control
+  (issue #28). Issue #76 remains the open epic; §9 marks what landed and what is
+  still deferred.
 - Date: 2026-07-11 (implementation notes 2026-07-25; rebuilt on the ADR-0042 wire
-  2026-07-27)
+  2026-07-27; directory refresh + GUI control 2026-07-28)
 - Implementation record: the [ADR-0038 amendments](../adr/0038-configurable-multi-hop-relay-chaining.md),
   which are authoritative where they differ from this document. Two of this
   document's original assumptions are **superseded**:
@@ -116,7 +118,13 @@ the directory" means exactly "trusting the mapping from ids to addresses".
   real id, but the node at that address will not hold the key, and the layer's
   handshake fails. It could substitute both id and address, which is why the
   signature matters.
-- It is loaded **once, at construction**. See the rough edge in §10.
+- It is loaded **at construction**, and — when `Config.RelayDirectoryPath` names
+  where to re-read it from — kept fresh on an interval thereafter (issue #27, §10.5):
+  a reload runs it through the exact same signature and expiry check construction
+  did, and a reload that fails either of those, or fails to read the file at all,
+  leaves the previously loaded directory enforcing unchanged. With no path
+  configured, a restart is still how the initial copy is replaced, exactly as
+  before issue #27.
 
 ### 0.5 What is enforced, and what is not
 
@@ -142,10 +150,13 @@ these properties. "Enforced" means code fails the path when it is violated.
 | Concern | File |
 |---|---|
 | Directory loading, hop + exit selection, the onion dial, the relay peel | `core/relaychain.go` |
+| Directory hot-reload (issue #27) | `core/relaychain.go` — `reloadRelayDirLoop`, `reloadRelayDir`; gated in `core/engine.go`'s `Start` |
 | Where a chained request differs on the wire | `core/client.go` — `connectReq`, `attemptWith` |
 | Honouring `firstHop` | `cmd/coordinator/assign.go` — `resolveFirstHop`; `cmd/coordinator/main.go` — the `connect` handler |
 | The acceptance test, through the real `New()` | `core/relaychain_acceptance_test.go` |
+| The reload tests, mutation-checked | `core/relaychain_reload_test.go` |
 | The coordinator's half | `cmd/coordinator/firsthop_test.go` |
+| The Windows client's hop-count control (issue #28) | `clients/windows/settings.go` — the "Relay hops" group; `clients/windows/main.go` — `connect()`'s directory load, `eventStatus`'s fail-closed message |
 | A dependency-free demonstration of the crypto alone | [`cmd/relaychain-probe`](../../cmd/relaychain-probe/README.md) |
 
 ---
@@ -680,7 +691,7 @@ earlier with #124/#126, and item 4 landed **only in its operator-tag half**. Ite
 | 2 | Client-side chain construction | **Shipped** — `core/relaychain.go`'s `buildChain` + `dialChain`, reached through the single `dialE2E` seam so SOCKS CONNECT, UDP ASSOCIATE, and the pool probe all chain alike. |
 | 3 | Directory: relay ingress + operator metadata | **Shipped earlier** (#124/#126, the ADR-0038 #124 amendment). |
 | 4 | AS/operator-diverse hop selection | **Barely shipped, and weaker than this document originally claimed.** Operator diversity is applied where a tag exists, but it constrains a *pair* of hops, so it does nothing at depth 2 — the depth most clients will run — and `operators[id]` is empty for every node absent from the coordinator's curated operators file, so on an uncurated deployment it is **inert, not merely weak**. The IP-derived AS diversity the #124 amendment calls the load-bearing anchor is **not implemented**. Stays a child issue. |
-| 5 | Hop-count knob + config surface | **Shipped** for core and `cmd/node` (`Config.RelayHops` / `-relay-hops`, default 1, refused above `RelayHopsMax`). The ADR-0036 GUI control is **not** wired and stays a child issue. |
+| 5 | Hop-count knob + config surface | **Shipped** for core, `cmd/node`, and — issue #28 — the Windows client's ADR-0036 "Relay hops" control (`Config.RelayHops` / `-relay-hops`, default 1, refused above `RelayHopsMax`). The control also owns the directory file + key fields (issue #28 needs a directory on the client to offer it at all) and surfaces `[relay] chain not built:` distinctly from a generic connection error. |
 | 6 | Chain liveness + rebuild | **Open.** A dead hop currently surfaces as an end-to-end stall and rebuilds through the existing ADR-0028/ADR-0030 machinery — correct, but not chain-aware. |
 | 7 | Relay-side DoS controls for onion forwarding | **Open.** Forwarding is metered per ADR-0040 and a hop refuses to dial itself, but there is no per-previous-hop circuit or bandwidth cap, and nothing bounds a ring of nodes pointed at each other (#174). |
 | 8 | Per-hop relay admission-cred verification | **Open.** The wire seam exists (every responder presents its credential in msg2); the client passes `nil` for hop layers today. |
@@ -917,10 +928,21 @@ executable version of this section.
 
 ### 10.5 Known rough edges
 
-- **The directory is read once at startup.** A node running longer than its
-  snapshot's validity window will refuse forwards to nodes that joined since, and a
-  client's hop selection can go stale. Restart to adopt a fresh snapshot; in-place
-  refresh is §9 item 6's neighbourhood.
+- **The directory refreshes only when told where from.** Issue #27 closed the
+  original rough edge here — a node running longer than its snapshot's validity
+  window no longer has to restart to stop refusing forwards to nodes that joined
+  since, or to stop building hop selections against a stale candidate set —
+  *provided* `Config.RelayDirectoryPath` / `cmd/node`'s `-relay-directory` names a
+  file to re-read (the Windows client's Settings "Relay hops" directory field does
+  the same, issue #28). With `RelayDirectory` set inline and no path — the shape a
+  hand-assembled `core.Config` can still choose — this rough edge is exactly as it
+  was: a restart is the only way to adopt a fresh snapshot. A reload runs the fresh
+  bytes through the identical signature and expiry check construction does, and a
+  reload that fails either — or fails to read the file at all — leaves the
+  previously loaded directory enforcing unchanged (`core/relaychain_reload_test.go`,
+  mutation-checked). This is a different concern from §9 item 6 (chain liveness +
+  rebuild, still open): that is about a hop *dying mid-session*; this is about the
+  candidate set the client selects hops *from* going stale.
 - **A chained client's egress load is invisible to the coordinator's exit ranking**
   (ADR-0042 §9 — the session records no exit id, deliberately, so a hop is not
   charged as a terminator). On a network where most clients chain, exit balancing

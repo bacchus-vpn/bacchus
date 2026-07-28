@@ -174,7 +174,7 @@ coldstart-issue -coordinator <HOST:PORT> -pubkey <SNAPSHOT_PUBKEY> \
     -admission-pubkey <ADMISSION_PUBKEY>
 
 # Or point a client straight at the anchor (overrides any invite):
-bacchus-node -role client -exit-id <hex> -admission-pubkey <ADMISSION_PUBKEY>
+bacchus-node -role client -admission-pubkey <ADMISSION_PUBKEY>
 ```
 
 v1 verified offline only (no revocation oracle on the client) — see
@@ -226,7 +226,7 @@ coldstart-issue -coordinator <HOST:PORT> -pubkey <SNAPSHOT_PUBKEY> \
     -admission-pubkey <ADMISSION_PUBKEY> -admission-crl revocations.crl
 
 # Or hand a client the bundle directly (overrides any invite):
-bacchus-node -role client -exit-id <hex> \
+bacchus-node -role client \
     -admission-pubkey <ADMISSION_PUBKEY> -admission-crl revocations.crl
 ```
 
@@ -275,7 +275,7 @@ AdmissionPubKey` and `listExits()` silently return no exits, both fail-closed
 but confusing, since nothing in the Settings window itself explained why.
 `clients/windows/settings.go`'s save handler now runs
 `validateAdmissionConfig` (a pure, unit-tested function mirroring the shape
-of `sanitizePoolOrder`/`effectiveExitID`) before either field reaches
+of `sanitizePoolOrder`/`validateRelayChainConfig`) before either field reaches
 `Config`, and refuses to save with an inline message
 ("revocation list path requires the admission public key above") instead of
 passing the invalid pair through to core. Both blank (admission off) and the

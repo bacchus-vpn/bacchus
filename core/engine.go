@@ -357,8 +357,10 @@ type Config struct {
 	// this must be LIVE: it names nodes that are supposed to be reachable right now,
 	// and hop selection against a long-dead directory just builds chains that fail.
 	// It is loaded and verified once at construction, so a bad or expired snapshot
-	// is a startup error, never a silent degradation to no chaining. Refreshing it
-	// in place is a follow-up (#76 §9); a restart adopts a new one.
+	// is a startup error, never a silent degradation to no chaining. When
+	// RelayDirectoryPath is also set, a background loop keeps it fresh thereafter
+	// (issue #27); with no path, a restart is still how this initial copy is
+	// replaced, exactly as before that issue.
 	RelayDirectory []byte
 
 	// RelayDirectoryKey is the coordinator's snapshot-signing key that
@@ -372,6 +374,24 @@ type Config struct {
 	// mesh-recovery setup to the issue #121 diagnostic and warn about a
 	// misconfiguration that is not one.
 	RelayDirectoryKey ed25519.PublicKey
+
+	// RelayDirectoryPath is a filesystem path to the same signed snapshot
+	// RelayDirectory carries, re-read on an interval so a long-lived node picks
+	// up a rotated directory (new hops, an operator's freshly re-signed
+	// snapshot) without a restart (issue #27) — the client-side-CRL-reload
+	// shape (AdmissionCRLPath, issue #90) applied to chaining, and mirroring
+	// cmd/coordinator's own revocation-file reload loop the same way that one
+	// does. RelayDirectory itself must still be set (and is what construction
+	// verifies) — this only says where to re-read a fresh copy FROM; it names
+	// no new source. A reload that fails to read, fails to verify, or is
+	// itself expired is logged and the previously loaded directory is kept
+	// enforcing unchanged: it must never degrade to "forward to anything" or
+	// "no chaining" just because one reload landed on a stale or half-written
+	// file. Empty disables reload — a restart is still how the initial copy is
+	// replaced, exactly as before this field existed. Read by both roles that
+	// read RelayDirectory itself, since either can outlive its snapshot's
+	// validity window with uptime.
+	RelayDirectoryPath string
 }
 
 // RelayHopsMax is the hard ceiling on Config.RelayHops (ADR-0038 §6). The client
@@ -491,11 +511,15 @@ type Engine struct {
 
 	// relayDir is the verified, unexpired signed snapshot relay chaining reads
 	// (issue #142, ADR-0038): a client picks its hops out of it, a forwarding node
-	// admits a splice only to an address in it. nil — the default — means this
-	// engine does not chain and does not forward onion layers. Built once in New,
-	// so a bad or expired directory is a construction error rather than a silent
-	// loss of chaining; immutable thereafter, which is why it needs no lock.
-	relayDir *relayDirectory
+	// admits a splice only to an address in it. Load() == nil means this engine
+	// does not chain and does not forward onion layers. Built once in New (a bad
+	// or expired directory is a construction error, not a silent loss of
+	// chaining) and, when Config.RelayDirectoryPath is set, swapped for a freshly
+	// verified one on an interval by reloadRelayDirLoop (issue #27) — the same
+	// atomic.Pointer-swap shape cmd/coordinator's reloadRevocationsLoop uses, and
+	// each *relayDirectory a Load() can return is itself immutable, so a reader
+	// mid-selectHops never observes a directory changing under it.
+	relayDir atomic.Pointer[relayDirectory]
 
 	// exitVerifier verifies the admission credential an exit presents in the
 	// Noise_NK handshake (issue #60); nil when the client has no admission anchor
@@ -824,7 +848,7 @@ func New(cfg Config) (*Engine, error) {
 	eng.acctKey, eng.acctStore, eng.acctClientStore = acctKey, acctStore, acctClientStore
 	eng.exitVerifier = exitVerifier
 	eng.clientCRL = clientCRL
-	eng.relayDir = relayDir
+	eng.relayDir.Store(relayDir)
 	return eng, nil
 }
 
@@ -1040,7 +1064,7 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.wg.Add(1)
 		go e.serveExit(ln)
 		e.emit(EventInfo, "", "relay onion ingress on %s (forwarding to %d known mesh addresses)",
-			ln.Addr(), len(e.relayDir.dialable))
+			ln.Addr(), len(e.relayDir.Load().dialable))
 	}
 	// The client's chain depth, reported once so an operator can see what actually
 	// took effect. There is no clamp notice to print: a depth above RelayHopsMax is
@@ -1049,7 +1073,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	if e.clientOn && e.chaining() {
 		depth := chainDepth(e.cfg.RelayHops)
 		e.emit(EventInfo, "", "relay chaining: %d hops on relayed paths — %d peeling hop(s) chosen per connect from %d directory candidates; DIRECT paths are not offered while chaining",
-			depth, depth-1, len(e.relayDir.hops))
+			depth, depth-1, len(e.relayDir.Load().hops))
 	}
 
 	// A forwarder stamps its product release on every register (issue #36,
@@ -1100,6 +1124,18 @@ func (e *Engine) Start(ctx context.Context) error {
 	if e.clientOn && e.clientCRL != nil && e.cfg.AdmissionCRLPath != "" {
 		e.wg.Add(1)
 		go e.reloadCRLLoop()
+	}
+
+	// Relay-directory hot-reload (issue #27), the same shape as the CRL block
+	// just above: only when this engine holds a directory to refresh AND a
+	// path to refresh it from — a node given RelayDirectory inline with no
+	// RelayDirectoryPath (or that failed to configure chaining/forwarding at
+	// all, in which case relayDir.Load() is nil) keeps today's construction-
+	// once-and-restart-to-refresh behavior exactly, for either role that
+	// reads it (a chaining client or a forwarding relay).
+	if e.relayDir.Load() != nil && e.cfg.RelayDirectoryPath != "" {
+		e.wg.Add(1)
+		go e.reloadRelayDirLoop()
 	}
 
 	// Watch ctx for cancellation. Not tracked by wg (it calls Stop, which waits

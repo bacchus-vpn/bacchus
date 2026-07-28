@@ -105,6 +105,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -112,6 +113,16 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 	"github.com/bacchus-vpn/bacchus/core/geoip"
 )
+
+// relayDirReloadInterval is the default cadence reloadRelayDirLoop re-reads
+// Config.RelayDirectoryPath at (issue #27), mirroring
+// admissionCRLReloadInterval's reasoning (core/exit_admission.go) and
+// cmd/coordinator's own reloadRevocationsLoop: loadRelayDirectory enforces
+// the snapshot's own ExpiresAt on every reload — unlike the mesh-walk
+// proof-of-prior-contact check, which is legitimately stale — so this only
+// needs to stay comfortably under however often an operator re-signs a
+// snapshot, not race any particular TTL.
+const relayDirReloadInterval = 5 * time.Minute
 
 // Chain-construction failures. All of them fail the path rather than shortening
 // the chain (see the file doc): each names a distinct reason the requested depth
@@ -207,6 +218,15 @@ type relayDirectory struct {
 	// COORDINATOR observed and published. Those two strings essentially never match,
 	// so a guard written against the local listener would pass every real self-dial.
 	own map[string]bool
+
+	// reloadInterval is how often reloadRelayDirLoop re-reads
+	// Config.RelayDirectoryPath (issue #27), captured once when the loop starts
+	// (time.NewTicker is not re-consulted per tick) rather than a field on
+	// *Engine — so a test can shrink it on the *relayDirectory a build produced,
+	// exactly as crlReloadInterval lets a test shrink the CRL loop's cadence,
+	// with no new Engine field to carry it. Set from relayDirReloadInterval by
+	// every loadRelayDirectory call, including each reload's.
+	reloadInterval time.Duration
 }
 
 // exitsIn returns the directory's exit-role entries in country cc, which is the
@@ -290,9 +310,10 @@ func loadRelayDirectory(signed []byte, pub ed25519.PublicKey, selfID string, now
 	}
 
 	d := &relayDirectory{
-		dialable: map[string]bool{},
-		exitAddr: map[string]string{},
-		own:      map[string]bool{},
+		dialable:       map[string]bool{},
+		exitAddr:       map[string]string{},
+		own:            map[string]bool{},
+		reloadInterval: relayDirReloadInterval,
 	}
 	for _, ent := range snap.Entries {
 		if selfID != "" && ent.ID == selfID {
@@ -401,6 +422,81 @@ func setupRelayChaining(cfg Config, roles map[string]bool, now time.Time) (*rela
 	return loadRelayDirectory(cfg.RelayDirectory, key, cfg.ID, now)
 }
 
+// reloadRelayDirLoop re-reads Config.RelayDirectoryPath on an interval and,
+// when it reads, verifies, and is unexpired, swaps it into e.relayDir — so a
+// long-lived node picks up an operator's freshly re-signed snapshot (new
+// hops, a renewed expiry) without a restart (issue #27), the client-side
+// mirror of cmd/coordinator's own reloadRevocationsLoop, and the same shape
+// as this engine's own reloadCRLLoop (core/exit_admission.go). Runs only
+// when a path is configured and this engine already holds a directory to
+// refresh (both checked by the caller, Start). Exits on Stop.
+//
+// A read, verify, or expiry failure is logged as a non-fatal event and the
+// previously loaded directory is kept — the same fail-safe posture as
+// reloadCRL and the coordinator's own loop: a transient misread (an operator
+// mid-write) or an operator late to re-sign a lapsed snapshot must not
+// silently degrade a hop's forwarding allow-list to "nothing" or a client's
+// hop selection to "no chaining" (this file's fail-closed rule, at the top),
+// and must not take down an otherwise healthy connection either.
+func (e *Engine) reloadRelayDirLoop() {
+	defer e.wg.Done()
+	// The interval is read once, from whichever *relayDirectory was current
+	// when this loop started, and then owned by the ticker for the loop's
+	// whole life — a later reload's *relayDirectory carries the same default
+	// (loadRelayDirectory always sets it), but nothing here re-consults it
+	// per tick, matching how time.NewTicker itself works. This is what lets a
+	// test shrink the interval (on the *relayDirectory a build produced)
+	// with no Engine field of its own — see relayDirectory.reloadInterval.
+	interval := relayDirReloadInterval
+	if d := e.relayDir.Load(); d != nil && d.reloadInterval > 0 {
+		interval = d.reloadInterval
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-e.stop:
+			return
+		case <-t.C:
+			e.reloadRelayDir(time.Now())
+		}
+	}
+}
+
+// reloadRelayDir performs a single reload attempt against clock now; split
+// out from reloadRelayDirLoop, and parameterized on now rather than reading
+// time.Now() itself, so a test can drive it deterministically without a
+// ticker (matching reloadCRL). It re-reads Config.RelayDirectoryPath from
+// disk and runs it through the exact same loadRelayDirectory this engine's
+// construction-time load used — same signature verification, same expiry
+// check, same "a node id that is not a key cannot be authenticated as a
+// hop" filtering — so a reload can only ever produce a directory exactly as
+// strict as New's, never a looser one.
+//
+// On any failure the PREVIOUS directory is left in place: e.relayDir.Store
+// is reached only on the success path, so a failed reload is a pure no-op
+// against the live directory, never a partial or empty one — the same
+// guarantee construction itself makes (loadRelayDirectory returns an error
+// rather than a directory with no usable hop).
+func (e *Engine) reloadRelayDir(now time.Time) {
+	b, err := os.ReadFile(e.cfg.RelayDirectoryPath)
+	if err != nil {
+		e.emit(EventError, "", "relay directory: reload from %s: %v", e.cfg.RelayDirectoryPath, err)
+		return
+	}
+	key := e.cfg.RelayDirectoryKey
+	if len(key) == 0 {
+		key = e.cfg.MeshPubKey
+	}
+	fresh, err := loadRelayDirectory(b, key, e.cfg.ID, now)
+	if err != nil {
+		e.emit(EventError, "", "relay directory: reload from %s: %v", e.cfg.RelayDirectoryPath, err)
+		return
+	}
+	e.relayDir.Store(fresh)
+	e.emit(EventInfo, "", "relay directory: reloaded from %s (%d hops, %d dialable addresses)", e.cfg.RelayDirectoryPath, len(fresh.hops), len(fresh.dialable))
+}
+
 // isSelfAddr reports whether a names this node. It is the self-dial guard's
 // question, and the directory answers it (see relayDirectory.own); the configured
 // literals are a second chance for a node whose own entry has not yet appeared in
@@ -410,7 +506,7 @@ func (e *Engine) isSelfAddr(a string) bool {
 	if a == "" {
 		return false
 	}
-	if e.relayDir != nil && e.relayDir.own[a] {
+	if d := e.relayDir.Load(); d != nil && d.own[a] {
 		return true
 	}
 	return a == e.cfg.RelayIngress || (e.cfg.Advertise != "" && a == e.cfg.Advertise)
@@ -509,14 +605,22 @@ func (e *Engine) chainFor(mode, country string) (*chainPlan, error) {
 // excluded from the hop candidate set (a chain that doubles back through its own
 // exit hides nothing), and no node is used twice.
 func (e *Engine) buildChain(n int, country string) (*chainPlan, error) {
-	if e.relayDir == nil {
+	// Loaded ONCE and threaded through the rest of this call (rather than each
+	// helper re-reading e.relayDir itself) so one chain build sees a single,
+	// self-consistent directory generation even if a reload (issue #27) lands
+	// concurrently — every *relayDirectory a Load() can return is independently
+	// immutable, so mixing exit/hop choices across two different Loads would be
+	// safe (a dial-time Noise_NK handshake still gates everything), but there is
+	// no reason to accept even that inconsistency when one Load suffices.
+	d := e.relayDir.Load()
+	if d == nil {
 		return nil, errNoRelayDirectory
 	}
-	exit, err := e.chooseChainExit(country)
+	exit, err := e.chooseChainExit(d, country)
 	if err != nil {
 		return nil, err
 	}
-	hops, err := selectHops(e.relayDir.hops, n-1, exit.id)
+	hops, err := selectHops(d.hops, n-1, exit.id)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +628,7 @@ func (e *Engine) buildChain(n int, country string) (*chainPlan, error) {
 		hops:    hops,
 		exitID:  exit.id,
 		exitPub: exit.pub,
-		exitDia: e.relayDir.exitAddr[exit.id],
+		exitDia: d.exitAddr[exit.id],
 	}, nil
 }
 
@@ -541,13 +645,13 @@ func (e *Engine) buildChain(n int, country string) (*chainPlan, error) {
 // The address is read from exitAddr rather than from the candidate's dial field: a
 // terminating exit must be reached where it terminates end-to-end channels (its
 // advertised address), not at a forwarding ingress it might also publish.
-func (e *Engine) chooseChainExit(country string) (relayHop, error) {
-	cand := e.relayDir.exitsIn(country)
+func (e *Engine) chooseChainExit(d *relayDirectory, country string) (relayHop, error) {
+	cand := d.exitsIn(country)
 	// An exit whose advertised address the directory does not carry cannot be
 	// reached by the last hop, so it is not a candidate however well it matches.
 	usable := cand[:0:0]
 	for _, h := range cand {
-		if e.relayDir.exitAddr[h.id] != "" {
+		if d.exitAddr[h.id] != "" {
 			usable = append(usable, h)
 		}
 	}
@@ -557,7 +661,7 @@ func (e *Engine) chooseChainExit(country string) (relayHop, error) {
 		// an afternoon; the actual condition — this coordinator published a country for
 		// those exits that it can see disagrees with where they serve traffic from — is
 		// both diagnosable and actionable, and it is not the user's fault.
-		if n := e.relayDir.contradictedIn(country); n > 0 {
+		if n := d.contradictedIn(country); n > 0 {
 			return relayHop{}, fmt.Errorf("%w: none usable in %q (%d exit(s) there carry a country the coordinator itself flagged as describing where they SIGNAL from, not where they egress, and cannot be trusted to choose a jurisdiction — issue #3, ADR-0042 §8)",
 				errChainNoExit, country, n)
 		}
@@ -882,7 +986,7 @@ func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target strin
 // opted it in with RelayIngress and gave it a directory to bound its forwarding
 // with. Both are required: see relayForward on why the directory is not optional.
 func (e *Engine) forwardOn() bool {
-	return e.cfg.RelayIngress != "" && e.relayDir != nil
+	return e.cfg.RelayIngress != "" && e.relayDir.Load() != nil
 }
 
 // relayForward is the intermediate-hop egress: this node has already run the
@@ -929,7 +1033,7 @@ func (e *Engine) relayForward(nc *noiseConn, next string) {
 		e.emit(EventError, "", "onion: refusing to forward to %s: %v", next, errHopSelfDial)
 		return
 	}
-	if !e.relayDir.dialable[next] {
+	if !e.relayDir.Load().dialable[next] {
 		// Not an operational fault to stay quiet about: either a hop's directory has
 		// drifted from the client's, or someone is probing this node as an open proxy.
 		// The operator wants to see both, and the line names only an address this node

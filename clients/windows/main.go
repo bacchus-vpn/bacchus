@@ -25,7 +25,10 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -102,10 +105,10 @@ func onReady() {
 	if len(cfg.Coordinators) == 0 {
 		setStatus("No config — copy config.example.json to bacchus.config.json")
 	}
-	mSelected = systray.AddMenuItem("Exit: (none)", "")
+	mSelected = systray.AddMenuItem("Country: (none)", "")
 	mSelected.Disable()
 	systray.AddSeparator()
-	mRefresh := systray.AddMenuItem("Refresh exits", "")
+	mRefresh := systray.AddMenuItem("Refresh countries", "")
 
 	slotCountry = make([]string, maxExits)
 	for i := 0; i < maxExits; i++ {
@@ -370,6 +373,46 @@ func connect() {
 	// unconditional.
 	pe := newPoolExcluder()
 
+	// Relay chaining (issue #142, GUI issue #28): only meaningful at 2+ hops —
+	// core/relaychain.go's chainDepth normalizes 0/1 to "today's single relay,
+	// no directory needed" — so a directory is read here only when the user
+	// actually asked for a chain, mirroring cmd/node's own -relay-directory
+	// load (cmd/node/main.go) and core.New's construction-time strictness: a
+	// bad path or a non-hex key fails loudly, here, before core.New ever runs,
+	// rather than a confusing "core: relay chaining needs a signed relay
+	// directory" surfacing from a field the user never got a chance to fix.
+	var relayDir []byte
+	var relayDirKey ed25519.PublicKey
+	if snap.RelayHops >= 2 {
+		b, err := os.ReadFile(snap.RelayDirectoryPath)
+		if err != nil {
+			setStatus("Error: read relay directory: " + err.Error())
+			mDisc.Hide()
+			mConn.Show()
+			return
+		}
+		relayDir = b
+		k, err := hex.DecodeString(strings.TrimSpace(snap.RelayDirectoryKey))
+		if err != nil || len(k) != ed25519.PublicKeySize {
+			setStatus(fmt.Sprintf("Error: relay directory public key must be %d bytes of hex", ed25519.PublicKeySize))
+			mDisc.Hide()
+			mConn.Show()
+			return
+		}
+		relayDirKey = ed25519.PublicKey(k)
+	}
+
+	// sessionLbl is what the status line and log show for the whole session —
+	// lbl (the chosen country) plus the hop depth actually in effect, so a
+	// user who asked for an unlinkable path can see it took effect without
+	// opening Settings again (issue #28). 1 (or unset) matches core's own
+	// "today's single relay" default and adds nothing, since there is nothing
+	// to distinguish it from pre-#28 behavior.
+	sessionLbl := lbl
+	if snap.RelayHops >= 2 {
+		sessionLbl = fmt.Sprintf("%s (%d hops)", lbl, snap.RelayHops)
+	}
+
 	// Named rather than inlined into core.New: a mid-session mesh-walk
 	// recovery (issue #122, mirroring cmd/node's runNode in courier.go)
 	// rebuilds the engine from this same config with only
@@ -398,11 +441,21 @@ func connect() {
 		// which is what now lets reality ride this client's pool at all.
 		ForceRelay:     true,
 		OnUnderlayDial: pe.reserve,
-		OnEvent:        onEngineEvent(lbl),
+		OnEvent:        onEngineEvent(sessionLbl),
 		// Exit admission (issue #116): both no-ops (fail-open, pre-#116
 		// behavior) when left unconfigured in Settings.
 		AdmissionPubKey:  snap.AdmissionPubKey,
 		AdmissionCRLPath: snap.AdmissionCRLPath,
+		// Relay chaining (issue #142, GUI issue #28): RelayHops 0/1 and a nil
+		// RelayDirectory reproduce pre-#28 behavior exactly — see the loading
+		// block above. RelayDirectoryPath additionally lets the engine itself
+		// keep the directory fresh for the rest of this session (issue #27) —
+		// without it, this client would still need a fresh file on disk at
+		// every reconnect, same as before that issue.
+		RelayHops:          snap.RelayHops,
+		RelayDirectory:     relayDir,
+		RelayDirectoryKey:  relayDirKey,
+		RelayDirectoryPath: snap.RelayDirectoryPath,
 		// Mesh-walk recovery (issue #115/#122): MeshPeers/MeshProof/MeshPubKey
 		// are left unset — this client has no settings UI for them yet — so
 		// Engine.meshRecoveryConfigured() stays false and NeedsRecovery() can
@@ -448,7 +501,7 @@ func connect() {
 	// this session, not just the initial connect above — see
 	// watchMeshRecovery's doc comment for why this is safe to start
 	// unconditionally.
-	go watchMeshRecovery(ctx, eng, engCfg, lbl)
+	go watchMeshRecovery(ctx, eng, engCfg, sessionLbl)
 
 	setStatus("Bringing up tunnel…")
 	dns := snap.DNS
@@ -478,7 +531,7 @@ func connect() {
 		t.Close() // disconnected while the tunnel was coming up
 		return
 	}
-	setStatus("Protected — " + lbl)
+	setStatus("Protected — " + sessionLbl)
 }
 
 // rebuildRecoveryConfig returns base with only Coordinators and MeshProof
@@ -601,9 +654,27 @@ func abortMeshRecovery(stopped *core.Engine, msg string) {
 // plumbing detail, and EventConnected's moment is already covered a beat
 // later by connect()'s own "Bringing up tunnel…" — but every event still
 // reaches logEvent regardless, for a complete history.
+//
+// relayChainFailedPrefix is core's one genuinely diagnostic signal for a
+// chain that failed to build (docs/design/relay-chaining.md §10.4):
+// chaining is deliberately fail-closed (core/relaychain.go's file doc), so
+// this — never a shorter, silently-downgraded chain — is what a user who
+// asked for 2+ hops sees when the directory is too small, names no usable
+// exit, or the coordinator answered with the TURN fallback instead of a
+// peer relay. Folded into the generic "Error: " case below, it reads exactly
+// like a dial timeout or a rejected handshake — indistinguishable from a
+// transient failure worth simply retrying, when retrying into the same
+// directory retries into the same wall (issue #28). Recognizing the prefix
+// and saying so plainly is the fix; the message text itself is core's,
+// untouched, so this can only ever ADD a distinction, never invent one.
+const relayChainFailedPrefix = "[relay] chain not built: "
+
 func eventStatus(ev core.Event, lbl string, protected bool) (text string, show bool) {
 	switch ev.Kind {
 	case core.EventError:
+		if reason, ok := strings.CutPrefix(ev.Message, relayChainFailedPrefix); ok {
+			return "Not connected — no path met your relay-hops setting: " + reason, true
+		}
 		return "Error: " + ev.Message, true
 	case core.EventInfo:
 		if protected {

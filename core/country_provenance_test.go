@@ -130,9 +130,9 @@ func TestChainExitNamesWhyTheCountryHadNoUsableExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load directory: %v", err)
 	}
-	e := &Engine{relayDir: dir}
+	e := &Engine{}
 
-	_, err = e.chooseChainExit("NL")
+	_, err = e.chooseChainExit(dir, "NL")
 	if err == nil {
 		t.Fatal("chooseChainExit picked a contradicted exit")
 	}

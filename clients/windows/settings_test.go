@@ -11,36 +11,75 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bacchus-vpn/bacchus/core"
 	"github.com/bacchus-vpn/bacchus/core/admission"
 )
 
-func TestGeoOptions(t *testing.T) {
+// TestValidateRelayChainConfig is the client-side-validation proof for issue
+// #28: 2+ hops with no directory (or no key) is a core.New construction
+// error today (core/relaychain.go's setupRelayChaining), which connect()
+// would otherwise only discover at Connect time. validateRelayChainConfig
+// catches exactly the "wants to chain, can't" combination before Save lets
+// it out — mirroring validateAdmissionConfig's shape (issue #130), including
+// trimming both string inputs before persisting them.
+func TestValidateRelayChainConfig(t *testing.T) {
 	cases := []struct {
-		name      string
-		countries []countryItem
-		want      []string
+		name              string
+		hops              int
+		dirPath, dirKey   string
+		wantErr           bool
+		wantPath, wantKey string
 	}{
-		{
-			name:      "nothing offered",
-			countries: nil,
-			want:      []string{geoAny},
-		},
-		{
-			name: "dedups and sorts, skips blank country",
-			countries: []countryItem{
-				{code: "us"},
-				{code: "de"},
-				{code: "us"},
-				{code: ""},
-			},
-			want: []string{geoAny, "de", "us"},
-		},
+		{name: "1 hop needs neither field", hops: 1, dirPath: "", dirKey: "", wantErr: false},
+		{name: "0 hops (unset) needs neither field", hops: 0, dirPath: "", dirKey: "", wantErr: false},
+		{name: "2 hops with both set is valid", hops: 2, dirPath: "dir.bin", dirKey: "abcd", wantErr: false, wantPath: "dir.bin", wantKey: "abcd"},
+		{name: "2 hops with no directory is rejected", hops: 2, dirPath: "", dirKey: "abcd", wantErr: true},
+		{name: "2 hops with no key is rejected", hops: 2, dirPath: "dir.bin", dirKey: "", wantErr: true},
+		{name: "2 hops with neither is rejected", hops: 2, dirPath: "", dirKey: "", wantErr: true},
+		{name: "4 hops (the ceiling) with both set is valid", hops: 4, dirPath: "dir.bin", dirKey: "abcd", wantErr: false, wantPath: "dir.bin", wantKey: "abcd"},
+		{name: "surrounding whitespace is trimmed from both on success", hops: 2, dirPath: "  dir.bin  ", dirKey: "  abcd  ", wantErr: false, wantPath: "dir.bin", wantKey: "abcd"},
+		{name: "whitespace-only directory at 2 hops is rejected exactly like blank", hops: 2, dirPath: "   ", dirKey: "abcd", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := geoOptions(tc.countries)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("geoOptions() = %v, want %v", got, tc.want)
+			gotPath, gotKey, err := validateRelayChainConfig(tc.hops, tc.dirPath, tc.dirKey)
+			if tc.wantErr && err == nil {
+				t.Fatalf("validateRelayChainConfig(%d, %q, %q) = nil, want an error", tc.hops, tc.dirPath, tc.dirKey)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("validateRelayChainConfig(%d, %q, %q) = %v, want nil", tc.hops, tc.dirPath, tc.dirKey, err)
+			}
+			if !tc.wantErr && (gotPath != tc.wantPath || gotKey != tc.wantKey) {
+				t.Fatalf("validateRelayChainConfig(%d, %q, %q) = (%q, %q), want (%q, %q)",
+					tc.hops, tc.dirPath, tc.dirKey, gotPath, gotKey, tc.wantPath, tc.wantKey)
+			}
+		})
+	}
+}
+
+// TestNormalizeRelayHops pins the NumberEdit display normalization: 0 (a
+// fresh Config's zero value, or an older pre-#28 settings file) reads as 1
+// hop, matching core/relaychain.go's chainDepth exactly, and a value already
+// above the ceiling (only reachable by hand-editing the config file) is
+// clamped for display — core.New's own construction-time refusal, not this
+// function, is what actually enforces the ceiling for real.
+func TestNormalizeRelayHops(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int
+		want int
+	}{
+		{name: "zero (unset) normalizes to 1", in: 0, want: 1},
+		{name: "negative normalizes to 1", in: -3, want: 1},
+		{name: "1 is unchanged", in: 1, want: 1},
+		{name: "mid-range is unchanged", in: 3, want: 3},
+		{name: "the ceiling is unchanged", in: core.RelayHopsMax, want: core.RelayHopsMax},
+		{name: "above the ceiling is clamped", in: core.RelayHopsMax + 5, want: core.RelayHopsMax},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeRelayHops(tc.in); got != tc.want {
+				t.Fatalf("normalizeRelayHops(%d) = %d, want %d", tc.in, got, tc.want)
 			}
 		})
 	}

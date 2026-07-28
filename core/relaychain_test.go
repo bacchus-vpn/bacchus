@@ -55,11 +55,11 @@ func startForwardNode(t *testing.T, key noise.DHKey, dir *relayDirectory) string
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	e := &Engine{
-		roles:    map[string]bool{RoleRelay: true},
-		exitKey:  key,
-		relayDir: dir,
-		cfg:      Config{RelayIngress: ln.Addr().String()},
+		roles:   map[string]bool{RoleRelay: true},
+		exitKey: key,
+		cfg:     Config{RelayIngress: ln.Addr().String()},
 	}
+	e.relayDir.Store(dir)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -574,7 +574,8 @@ func TestDefaultDepthNeedsNoDirectory(t *testing.T) {
 // must stay exactly what they are today — there is no relay in a direct path to
 // unlink from, and chaining one would cost latency for nothing.
 func TestDirectModeIsNeverChained(t *testing.T) {
-	e := &Engine{cfg: Config{RelayHops: 3}, relayDir: &relayDirectory{}}
+	e := &Engine{cfg: Config{RelayHops: 3}}
+	e.relayDir.Store(&relayDirectory{})
 	plan, err := e.chainFor(modeDirect, "deadbeef")
 	if err != nil || plan != nil {
 		t.Fatalf("chainFor(direct) = (%v, %v), want (nil, nil) — direct paths are unaffected by hop count", plan, err)
@@ -611,7 +612,8 @@ func TestChainFailsClosedRatherThanDowngrading(t *testing.T) {
 	})
 
 	t.Run("directory too small for the requested depth", func(t *testing.T) {
-		e := &Engine{cfg: Config{RelayHops: 4}, relayDir: dirWith("127.0.0.1:9")}
+		e := &Engine{cfg: Config{RelayHops: 4}}
+		e.relayDir.Store(dirWith("127.0.0.1:9"))
 		// Depth 4 needs 3 peeling hops. Whichever exit is chosen is excluded from the
 		// hop pool, leaving 2.
 		_, err := e.buildChain(4, cc)
@@ -624,7 +626,8 @@ func TestChainFailsClosedRatherThanDowngrading(t *testing.T) {
 	})
 
 	t.Run("no exit in the requested country", func(t *testing.T) {
-		e := &Engine{cfg: Config{RelayHops: 2}, relayDir: dirWith("127.0.0.1:9")}
+		e := &Engine{cfg: Config{RelayHops: 2}}
+		e.relayDir.Store(dirWith("127.0.0.1:9"))
 		// The directory is perfectly usable — it just holds nothing in DE. A chain
 		// that egressed somewhere the user did not choose would be the same class of
 		// silent substitution as a shortened one.
@@ -641,7 +644,8 @@ func TestChainFailsClosedRatherThanDowngrading(t *testing.T) {
 		d := dirWith("")
 		delete(d.exitAddr, exitID)
 		delete(d.exitAddr, "aa")
-		e := &Engine{cfg: Config{RelayHops: 2}, relayDir: d}
+		e := &Engine{cfg: Config{RelayHops: 2}}
+		e.relayDir.Store(d)
 		// With no address for any exit, no last hop could be told where to send the
 		// innermost layer — so there is no chain, and there must be no fallback.
 		if _, err := e.buildChain(2, cc); err == nil {
