@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bacchus-vpn/bacchus/core/capacity"
 	"github.com/bacchus-vpn/bacchus/core/policy"
 	"github.com/bacchus-vpn/bacchus/core/version"
 )
@@ -175,6 +176,56 @@ func policyServingFloor() version.Version {
 		return servingFloor
 	}
 	return f
+}
+
+// policyMeasuredFloor is the serve-eligibility floor on measured throughput
+// (issue #15), read from the held policy.
+//
+// There is deliberately NO constant default. A floor with a fallback constant is a
+// floor the coordinator AUTHORED, which is precisely the property signed policy
+// exists to deny: with no policy loaded the answer is zero — no floor — and the
+// pre-policy status quo applies. That is not a hole, because a coordinator with
+// policy configured and none loaded is already refusing to assign anything at all
+// (policyAllowsAssignment), and one with policy unconfigured never had a floor to
+// begin with.
+func policyMeasuredFloor() capacity.Rate {
+	p, ok := currentPolicy()
+	if !ok {
+		return 0
+	}
+	return capacity.Rate(p.ServeFloor.MinMeasuredBps)
+}
+
+// meetsMeasuredFloor reports whether a node clears the policy's measured-throughput
+// floor, with a safe-to-log reason when it does not.
+//
+// It reads the TRUSTED rating, never Measured. The untrusted estimator clamps to
+// Ceiling by construction, so a node's untrusted rating says nothing about whether
+// it clears a floor above that ceiling — applying the floor to it would fence every
+// measured node in the fleet while admitting every unmeasured one, inverting the
+// incentive to be measured. See capacity.NodeRating.TrustedRating.
+//
+// A node with no trusted rating is therefore NOT fenced. An unmeasured node is not a
+// slow node (design §5.3), and neither is one whose only evidence is ceiling-bounded.
+// With the trusted stream unfed, as it is in this build, that is every node — so this
+// gate is live machinery that currently withholds nobody, and starts biting the
+// moment the account service feeds the trusted stream, with no change here.
+func meetsMeasuredFloor(nodeID string) (reason string, ok bool) {
+	floor := policyMeasuredFloor()
+	if floor == 0 {
+		return "", true
+	}
+	if ratings == nil {
+		return "", true
+	}
+	measured, rated := ratings.TrustedRating(nodeID)
+	if !rated {
+		return "", true
+	}
+	if measured < floor {
+		return fmt.Sprintf("measured throughput %s is below the serve floor %s — this node may still use the service, it just cannot serve", measured, floor), false
+	}
+	return "", true
 }
 
 // policySource fetches the raw bundle bytes. The two implementations are an HTTP

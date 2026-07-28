@@ -92,6 +92,30 @@ func (r *NodeRating) Measured() Rate {
 	return r.untrusted.Estimate()
 }
 
+// TrustedRating returns the TRUSTED estimate and whether that stream is informed.
+// Unlike Measured it never falls back to the untrusted one.
+//
+// The distinction matters to exactly one kind of caller: an ELIGIBILITY gate that
+// compares a node against a real-world capacity floor (issue #15). Measured is the
+// right number for ranking, where "clamped to the ceiling" and "genuinely 5 Mbit"
+// can be treated alike because both mean "assign accordingly". It is the wrong
+// number for a floor, because the untrusted estimator's HardCeiling means an
+// untrusted rating is bounded by Ceiling no matter how fast the node actually is —
+// so a floor above Ceiling applied to Measured would fence every measured node in
+// the fleet while admitting every unmeasured one, which inverts the incentive to be
+// measured at all.
+//
+// A false here therefore means "no rating this gate may judge against a floor", not
+// "slow". A caller must treat it the same way it treats a node with no rating: an
+// unmeasured node is not a slow node (design §5.3), and neither is one whose only
+// evidence is ceiling-bounded.
+func (r *NodeRating) TrustedRating() (Rate, bool) {
+	if !r.trusted.Informed() {
+		return 0, false
+	}
+	return r.trusted.Estimate(), true
+}
+
 // RatingStatus is a diagnostic snapshot of a node's two estimates and the combined
 // measured rate, for coordinator status output.
 type RatingStatus struct {
@@ -185,6 +209,26 @@ func (s *RatingStore) Measured(nodeID string) (Rate, bool) {
 		return 0, false
 	}
 	return e.rating.Measured(), true
+}
+
+// TrustedRating returns nodeID's TRUSTED measured rate and whether a trusted rating
+// exists for it. A node with no rating at all, or one whose only evidence came
+// through the untrusted stream, returns (0, false).
+//
+// This is the accessor a serve-eligibility floor reads (issue #15). See
+// NodeRating.TrustedRating for why a floor must not be applied to Measured: with the
+// trusted stream unfed, as it is in this build, this returns false for every node
+// and the floor consequently gates nobody. That is the intended shape — the gate is
+// real machinery that becomes live when the account service feeds the trusted
+// stream, with no further change at the caller.
+func (s *RatingStore) TrustedRating(nodeID string) (Rate, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e := s.entries[nodeID]
+	if e == nil {
+		return 0, false
+	}
+	return e.rating.TrustedRating()
 }
 
 // Usable returns min(declared, measured) for nodeID (capacity.Usable) — or `declared`

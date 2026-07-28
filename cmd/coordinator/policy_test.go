@@ -252,7 +252,7 @@ func TestServingCheckUsesThePolicyFloor(t *testing.T) {
 	withPolicyState(t, true, &p)
 
 	// A node the flag would have admitted must now be fenced by the policy.
-	reason, ok := servingCheck("0.1.0")
+	reason, ok := servingCheck("0.1.0", "some-node")
 	if ok {
 		t.Fatal("a node below the POLICY floor must be fenced even though the flag fence is disabled")
 	}
@@ -261,7 +261,7 @@ func TestServingCheckUsesThePolicyFloor(t *testing.T) {
 	}
 
 	// And one at the policy floor serves.
-	if _, ok := servingCheck("0.2.0"); !ok {
+	if _, ok := servingCheck("0.2.0", "some-node"); !ok {
 		t.Error("a node at the policy floor must serve")
 	}
 }

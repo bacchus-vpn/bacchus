@@ -1,6 +1,6 @@
 # 43. The coordinator enforces signed network policy it cannot author, and fails closed when it goes stale
 
-- Status: accepted (issue #39)
+- Status: accepted (issue #39); amended (issue #15 — see the amendment at the end)
 - Date: 2026-07-28
 
 ## Context
@@ -174,3 +174,74 @@ handed.
   verifier.
 - `min_measured_bps` and `min_declared_quota_bytes` are loaded and enforced by
   nothing yet. #15 [B3] is where they reach the serve-eligibility gate.
+
+---
+
+## Amendment (issue #15) — the serve-eligibility floor reads the policy, and applies only to trusted ratings
+
+`min_measured_bps` now reaches the gate. Two decisions were needed that the card did
+not settle, both about *which number* the floor is compared against.
+
+### The floor has no constant default
+
+`policyMeasuredFloor()` returns the held policy's `min_measured_bps`, and **zero when
+no policy is held**. There is deliberately no fallback constant: a floor with one is a
+floor the coordinator authored, which is the exact property this ADR exists to deny.
+That is not a hole — a coordinator with policy configured and none held is already
+refusing to assign anything at all, and one with policy unconfigured never had a floor.
+
+This replaces the `serveFloor` package variable ADR-0041 shipped pinned at zero as
+"the machinery with the gate off". That variable and its `meetsServeFloor` remain in
+place at the *assignment* surfaces, still zero; this gate is at **register**, which is
+where a node joins the serve pool, and registers repeat every ~10s so the gate
+re-applies continuously.
+
+### The floor reads the TRUSTED rating, never `Measured`
+
+This is the load-bearing part, and getting it wrong would have stranded the fleet.
+
+The untrusted estimator forces `HardCeiling` at `Ceiling` (5 Mbit), and the trusted
+stream is **permanently unfed in this build** — nothing stamps vouched-ness into a
+credential yet. So `Measured()` falls back to the untrusted estimate for every node,
+and that estimate is bounded by the ceiling no matter how fast the node actually is.
+Measured against `core/capacity`:
+
+```
+REAL 100 Mbit node, 200 windows, 8 distinct ASes attesting (untrusted):
+   Measured()               = 5Mbit    -> fails a 25 Mbit floor
+UNMEASURED node, same declaration:
+   Usable(declared 100Mbit) = 100Mbit  -> passes
+```
+
+A floor applied to `Measured` would therefore fence **every measured node** and admit
+**every unmeasured one** — fleet-stranding, and an inversion of the incentive to be
+measured at all. This is what ADR-0041 meant when it shipped the floor off; the card's
+premise that "B2 is done, so this just turns it on" understated it, because B2 built
+the machinery while the *trusted* stream that makes a rating comparable to a
+real-world floor is still unfed.
+
+So the gate reads `capacity.RatingStore.TrustedRating` (added by this change: purely
+additive, no behaviour change to existing callers) and treats a node with no trusted
+rating exactly as it treats one with no rating at all — **not fenced**. An unmeasured
+node is not a slow node (design §5.3), and neither is one whose only evidence is
+ceiling-bounded.
+
+The consequence is that **today this gate withholds nobody**, and that is intended: it
+is live machinery that starts biting the moment the account service feeds the trusted
+stream, with no further coordinator change. Same shape as the seams ADR-0041 used for
+that stream and ADR-0040 used for `Vouched`. Two tests pin the safety property — one
+at the helper, one at the register surface — so a future change that switches the gate
+back to `Measured` fails rather than strands the fleet.
+
+### `min_declared_quota_bytes` is loaded and NOT enforced
+
+The coordinator has no input for it. The register wire carries `SpeedCap` (bits/s) and
+`QuotaState` — **one bit**, `ok` | `exhausted` — and `core/engine.go` states that
+choice normatively: byte counts would hand a coordinator, untrusted by standing
+assumption, a per-node monthly usage curve about a residential operator's household
+for no matchmaking benefit. The node holds the number and deliberately does not send
+it.
+
+Enforcing this floor therefore needs a new byte-valued field on the register wire,
+which reverses an explicit ADR-0040 privacy decision. That is deferred to its own card
+rather than smuggled in here. The field is parsed and validated; nothing reads it.
