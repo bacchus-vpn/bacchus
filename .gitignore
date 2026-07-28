@@ -51,3 +51,18 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# --- local scratch notes at the repo root (NEVER commit) ---
+# The repo root is where per-checkout notes, task briefs and tooling scratch
+# files get dropped, and several such conventions put them in markdown with a
+# fixed name. Committing one leaks local working context into a public repo, so
+# the root is closed by default and this repo's own documents are allowlisted
+# below. This is deliberately a denylist-by-default: it also catches whatever
+# the next convention happens to be called, which naming individual files
+# cannot. Adding a genuinely new root-level document means adding it here —
+# `git add` fails loudly on an ignored path, so it cannot pass unnoticed.
+/*.md
+!/README.md
+!/CONTRIBUTING.md
+!/CONVENTIONS.md
+!/SECURITY.md
