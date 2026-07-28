@@ -281,7 +281,10 @@ func (e *Engine) serveSOCKSUDPAssociate(relay *net.UDPConn, ctrlDone <-chan stru
 	if err != nil {
 		return
 	}
-	nc, err := clientHandshake(st, exitPub, udpTargetPrefix+target, e.exitVerifyFunc(exitPub))
+	// Chained exactly like the TCP path (issue #142). A UDP association that took a
+	// shorter path than the user's configured chain would be a silent hole in the
+	// property they asked for — and UDP is most of what a browser moves.
+	nc, err := e.dialE2E(st, planOf(sess), exitPub, udpTargetPrefix+target)
 	if err != nil {
 		_ = st.Close()
 		e.emit(EventError, "", "exit rejected: %v", err)

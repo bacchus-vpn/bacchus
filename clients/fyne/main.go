@@ -95,25 +95,9 @@ func main() {
 		// the OS-side registration can drift from what the config says (the
 		// user moved the binary, or deleted the autostart entry by hand),
 		// and this is the one place guaranteed to run before anything else.
-		// See ReconcileLaunchOnBoot's doc for why enabling and disabling
-		// are not symmetric — an out-of-app disable is respected, not
-		// silently overwritten (issue #170).
-		next, err := appstate.ReconcileLaunchOnBoot(cfg)
-		if err != nil {
+		if err := appstate.SetLaunchOnBoot(cfg.LaunchOnBoot); err != nil {
 			bootErr = err
 			log.Println("launch-on-boot:", err)
-		} else if next.LaunchOnBoot != cfg.LaunchOnBoot {
-			cfg = next
-			path := cfgPath
-			if path == "" {
-				path = appstate.DefaultConfigPath()
-			}
-			if err := appstate.SaveConfig(path, cfg); err != nil {
-				bootErr = err
-				log.Println("launch-on-boot: persist reconciled state:", err)
-			} else {
-				cfgPath = path
-			}
 		}
 	}
 

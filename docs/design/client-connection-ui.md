@@ -1,24 +1,7 @@
 # Windows client: connection settings + invite QR (issues #75, #32)
 
-> **Partly superseded — read this first.** The exit-selection half of this note
-> describes a model that no longer exists. Issue #146 removed exact-exit pinning
-> from the wire: a user now picks a **country** and the coordinator picks the exit
-> inside it. `core.Config.ExitID` is accepted-and-ignored, `effectiveExitID` is
-> deleted, and `currentExitLabel`/`refreshSelectedExitLabel` are now
-> `currentCountryLabel`/`refreshSelectedCountryLabel`. Issue #137 then added live
-> country switching on top.
->
-> What remains accurate and worth reading: the widget layout, the two `lxn/walk`
-> runtime failures and their diagnostic trail, the UI-thread model, and the
-> transport-pool table. Treat every mention of an exit id, a pin, or "pool off for
-> this connect" as historical.
->
-> Current behaviour is documented in `clients/windows/README.md`; the wire is
-> ADR-0042.
-
 The decision and rationale live in
-[ADR-0036](../adr/0036-windows-client-connection-strategy-and-invite-qr-ui.md),
-whose exit-pin and node-count claims are superseded for the same reason.
+[ADR-0036](../adr/0036-windows-client-connection-strategy-and-invite-qr-ui.md).
 This note covers implementation detail the ADR shouldn't carry: the widget
 layout, the two `lxn/walk` runtime failures this branch found and fixed (with
 the full diagnostic trail, since both are the kind of thing that's expensive

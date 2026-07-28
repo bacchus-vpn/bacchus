@@ -33,40 +33,14 @@ func autostartDesktopFilePath() (string, error) {
 // quoting rule, since os.Executable's path can contain spaces.
 const desktopEntryTemplate = "[Desktop Entry]\nType=Application\nName=Bacchus\nExec=\"%s\"\nX-GNOME-Autostart-enabled=true\n"
 
-// LaunchOnBootActive reports whether this client's own XDG autostart file
-// currently exists — used by main.go's startup reconcile (issue #170) to
-// tell "never configured" apart from "configured, then removed outside the
-// app" before deciding whether to recreate it. A hand-deleted entry is a
-// real, common way a user turns this off (simpler than finding it in a
-// desktop environment's own startup-apps settings, and the only way on a
-// minimal window manager with no such settings UI at all) — silently
-// recreating it on the next launch would be exactly backwards for a client
-// whose whole point is doing only what it says it does.
-func LaunchOnBootActive() (bool, error) {
-	path, err := autostartDesktopFilePath()
-	if err != nil {
-		return false, err
-	}
-	_, err = os.Stat(path)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 // SetLaunchOnBoot enables or disables starting this binary at login, via the
 // XDG autostart mechanism (a .desktop file dropped in the per-user autostart
 // directory). Idempotent both ways: enabling when already enabled overwrites
 // the file (picks up a path change after the binary moved); disabling when
 // never enabled is a no-op, not an error — matching SetLaunchOnBoot's other
-// platform implementations. main.go's startup reconcile (issue #170) calls
-// this to enable only when LaunchOnBootActive already reports true
-// (refreshing a possibly-stale path) or to disable unconditionally — never
-// to blindly recreate a file the user removed by hand; see
-// LaunchOnBootActive's doc for why that matters.
+// platform implementations, and letting main.go call this unconditionally at
+// startup to reconcile the OS state with whatever Config.LaunchOnBoot says,
+// self-healing if the file was ever removed by hand.
 func SetLaunchOnBoot(enabled bool) error {
 	path, err := autostartDesktopFilePath()
 	if err != nil {

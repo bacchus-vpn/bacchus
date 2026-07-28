@@ -23,8 +23,3 @@ func SetLaunchOnBoot(enabled bool) error {
 	}
 	return ErrLaunchOnBootUnsupported
 }
-
-// LaunchOnBootActive always reports false: SetLaunchOnBoot(true) always
-// fails on this build tag (above), so there is never an entry of this
-// client's making to find.
-func LaunchOnBootActive() (bool, error) { return false, nil }

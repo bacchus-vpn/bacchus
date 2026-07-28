@@ -176,9 +176,7 @@ func fakeSOCKSUDPAssociateNonLoopbackReply(t *testing.T) string {
 		if _, err := io.ReadFull(c, buf[:6]); err != nil { // DST.ADDR+DST.PORT, discarded
 			return
 		}
-		// BND.ADDR = 192.0.2.8:10001 — a non-loopback reply, which is the thing
-		// under test. Written as octets because this is the raw SOCKS5 reply frame.
-		_, _ = c.Write([]byte{5, 0, 0, 1, 192, 0, 2, 8, 0x27, 0x11})
+		_, _ = c.Write([]byte{5, 0, 0, 1, 8, 8, 8, 8, 0x27, 0x11}) // BND.ADDR = 8.8.8.8:10001
 		_, _ = io.Copy(io.Discard, c)
 	}()
 	return ln.Addr().String()

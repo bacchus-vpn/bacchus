@@ -73,7 +73,38 @@ const (
 	refuseNone        assignRefusal = ""
 	refuseNoCountry   assignRefusal = "no-such-country"
 	refuseCountryBusy assignRefusal = "country-busy"
+	refuseNoHop       assignRefusal = "no-such-hop"
 )
+
+// resolveFirstHop answers a connect that names its own first peeling hop (issue
+// #142, ADR-0038; the wire.FirstHop field ADR-0042 §9 reserved).
+//
+// It is deliberately NOT chooseExit with a filter. Nothing about country, ranking,
+// load or exclusion applies: the client is not asking this coordinator to choose,
+// it is asking to be wired to one specific node it already selected out of the
+// signed directory, and the only question left is whether that node is currently a
+// registered exit this coordinator can pair to at all.
+//
+// Capacity is not consulted, and that is a real decision rather than an omission. A
+// chained session is invisible to exit ranking by construction (§9 — it records no
+// exit id, because this coordinator does not know the terminating exit), so there is
+// no meaningful load number to compare it against, and refusing a hop for fullness
+// would leak the ranking state of a node the client is not egressing through. What
+// bounds a hop's load is the hop's own quota enforcement and the directory it is
+// published in, not this decision.
+//
+// The refusal is named (refuseNoHop) rather than bare because it is ACTIONABLE in a
+// way no other failure is: it means the client's cached directory has drifted from
+// this coordinator's registry, and the fix is to refresh it. It reveals only whether
+// a node the client already holds an id for is registered here right now — which the
+// same client learns from any snapshot it fetches.
+func resolveFirstHop(id string) (*exitNode, assignRefusal) {
+	e, ok := exits[id]
+	if !ok || e.exhausted || e.udp == nil {
+		return nil, refuseNoHop
+	}
+	return e, refuseNone
+}
 
 // minShare is the smallest bandwidth share an exit must be able to offer a new
 // session before it is considered full (capacity.Full, issue #147).

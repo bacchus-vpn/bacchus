@@ -56,7 +56,7 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, onSaved func(
 	modeSelect := widget.NewSelect(splitTunnelModes, nil)
 	modeSelect.SetSelected(appstate.NormalizeBypassMode(cfg.BypassMode))
 
-	killSwitchCheck := widget.NewCheck(lang.L("Kill-switch (block traffic if the tunnel drops) — not active yet"), nil)
+	killSwitchCheck := widget.NewCheck(lang.L("Kill-switch (block traffic if the tunnel drops)"), nil)
 	killSwitchCheck.SetChecked(!cfg.DisableKillSwitch)
 
 	dnsEntry := widget.NewEntry()

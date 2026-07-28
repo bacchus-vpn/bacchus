@@ -106,6 +106,19 @@ type wire struct {
 	// does NOT send it: there is no exact-exit pinning for anyone, so a country is
 	// the only thing a connect names.
 	ExitID string `json:"exitId,omitempty"`
+	// FirstHop is the one node a client MAY name on a connect (issue #142, ADR-0038;
+	// the field ADR-0042 §9 reserved for it). It is the head of a relay chain the
+	// client assembled itself out of the signed directory, NOT an exit request: this
+	// coordinator pairs the client with that node and never learns where the path
+	// terminates, because the real exit is named only inside an onion layer it cannot
+	// read. Country is absent alongside it, and the session this coordinator mints
+	// records no exit id at all — see the connect handler.
+	//
+	// It is not exit pinning returning by another door. A pin is a stable declared
+	// preference that gets honoured; the node named here is drawn fresh from a
+	// shuffled candidate set on every connect, and is by construction not the node the
+	// client egresses from.
+	FirstHop string `json:"firstHop,omitempty"`
 	// ExcludeSessions names sessions THIS coordinator minted for this client whose
 	// exits it has just failed against, so a retry is not handed the same broken exit
 	// (issue #146; the rotation-dedupe idea ADR-0035 gave relays). The coordinator
@@ -539,7 +552,20 @@ func handle(m wire, src *net.UDPAddr) {
 		// an implementation detail: client-assembled onion routing (#142, ADR-0038)
 		// adds a first hop the client names itself, and it must be able to do so
 		// without changing what `country` means. See ADR-0042 §9.
-		e, refusal := chooseExit(m.Country, excludedExits(src, m.ExcludeSessions), now)
+		//
+		// The one exception is a client assembling its own relay chain (issue #142,
+		// ADR-0038): it names a FIRST HOP, which is a node but is not an exit request
+		// — see wire.FirstHop and resolveFirstHop. Everything downstream of the pick
+		// is identical; what differs is that `e` is then a hop rather than a
+		// terminating exit, which is why chained holds on to the distinction.
+		chained := m.FirstHop != ""
+		var e *exitNode
+		var refusal assignRefusal
+		if chained {
+			e, refusal = resolveFirstHop(m.FirstHop)
+		} else {
+			e, refusal = chooseExit(m.Country, excludedExits(src, m.ExcludeSessions), now)
+		}
 		if refusal != refuseNone {
 			// Country-granularity admission control (issue #147): "this country is
 			// busy, try another" is a materially different instruction to a client
@@ -550,18 +576,35 @@ func handle(m wire, src *net.UDPAddr) {
 			send(src, wire{Type: "error", Reason: string(refusal), Country: geoip.Canonical(m.Country)})
 			return
 		}
+		// What this coordinator RECORDS as the session's terminating exit, and what it
+		// tells the client. On a chained connect both are empty, and neither is an
+		// oversight (ADR-0042 §9):
+		//
+		//   - Recording e.id would charge a hop with a terminator's load, and the
+		//     session count is the only term in §3's ranking that discriminates at all.
+		//     Empty keeps a chained session invisible to exit ranking rather than
+		//     misattributed; exitSessions already skips empty ids.
+		//   - Replying with it would be this coordinator asserting an exit for a path
+		//     whose exit it does not know. The client named the hop, so it already
+		//     holds the only static key it needs from us, and it ignores this field on
+		//     a chained attempt precisely so a coordinator cannot redirect the
+		//     innermost layer.
+		exitID := e.id
+		if chained {
+			exitID = ""
+		}
 		sid := randID()
 		if m.Mode == "direct" {
 			if e.udp == nil {
 				send(src, wire{Type: "error"})
 				return
 			}
-			sessions[sid] = &session{client: src, peer: e.udp, exitID: e.id, lastSeen: now}
+			sessions[sid] = &session{client: src, peer: e.udp, exitID: exitID, lastSeen: now}
 			send(e.udp, wire{Type: "assign", Session: sid}) // no exitAddr => egress directly
 			// ExitID tells the client WHICH exit it was given (issue #146). It is not
 			// informational: an exit's id is its Noise static public key (ADR-0009),
 			// so without it the client cannot bring up the end-to-end channel at all.
-			send(src, wire{Type: "session", Session: sid, ExitID: e.id, Release: coordRelease})
+			send(src, wire{Type: "session", Session: sid, ExitID: exitID, Release: coordRelease})
 			log.Printf("session %s DIRECT: client %s <-> exit %s(%s)", sid, src, e.id, e.country)
 		} else if r := pickRelay(e.id); r != nil {
 			// Peer relay (issue #17, ADR-0033): a Bacchus relay node blind-splices
@@ -570,23 +613,37 @@ func handle(m wire, src *net.UDPAddr) {
 			// verification is unaffected by the extra hop. relayID records which
 			// relay carries the session so reselectDeadRelays can notice if it later
 			// dies mid-session and nudge the client to re-establish (issue #96).
-			sessions[sid] = &session{client: src, peer: r.addr, relayID: r.id, exitID: e.id, lastSeen: now}
+			sessions[sid] = &session{client: src, peer: r.addr, relayID: r.id, exitID: exitID, lastSeen: now}
 			send(r.addr, wire{Type: "assign", Session: sid, ExitAddr: e.tcpAddr})
 			// The reply carries the relay's opaque dedupe tag (issue #56) so a client
 			// rotating the pool can skip a second member that hands back this same relay
 			// after a failed dial. It is derived from r.id, not r.addr, so it is stable
 			// across coordinators but never a routable address.
-			send(src, wire{Type: "session", Session: sid, ExitID: e.id, Relay: relayPeer, RelayTag: relayTag(r.id), Release: coordRelease})
-			log.Printf("session %s PEER-RELAY: client %s <-> relay %s -> exit %s(%s)", sid, src, r.addr, e.id, e.country)
+			//
+			// A chaining client reads it for a second purpose: it recomputes the tag for
+			// every hop of its own chain and refuses the path on a match, because a relay
+			// that is also a hop holds both ends of the chain (core/relaychain.go
+			// verifyChainDisjoint). pickRelay already excludes the node it paired — the
+			// chain's head — but not the client's later hops, which it cannot see.
+			send(src, wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayPeer, RelayTag: relayTag(r.id), Release: coordRelease})
+			if chained {
+				// Deliberately not the shape of the line below it. There is no exit to
+				// name, and printing e.id under an "exit" heading would record a hop as a
+				// terminator in the operator's log — the same misattribution §9 keeps out
+				// of the session table, arriving by the back door.
+				log.Printf("session %s PEER-RELAY (chained): client %s <-> relay %s -> first hop %s(%s); terminating exit not known to this coordinator", sid, src, r.addr, e.id, e.country)
+			} else {
+				log.Printf("session %s PEER-RELAY: client %s <-> relay %s -> exit %s(%s)", sid, src, r.addr, e.id, e.country)
+			}
 		} else if e.udp != nil {
 			// TURN fallback (issue #17): no peer relay is available, so wire the
 			// client straight to the exit (the direct-assignment shape) and tag the
 			// reply so it knows. Its transport dials the exit directly; ICE uses a
 			// TURN relay candidate only if a direct hole-punch fails — TURN is the
 			// last resort, not the default. E2E again terminates at the exit.
-			sessions[sid] = &session{client: src, peer: e.udp, exitID: e.id, lastSeen: now}
+			sessions[sid] = &session{client: src, peer: e.udp, exitID: exitID, lastSeen: now}
 			send(e.udp, wire{Type: "assign", Session: sid}) // no exitAddr => exit egresses directly
-			send(src, wire{Type: "session", Session: sid, ExitID: e.id, Relay: relayTURN, Release: coordRelease})
+			send(src, wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayTURN, Release: coordRelease})
 			log.Printf("session %s TURN-FALLBACK: client %s <-> exit %s(%s) (no peer relay available)", sid, src, e.id, e.country)
 		} else {
 			// Neither a peer relay nor a directly-reachable exit — nothing to pair.
@@ -897,7 +954,14 @@ func buildSnapshot(advertise string) coldstart.Snapshot {
 		if e.exhausted {
 			continue // declared monthly quota spent (issue #143); see the relay loop below
 		}
-		entries = append(entries, coldstart.Entry{Role: "exit", ID: e.id, Country: e.country, Addr: e.tcpAddr})
+		// Operator is carried for exits as well as relays (issue #142). It was
+		// relay-only, and that quietly disabled operator-diversity hop selection at the
+		// depth most clients run: a chain's head must be exit-role (it is reached by
+		// being named in connect{firstHop}), so an unlabeled head was neither recorded
+		// nor collided against, and at depth 2 the head is the only peeling hop there
+		// is. The operators map is keyed by node id and has never been role-scoped, so
+		// this reads a value that was already there.
+		entries = append(entries, coldstart.Entry{Role: "exit", ID: e.id, Country: e.country, Addr: e.tcpAddr, Operator: operators[e.id]})
 	}
 	for id, r := range relays {
 		if r.exhausted {

@@ -91,7 +91,7 @@ func TestDialSOCKSHandshake(t *testing.T) {
 		got <- string(buf[:n])
 	})
 
-	conn, err := dialSOCKS(addr, "192.0.2.53:53")
+	conn, err := dialSOCKS(addr, "9.9.9.9:53")
 	if err != nil {
 		t.Fatalf("dialSOCKS: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestResolveDNSOverTCP(t *testing.T) {
 		_, _ = c.Write(answer)
 	})
 
-	resp, err := resolveDNSOverTCP(query, addr, "192.0.2.53:53")
+	resp, err := resolveDNSOverTCP(query, addr, "9.9.9.9:53")
 	if err != nil {
 		t.Fatalf("resolveDNSOverTCP: %v", err)
 	}

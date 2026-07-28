@@ -3,7 +3,7 @@
     "Split-tunnel, kill-switch, and DNS below are saved for later use - this client has no device-wide tunnel yet, so they do not change traffic today.": "Настройки раздельного туннелирования, аварийного отключения и DNS ниже сохраняются на будущее — у этого клиента пока нет туннеля на уровне всего устройства, поэтому сейчас они не влияют на трафик.",
     "Split-tunnel bypass list (one per line: IP, CIDR, or domain)": "Список исключений раздельного туннелирования (по одному на строку: IP, CIDR или домен)",
     "Split-tunnel mode": "Режим раздельного туннелирования",
-    "Kill-switch (block traffic if the tunnel drops) — not active yet": "Аварийное отключение (блокировать трафик при обрыве туннеля) — пока не активно",
+    "Kill-switch (block traffic if the tunnel drops)": "Аварийное отключение (блокировать трафик при обрыве туннеля)",
     "DNS upstream (host:port)": "Вышестоящий DNS (хост:порт)",
     "Connect automatically when Bacchus starts": "Подключаться автоматически при запуске Bacchus",
     "Start Bacchus when you log in": "Запускать Bacchus при входе в систему",

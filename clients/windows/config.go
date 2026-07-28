@@ -58,40 +58,21 @@ type Config struct {
 	// surface over core's transport pool / per-user failover (ADR-0028), edited
 	// via the "Connection settings" window (settings.go) and merged into
 	// core.Config by connect(). All optional; the zero value reproduces
-	// pre-#75 behavior exactly (a single transport into a coordinator-picked
-	// country).
+	// pre-#75 behavior exactly (single transport, tray-picked exit only).
 	//
-	//   - Geo is the user's preferred country, persisted across restarts. It is
-	//     the SEED for the tray picker, not a second, competing input: onReady
-	//     copies it into the picker's selection before the first refresh, and
-	//     from then on the picker is the single authority for which country a
-	//     connect names (see currentCountryLabel in main.go). Saving a new Geo
-	//     re-seeds the picker. There is deliberately only one country in play at
-	//     a time — after country-only assignment (issue #146, ADR-0042) both this
-	//     field and the picker feed the same core.Config.Geo, and two independent
-	//     controls writing one field is how a setting ends up silently doing
-	//     nothing.
+	//   - Geo mirrors core.Config.Geo. Meaningful only alongside TransportPool.
+	//   - ExitID mirrors core.Config.ExitID: a manual pin that, when set,
+	//     overrides whatever exit is checked in the tray picker (see
+	//     effectiveExitID). It must be an exit id (the hex key the picker
+	//     itself shows) — core has no raw-IP dial path to extend into from this
+	//     client alone (see docs/design/client-connection-ui.md).
 	//   - TransportPool mirrors core.Config.TransportPool: a preference-ordered
 	//     ladder. Empty turns the pool off. connect() additionally restricts
 	//     whatever is saved here to allowedPoolTransports before it ever
 	//     reaches core.Config — see settings.go's safety note.
 	Geo           string   `json:"geo"`
+	ExitID        string   `json:"exitId"`
 	TransportPool []string `json:"transportPool"`
-
-	// ExitID is a DEAD setting, kept only so that a config file written before
-	// country-only assignment (issue #146, ADR-0042) can still be recognised and
-	// called out. Nothing reads it into core.Config; connect() logs one line
-	// saying the pin is ignored and moves on.
-	//
-	// Deleting the field would be worse than keeping it: encoding/json drops an
-	// unknown "exitId" key without a word, so a user who pinned an exit would go
-	// on believing their traffic leaves through that one node while the
-	// coordinator has in fact been choosing for them. The whole point of the
-	// field now is to make that impossible to miss. Remove it once no config
-	// file in the wild plausibly still carries a pin.
-	//
-	// Deprecated: has no effect. Use Geo to choose a country.
-	ExitID string `json:"exitId"`
 
 	// Exit admission (issue #60/#69/#90, ADR-0026) — optional, end-to-end
 	// verification of each exit's admission credential, independent of the
@@ -114,30 +95,6 @@ type Config struct {
 	//     every time it rotates.
 	AdmissionPubKey  string `json:"admissionPubKey"`
 	AdmissionCRLPath string `json:"admissionCrlPath"`
-
-	// Mesh-walk recovery (issue #31/#111/#115/#122/#129, ADR-0037) — opts
-	// this client into mid-session self-healing when every coordinator
-	// becomes unreachable, mirroring cmd/node's -mesh-peers/-mesh-proof/
-	// -mesh-pubkey flags. All three are required together — core.Engine's
-	// own meshRecoveryConfigured fails closed on a partial set — or all
-	// three left blank (the default), which reproduces pre-#129 behavior:
-	// watchMeshRecovery (main.go) is wired unconditionally but its
-	// NeedsRecovery() channel never closes.
-	//
-	//   - MeshPeers mirrors core.Config.MeshPeers: courier addresses
-	//     (host:port) of relay/exit nodes met in a prior session, running
-	//     -courier-listen.
-	//   - MeshProofPath mirrors cmd/node's -mesh-proof: a file path to a
-	//     cached signed snapshot (cmd/coldstart-bootstrap -cache) presented
-	//     to peers as proof of prior contact. A path, not an inline value,
-	//     for the same reason AdmissionCRLPath is a path above: this is not
-	//     a value worth pasting into a settings text box.
-	//   - MeshPubKey mirrors core.Config.MeshPubKey: the coordinator's
-	//     snapshot-signing public key, hex-encoded, verifying any snapshot
-	//     recovered via mesh-walk.
-	MeshPeers     []string `json:"meshPeers"`
-	MeshProofPath string   `json:"meshProofPath"`
-	MeshPubKey    string   `json:"meshPubKey"`
 }
 
 // defaultDNSUpstream is used when Config.DNS is empty. It's queried from the

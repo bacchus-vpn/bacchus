@@ -89,8 +89,8 @@ func runPS(script string) (string, error) {
 		// full and unredacted: it only ever reaches the live, ephemeral tray
 		// status (setStatus in main.go), never the log file, so it keeps full
 		// diagnostic value for the running session.
-		first := logSafe(script)
-		outFirst := logSafe(string(out))
+		first := redactIPs(firstLine(strings.TrimSpace(script)))
+		outFirst := redactIPs(firstLine(strings.TrimSpace(string(out))))
 		logLine("[tun] ps failed: %s | %s", first, outFirst)
 		return "", fmt.Errorf("powershell: %v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -106,93 +106,13 @@ func firstLine(s string) string {
 	return s
 }
 
-// logSafe reduces one PowerShell command or its output to the form that may
-// be written to bacchus.log: trimmed, first line only, IP literals redacted,
-// and a wrap-truncated trailing address fragment redacted as well. The single
-// entry point for everything runPS logs, so a future call site cannot pick up
-// three of the four steps and miss the one that closes the fragment leak.
-//
-// The second trim is load-bearing, not belt-and-braces: powershell.exe emits
-// CRLF, firstLine cuts at the "\n" and leaves the "\r" attached, and a
-// trailing "\r" is enough to stop redactTrailingIPFragment's end-of-string
-// anchor from ever matching — the fragment would sail straight through with
-// every other step still reporting success.
-func logSafe(s string) string {
-	line := strings.TrimSpace(firstLine(strings.TrimSpace(s)))
-	return redactTrailingIPFragment(redactIPs(line))
-}
-
-// trailingIPFragmentPattern matches a partial IPv4 dotted quad sitting at the
-// very end of a string — two or three octets, with or without a trailing dot.
-//
-// This is the shape a hard wrap leaves behind, and it is genuinely reachable
-// (issue #170): powershell.exe wraps its own error message at a fixed column
-// (~119) even when stdout/stderr is a pipe rather than a console, and it
-// splits a token straddling that boundary rather than moving the whole token
-// down — visible in a real New-NetRoute failure as a cmdlet name broken
-// across the seam. Whichever side of the address the seam falls on, firstLine
-// keeps the leading part, and redactIPs cannot help: an incomplete quad never
-// satisfies the 4-octet shape it looks for, so "203.0.113" would reach the
-// log with 3 of 4 octets intact — the same partial-address leak the
-// IPv4-mapped-IPv6 fix exists to close, arriving by a different route.
-//
-// Two octets is the floor deliberately. A one-octet tail ("…203") carries
-// little and is indistinguishable from any other number a command line ends
-// in, so redacting it would cost real diagnostic value for almost no gain.
-// A wrapped IPv6 literal is likewise not covered here: it truncates inside a
-// hex-and-colon run whose remaining prefix ("2001:db8:1") net.ParseIP
-// rejects, and there is no shape that separates it from ordinary
-// colon-separated command text with the confidence the dotted-quad form
-// gives. Both are residues, stated rather than papered over.
-var trailingIPFragmentPattern = regexp.MustCompile(`(?:[0-9]{1,3}\.){1,3}[0-9]{0,3}$`)
-
-// redactTrailingIPFragment replaces a trailing partial-IPv4 fragment with
-// "<ip>". Applied after redactIPs, never instead of it: a complete literal is
-// already "<ip>" by then, so anything still matching here is by construction
-// an incomplete one. Over-redaction is the intended failure direction — a
-// line ending in a version-shaped "10.0" loses a little diagnostic value,
-// which this file already accepts as the price of matching uniformly.
-func redactTrailingIPFragment(s string) string {
-	loc := trailingIPFragmentPattern.FindStringIndex(s)
-	if loc == nil {
-		return s
-	}
-	return s[:loc[0]] + "<ip>"
-}
-
 // ipCandidatePattern matches substrings shaped like an IPv4 or IPv6 literal —
-// bare, with a "/NN" prefix length, or (for IPv6) with a trailing embedded
-// IPv4 dotted quad, e.g. "::ffff:203.0.113.7" — as candidates for redactIPs.
-// The embedded-IPv4 alternative must stay ordered before the plain-IPv6 one
-// below it (issue #170): Go's regexp package commits to the first
-// alternative that matches at a given position, and the plain-IPv6
-// alternative's hex run stops at the first "." it meets, so without this
-// ordering only a prefix like "::ffff:203" would be recognized and matched
-// first, leaving the remaining ".0.113.7" — 3 of 4 octets — to leak past
-// unredacted right alongside it. Not reachable today (Go's own ip.String()
-// never emits the mapped textual form), but this package takes whatever a
-// future call site hands it, not just what's reachable now.
-//
-// Otherwise intentionally loose: every match still has to parse via
-// net.ParseIP before being redacted, so it can't mangle ordinary command
-// text that merely contains a colon or a run of digits and dots (e.g. a
-// DisplayName or a -RouteMetric value) — and, in the other direction, some
-// digit-and-dot text that looks close enough to match here still isn't a
-// real address by ParseIP's own stricter rules: a leading-zero octet
-// ("192.168.001.010") is rejected as ambiguous octal-vs-decimal notation
-// (Go 1.17+), and a truncated 3-octet fragment ("203.0.113") never satisfies
-// the 4-octet shape at all. Both are covered in TestRedactIPs as intended
-// behavior of *this* pattern.
-//
-// The truncation case is not merely theoretical and it is not fully handled
-// here: PowerShell hard-wraps its error text mid-token, so a cut-off leading
-// fragment can survive firstLine and land in the log unredacted. Closing that
-// is redactTrailingIPFragment's job, applied on top of this one by logSafe —
-// see its doc for what it covers and what it deliberately leaves.
-var ipCandidatePattern = regexp.MustCompile(
-	`(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:/[0-9]{1,3})?` +
-		`|[0-9A-Fa-f]*(?::[0-9A-Fa-f]*)+:(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:/[0-9]{1,3})?` +
-		`|[0-9A-Fa-f]*(?::[0-9A-Fa-f]*)+(?:/[0-9]{1,3})?`)
+// bare, or with a "/NN" prefix length — as candidates for redactIPs. It's
+// intentionally loose: every match still has to parse via net.ParseIP before
+// being redacted, so it can't mangle ordinary command text that merely
+// contains a colon or a run of digits and dots (e.g. a DisplayName or a
+// -RouteMetric value).
+var ipCandidatePattern = regexp.MustCompile(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:/[0-9]{1,3})?|[0-9A-Fa-f]*(?::[0-9A-Fa-f]*)+(?:/[0-9]{1,3})?`)
 
 // redactIPs replaces every IP-literal-shaped substring in s with "<ip>".
 // Applied to anything derived from a PowerShell command or its output before
@@ -201,22 +121,6 @@ var ipCandidatePattern = regexp.MustCompile(
 // gateway/TUN ones — that's what keeps it robust against whatever call site
 // is added next, at the cost of also redacting addresses that were already
 // harmless (e.g. the split-default 0.0.0.0/1 prefix).
-//
-// Boundary: this recognizes IP literals only, never hostnames or FQDNs. That
-// boundary IS reachable, and the call site is eventlog.go. The routing paths
-// through runPS resolve every endpoint to a literal first (resolveExclusions/
-// resolveExclusionsV6), so they cannot hit it — but formatEvent and logLine now
-// route core's event messages through here, and those carry the endpoint string
-// as CONFIGURED. config.example.json documents that as a host, so a name-based
-// deployment logs coordinator and exit FQDNs in the clear.
-//
-// Left as-is deliberately rather than widened here: a rule loose enough to catch
-// hostnames would have to redact arbitrary dotted tokens, which would eat the
-// command text and error prose that make the log worth keeping. Redacting at the
-// source that knows a string is an endpoint is the right fix. Until then the
-// limit is documented where a user meets it — clients/windows/README.md, the
-// "Address redaction" section — because a log believed to be sanitized and not
-// sanitized is worse than one nobody trusts.
 func redactIPs(s string) string {
 	return ipCandidatePattern.ReplaceAllStringFunc(s, func(tok string) string {
 		host := tok
@@ -345,7 +249,7 @@ func isIPv6Literal(ip string) bool {
 }
 
 // hostOf extracts the host from "host:port", "scheme:host:port" (STUN/TURN
-// URL forms like "stun:192.0.2.4:3478"), or a bracketed IPv6 "[::1]:port".
+// URL forms like "stun:1.2.3.4:3478"), or a bracketed IPv6 "[::1]:port".
 // Returns "" if it can't parse one out.
 func hostOf(endpoint string) string {
 	s := endpoint

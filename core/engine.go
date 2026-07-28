@@ -291,7 +291,100 @@ type Config struct {
 	MeshPeers  []string
 	MeshProof  []byte
 	MeshPubKey ed25519.PublicKey
+
+	// Relay chaining (issue #142, ADR-0038). Appended after the mesh-recovery
+	// fields to keep the struct tail a stable seam for parallel callers.
+
+	// RelayHops is how many relay hops a RELAYED path is routed through, so that
+	// no single relay sees both this client and its exit. Client role.
+	//
+	// 0 and 1 both mean today's single hop and are the default: the coordinator
+	// assigns one relay which blind-splices ciphertext (ADR-0033), the onion path
+	// is not engaged at all, and this field costs exactly nothing. 2 and above opt
+	// into a client-assembled onion (core/relaychain.go): the client telescopes
+	// Noise_NK layers through hops IT picks from the signed directory, naming each
+	// hop's successor only inside the previous hop's encrypted stream. Values above
+	// RelayHopsMax are clamped, with a logged notice.
+	//
+	// It applies only once the selection ladder has reached the relay tier —
+	// direct paths are unaffected, since there is no relay to chain. Depth is
+	// engine config rather than a per-candidate field: every relay candidate in a
+	// run uses the same configured depth (ADR-0038 §5).
+	//
+	// The cost is real and falls on the volunteer mesh: n hops carry n times the
+	// bandwidth for one unit of user traffic, and setup pays n+1 sequential
+	// handshakes. That is why the default is the cheapest value. Setting it above 1
+	// REQUIRES RelayDirectory (there is nothing to select hops from otherwise), and
+	// a chain that cannot be built fails the path rather than quietly falling back
+	// to one hop — see core/relaychain.go on why a silent downgrade is the one
+	// outcome this feature must never produce.
+	RelayHops int
+
+	// RelayIngress is the relay role's onion-forward TCP listener (host:port),
+	// the address an upstream hop dials to hand this node an onion layer to peel
+	// (coldstart.Entry.Ingress, issue #124). Empty — the default — means this node
+	// does not serve as an intermediate hop and opens no such port, which is every
+	// node in today's fleet.
+	//
+	// The port is self-reported to the coordinator on register; the coordinator
+	// advertises the ingress as its OWN observed source IP joined to that port, so
+	// a relay cannot claim an ingress in an AS it does not occupy (see
+	// cmd/coordinator's buildSnapshot and Entry.Ingress). Setting it requires
+	// RelayDirectory: a hop with no directory would have no way to tell a mesh node
+	// from an arbitrary internet host, and forwarding to the latter is precisely
+	// what turns a relay into an open proxy — so that combination is a construction
+	// error rather than a listener that rejects everything.
+	//
+	// A middle hop must be publicly reachable (ADR-0038 §4.6): it is reached by a
+	// plain outbound dial from the previous hop, not by hole-punching. A NAT'd
+	// residential node can still be a chain's FIRST hop (reached by the client's
+	// coordinator-brokered rendezvous) or its exit, just not a middle one.
+	RelayIngress string
+
+	// RelayDirectory is a coordinator-signed snapshot (coldstart.Sign's wire form,
+	// as cached by cmd/coldstart-bootstrap -cache) that both roles read for
+	// chaining, verified under MeshPubKey and required to be unexpired:
+	//
+	//   - a CLIENT selects its hops from the relay-eligible entries in it
+	//     (Entry.RelayEligible — a relay that advertises a forwarding ingress),
+	//     spreading them across operators; and
+	//   - a RELAY serving RelayIngress admits a forward only to an ingress named in
+	//     it, which is what keeps a hop from becoming an open internet proxy
+	//     (ADR-0038 principle #4).
+	//
+	// Empty disables chaining on both sides. Unlike MeshProof — a proof of prior
+	// contact that is legitimately stale, and verified without an expiry check —
+	// this must be LIVE: it names nodes that are supposed to be reachable right now,
+	// and hop selection against a long-dead directory just builds chains that fail.
+	// It is loaded and verified once at construction, so a bad or expired snapshot
+	// is a startup error, never a silent degradation to no chaining. Refreshing it
+	// in place is a follow-up (#76 §9); a restart adopts a new one.
+	RelayDirectory []byte
+
+	// RelayDirectoryKey is the coordinator's snapshot-signing key that
+	// RelayDirectory is verified under. Empty falls back to MeshPubKey, which is
+	// the same key serving a different purpose — so a node that already configured
+	// mesh recovery needs no second copy of it.
+	//
+	// It exists as its own field rather than simply reusing MeshPubKey because
+	// chaining and recovery are independent: a client may want hops without
+	// couriers, and setting MeshPubKey alone would look like a half-configured
+	// mesh-recovery setup to the issue #121 diagnostic and warn about a
+	// misconfiguration that is not one.
+	RelayDirectoryKey ed25519.PublicKey
 }
+
+// RelayHopsMax is the hard ceiling on Config.RelayHops (ADR-0038 §6). The client
+// clamps its own knob and cannot be coerced past it, because the client — not the
+// coordinator — builds the onion and a coordinator never sees or writes the inner
+// layers, so it has nowhere to inject an extra hop.
+//
+// Four is well past the point of diminishing anonymity returns for a low-latency
+// system: the property multi-hop buys is "no SINGLE relay sees both endpoints,"
+// which is already bought at two, with three and four buying margin against a
+// partly-colluding path. What grows without limit past that is the volunteer
+// bandwidth multiplier and the n+1 sequential handshakes of setup latency.
+const RelayHopsMax = 4
 
 // Engine is a running (or runnable) Bacchus node. All state hangs off the
 // value; there are no package-level mutable globals. Construct with [New].
@@ -374,7 +467,13 @@ type Engine struct {
 	// with fake sessions and no coordinator or transport I/O (mirrors dialFn).
 	establishFn func(ctx context.Context, prefer string) (connPath, error)
 
-	exitKey noise.DHKey // exit role: static keypair (id == public key)
+	// exitKey is the exit role's static keypair (id == public key), and also an
+	// onion-forwarding relay's (issue #142): a hop is authenticated by the client
+	// running Noise_NK against the key the signed directory publishes as its id, so
+	// a relay that serves an ingress needs a real, STABLE X25519 identity rather
+	// than the opaque random id an ordinary relay carries. See setupRelayChaining
+	// on why an unset ExitKeyHex is refused for that combination.
+	exitKey noise.DHKey
 
 	// connectCountry is the country this client asks to egress in (issue #146) —
 	// Config.Geo, or the first assignable country when that is unset (resolveCountry).
@@ -385,8 +484,18 @@ type Engine struct {
 	//
 	// There is no engine-lifetime exit key beside it. The client no longer selects an
 	// exit, so the static key it authenticates against belongs to the PATH (connPath /
-	// rcExitPub / poolExitPub), not to the engine.
+	// rcExitPub / poolExitPub), not to the engine. A CHAINING client is the same shape:
+	// it picks its terminating exit per connect out of the signed snapshot, and that
+	// key lives in the chainPlan (core/relaychain.go), not here.
 	connectCountry string
+
+	// relayDir is the verified, unexpired signed snapshot relay chaining reads
+	// (issue #142, ADR-0038): a client picks its hops out of it, a forwarding node
+	// admits a splice only to an address in it. nil — the default — means this
+	// engine does not chain and does not forward onion layers. Built once in New,
+	// so a bad or expired directory is a construction error rather than a silent
+	// loss of chaining; immutable thereafter, which is why it needs no lock.
+	relayDir *relayDirectory
 
 	// exitVerifier verifies the admission credential an exit presents in the
 	// Noise_NK handshake (issue #60); nil when the client has no admission anchor
@@ -528,6 +637,23 @@ type wire struct {
 	// key (ADR-0009), so the client cannot bring up the end-to-end channel without it.
 	// A "session" reply that omits it is unusable and is treated as a refusal.
 	ExitID string `json:"exitId,omitempty"`
+	// FirstHop is the one node a client MAY name on a connect, and it is not an exit
+	// request: it is the head of a relay chain the client assembled itself (issue
+	// #142, ADR-0038), the field ADR-0042 §9 reserved for exactly this. The
+	// coordinator pairs the client with that node instead of choosing an exit, and
+	// learns nothing about where the path terminates — the real exit is named only
+	// inside the onion, which it cannot read.
+	//
+	// It does not reopen exit pinning, which §2 closed. A pin is a STABLE declared
+	// preference the coordinator can honour; this names a hop drawn fresh from a
+	// shuffled candidate set on every connect (core/relaychain.go selectHops), and
+	// the node named is by construction NOT the one the traffic egresses from.
+	//
+	// Country is omitted alongside it: it means the terminating exit's country and a
+	// chaining client resolves its own exit, so the coordinator has nothing to do with
+	// it. Set only by a client at RelayHops >= 2; absent otherwise, which keeps an
+	// ordinary connect byte-identical to a pre-#142 one.
+	FirstHop string `json:"firstHop,omitempty"`
 	// ExcludeSessions names sessions this client was minted whose exits it just failed
 	// against, so a retry is not handed the same broken exit (issue #146; ADR-0035's
 	// relay dedupe applied to exits). Sessions rather than exit ids so that excluding
@@ -544,14 +670,15 @@ type wire struct {
 	Version      int                    `json:"version,omitempty"`
 	Capabilities []handshake.Capability `json:"capabilities,omitempty"`
 	Reason       string                 `json:"reason,omitempty"`
-	Cred         string                 `json:"cred,omitempty"`       // admission credential (issue #42)
-	Release      string                 `json:"release,omitempty"`    // product release version, semver (issue #36, ADR-0015): a node stamps it on register so the coordinator can fence stale nodes; the coordinator stamps it on client replies so a client can force-major/skip-minor. Distinct from Version, the wire-shape int (ADR-0016).
-	Relay        string                 `json:"relay,omitempty"`      // relay disposition the coordinator stamps on a relay-mode "session" reply (issue #17, ADR-0033): relayPeer when a Bacchus relay node was assigned to splice client<->exit (the preferred data-plane path), relayTURN when none was available and the client instead reaches the exit directly (its ICE relays through the coordinator's TURN only if it can't hole-punch — the fallback). Empty on direct-mode replies and from coordinators predating #17.
-	RelayTag     string                 `json:"relayTag,omitempty"`   // stable opaque tag for the assigned peer relay (issue #56, ADR-0035): the client remembers a tag whose transport dial failed this Connect and skips a later pool member that assigns the SAME relay, instead of re-dialing a known-bad splice. Set only on the peer-relay path; empty for direct/TURN-fallback and from coordinators predating #56. Never a routable address — it reveals nothing the client can't already infer from the relay's ICE candidates (ADR-0009).
-	SpeedCap     uint64                 `json:"speedCap,omitempty"`   // a forwarder's DECLARED aggregate speed cap in bits/s (issue #143, ADR-0040): what its operator is willing to carry, not what it can. Self-reported on every register, which is safe because the claim is only ever binding downward — the coordinator applies usable = min(declared, measured) and the measured term is NOT a self-report (see core/capacity). Zero/absent = no declared cap; additive/optional, so a node predating #143 omits it and is treated exactly as it is today. Note there is deliberately NO measured-capacity field on this wire in either direction: a node reporting its own capacity would be reporting the one number it profits from inflating.
-	QuotaState   string                 `json:"quotaState,omitempty"` // quotaOK | quotaExhausted (issue #143, ADR-0040): whether this forwarder's declared monthly traffic quota — its operator's own ISP data cap — is spent for the current billing cycle. One BIT, not the byte counts: the coordinator needs only "may I assign to you", and a per-node monthly usage curve would hand a hostile coordinator (ADR-0020, #60) a linkability signal about a residential operator's household for no matchmaking benefit. Empty = no declared quota; additive/optional.
-	Receipt      *accounting.Receipt    `json:"receipt,omitempty"`    // capacity-report payload (issue #158): a co-signed usage receipt (ADR-0021) the CLIENT sends to the coordinator to feed the capacity estimator. Not a node self-report — the node cannot move this number (both parties co-sign the throughput, and SignReport binds the client-asserted Saturated bit), which is exactly why it can ride the wire where a self-reported capacity could not. Absent on every other message.
-	ReportSig    []byte                 `json:"reportSig,omitempty"`  // client signature over the capacity-report receipt + its saturation bit (accounting.SignReport, issue #158): proves the un-co-signed Saturated bit came from the client that co-signed the receipt.
+	Cred         string                 `json:"cred,omitempty"`        // admission credential (issue #42)
+	Release      string                 `json:"release,omitempty"`     // product release version, semver (issue #36, ADR-0015): a node stamps it on register so the coordinator can fence stale nodes; the coordinator stamps it on client replies so a client can force-major/skip-minor. Distinct from Version, the wire-shape int (ADR-0016).
+	Relay        string                 `json:"relay,omitempty"`       // relay disposition the coordinator stamps on a relay-mode "session" reply (issue #17, ADR-0033): relayPeer when a Bacchus relay node was assigned to splice client<->exit (the preferred data-plane path), relayTURN when none was available and the client instead reaches the exit directly (its ICE relays through the coordinator's TURN only if it can't hole-punch — the fallback). Empty on direct-mode replies and from coordinators predating #17.
+	RelayTag     string                 `json:"relayTag,omitempty"`    // stable opaque tag for the assigned peer relay (issue #56, ADR-0035): the client remembers a tag whose transport dial failed this Connect and skips a later pool member that assigns the SAME relay, instead of re-dialing a known-bad splice. Set only on the peer-relay path; empty for direct/TURN-fallback and from coordinators predating #56. Never a routable address — it reveals nothing the client can't already infer from the relay's ICE candidates (ADR-0009).
+	SpeedCap     uint64                 `json:"speedCap,omitempty"`    // a forwarder's DECLARED aggregate speed cap in bits/s (issue #143, ADR-0040): what its operator is willing to carry, not what it can. Self-reported on every register, which is safe because the claim is only ever binding downward — the coordinator applies usable = min(declared, measured) and the measured term is NOT a self-report (see core/capacity). Zero/absent = no declared cap; additive/optional, so a node predating #143 omits it and is treated exactly as it is today. Note there is deliberately NO measured-capacity field on this wire in either direction: a node reporting its own capacity would be reporting the one number it profits from inflating.
+	QuotaState   string                 `json:"quotaState,omitempty"`  // quotaOK | quotaExhausted (issue #143, ADR-0040): whether this forwarder's declared monthly traffic quota — its operator's own ISP data cap — is spent for the current billing cycle. One BIT, not the byte counts: the coordinator needs only "may I assign to you", and a per-node monthly usage curve would hand a hostile coordinator (ADR-0020, #60) a linkability signal about a residential operator's household for no matchmaking benefit. Empty = no declared quota; additive/optional.
+	Receipt      *accounting.Receipt    `json:"receipt,omitempty"`     // capacity-report payload (issue #158): a co-signed usage receipt (ADR-0021) the CLIENT sends to the coordinator to feed the capacity estimator. Not a node self-report — the node cannot move this number (both parties co-sign the throughput, and SignReport binds the client-asserted Saturated bit), which is exactly why it can ride the wire where a self-reported capacity could not. Absent on every other message.
+	ReportSig    []byte                 `json:"reportSig,omitempty"`   // client signature over the capacity-report receipt + its saturation bit (accounting.SignReport, issue #158): proves the un-co-signed Saturated bit came from the client that co-signed the receipt.
+	IngressPort  int                    `json:"ingressPort,omitempty"` // a relay's onion-forward TCP listener port (issue #124/#142, ADR-0038): the port an upstream hop dials to hand this node a layer to peel. Self-reported on register — a coordinator cannot observe a TCP listener from a UDP register — but only the PORT is trusted: the coordinator advertises the ingress as its OWN observed source IP joined to this port (buildSnapshot), so a relay cannot assert an ingress IP and therefore cannot claim to sit in an AS it does not occupy. Contrast SpeedCap, where a self-report is safe because it only binds downward; here the self-report is exactly what an attacker would profit from, so only the unforgeable half is taken. Zero/absent => this relay advertises no ingress and is not relay-eligible.
 }
 
 // Declared quota dispositions (issue #143, ADR-0040) carried in wire.QuotaState on
@@ -625,8 +752,14 @@ func New(cfg Config) (*Engine, error) {
 	// An exit's identity is its X25519 static key: the node id is the public
 	// key, so a client authenticates the exit it selected and a malicious relay
 	// cannot impersonate it. This overrides any supplied ID for the exit role.
+	//
+	// A relay serving as an onion hop (issue #142) needs the same thing for the
+	// same reason: the client runs Noise_NK against the key the SIGNED directory
+	// publishes as that hop's id, so a hop a hostile coordinator substituted cannot
+	// complete the handshake. A relay that is NOT an onion hop keeps its opaque
+	// random id, so no relay in today's fleet changes identity.
 	var exitKey noise.DHKey
-	if roles[RoleExit] {
+	if roles[RoleExit] || (roles[RoleRelay] && cfg.RelayIngress != "") {
 		k, err := exitStaticKey(cfg.ExitKeyHex)
 		if err != nil {
 			return nil, err
@@ -652,6 +785,16 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 
+	// Relay chaining (issue #142, ADR-0038). Built before the engine for the same
+	// reason as the admission anchor above: a node told to chain, or to forward
+	// onion layers, against a directory it cannot verify must fail here rather than
+	// discover it mid-connect and quietly stop providing the property its operator
+	// asked for.
+	relayDir, err := setupRelayChaining(cfg, roles, time.Now())
+	if err != nil {
+		return nil, err
+	}
+
 	eng, err := newEngine(cfg, roles, exitKey)
 	if err != nil {
 		return nil, err
@@ -659,6 +802,7 @@ func New(cfg Config) (*Engine, error) {
 	eng.acctKey, eng.acctStore, eng.acctClientStore = acctKey, acctStore, acctClientStore
 	eng.exitVerifier = exitVerifier
 	eng.clientCRL = clientCRL
+	eng.relayDir = relayDir
 	return eng, nil
 }
 
@@ -855,6 +999,37 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.emit(EventInfo, "", "relay %s online", e.cfg.ID)
 	}
 
+	// A relay that opted into carrying onion layers (issue #142, ADR-0038) binds
+	// its forwarding ingress — the address an upstream hop dials to hand it a layer
+	// to peel. It runs the SAME accept loop as the exit's ingress, because a hop and
+	// an exit differ only in the target the client encrypts to them: exitTerminate
+	// splices a "hop:" target onward and egresses a bare one, and refuses to egress
+	// at all without the exit role. Bound here so a bind failure surfaces at Start,
+	// as the exit's does, rather than in a background goroutine.
+	ingressPort := 0
+	if e.forwardOn() {
+		ln, err := net.Listen("tcp", e.cfg.RelayIngress)
+		if err != nil {
+			e.closeLinks()
+			return fmt.Errorf("core: relay ingress listen: %w", err)
+		}
+		e.addListener(ln)
+		ingressPort = addrPort(ln.Addr())
+		e.wg.Add(1)
+		go e.serveExit(ln)
+		e.emit(EventInfo, "", "relay onion ingress on %s (forwarding to %d known mesh addresses)",
+			ln.Addr(), len(e.relayDir.dialable))
+	}
+	// The client's chain depth, reported once so an operator can see what actually
+	// took effect. There is no clamp notice to print: a depth above RelayHopsMax is
+	// refused outright by setupRelayChaining rather than quietly reduced, so what an
+	// operator configured is what runs or the node did not start.
+	if e.clientOn && e.chaining() {
+		depth := chainDepth(e.cfg.RelayHops)
+		e.emit(EventInfo, "", "relay chaining: %d hops on relayed paths — %d peeling hop(s) chosen per connect from %d directory candidates; DIRECT paths are not offered while chaining",
+			depth, depth-1, len(e.relayDir.hops))
+	}
+
 	// A forwarder stamps its product release on every register (issue #36,
 	// ADR-0015) so a coordinator enforcing a minimum serving version can fence it
 	// when it falls behind. Computed once here — the loop re-sends the same regs.
@@ -870,7 +1045,11 @@ func (e *Engine) Start(ctx context.Context) error {
 		regs = append(regs, wire{Type: "register", Role: "exit", ID: e.cfg.ID, Country: e.cfg.Country, Addr: e.cfg.Advertise, Cred: e.cfg.AdmissionCred, Release: release, SpeedCap: speedCap})
 	}
 	if e.roles[RoleRelay] {
-		regs = append(regs, wire{Type: "register", Role: "relay", ID: e.cfg.ID, Country: e.cfg.Country, Cred: e.cfg.AdmissionCred, Release: release, SpeedCap: speedCap})
+		// IngressPort is this relay's onion-forward listener port (issue #142). The
+		// coordinator joins it to the source ip it OBSERVES on this register to form
+		// the ingress it advertises, so only the port is ours to state. Zero when this
+		// relay serves no ingress, which leaves it simply not relay-eligible as a hop.
+		regs = append(regs, wire{Type: "register", Role: "relay", ID: e.cfg.ID, Country: e.cfg.Country, Cred: e.cfg.AdmissionCred, Release: release, SpeedCap: speedCap, IngressPort: ingressPort})
 	}
 
 	// One read loop per pool member: a forwarder can be assigned a session by

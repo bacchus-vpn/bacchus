@@ -166,3 +166,25 @@ func TestConnectRelayPicksDistinctRelayNotExit(t *testing.T) {
 	// The exit node must not have been used as its own relay.
 	expectSilence(t, dual)
 }
+
+// TestRelayTagWireContract pins this binary's relayTag to the same known-answer
+// vectors core's relayTagFor is pinned to (core/relaychain_acceptance_test.go).
+//
+// The two derivations are duplicated rather than shared, as the wire literals are —
+// this binary deliberately imports nothing from core. A chaining client recomputes
+// the tag for every hop of its own chain and refuses the path on a match
+// (verifyChainDisjoint, issue #142), so a drift between the copies would not fail
+// anything: it would silently stop the check from ever matching, leaving a client
+// that believes a guard is running when it is not.
+func TestRelayTagWireContract(t *testing.T) {
+	cases := []struct{ id, want string }{
+		{"", "bbd6b36f34c5b540"},
+		{"abc", "5bef601c5a2e76aa"},
+		{"bacchus", "2500892b4984d747"},
+	}
+	for _, tc := range cases {
+		if got := relayTag(tc.id); got != tc.want {
+			t.Errorf("relayTag(%q) = %s, want %s — core/relaychain.go relayTagFor must agree or the chain-disjointness check silently stops matching", tc.id, got, tc.want)
+		}
+	}
+}

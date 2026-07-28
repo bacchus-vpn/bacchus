@@ -18,6 +18,7 @@ func TestSaveConfigRoundTrips(t *testing.T) {
 		Coordinators:     []string{"203.0.113.10:51820"}, // TEST-NET-3 (RFC 5737): never a real Bacchus endpoint
 		STUN:             "stun:203.0.113.10:3478",
 		Geo:              "de",
+		ExitID:           "deadbeef",
 		TransportPool:    []string{"webrtc", "reality"},
 		AdmissionPubKey:  "ababababababababababababababababababababababababababababababab", // placeholder hex-shaped string; round-trip doesn't validate key material
 		AdmissionCRLPath: `C:\Bacchus\revocations.crl`,

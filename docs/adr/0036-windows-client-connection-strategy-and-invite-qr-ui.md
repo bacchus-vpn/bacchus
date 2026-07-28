@@ -184,29 +184,3 @@ this branch's PR includes a manual smoke-testing step, not just unit tests
     for anything past what a QR code can represent rather than this window
     pre-validating a size budget. Not observed in practice (CRLs are meant to
     be short — see `core/admission.CRL`), flagged rather than solved.
-
-## Amendment (issues #146, #137) — two Decision bullets are superseded
-
-Two claims above were true when this ADR was accepted and are now false. They are
-left in place rather than edited, because the reasoning is still the record of why
-the UI was built this way; this note is what a reader should trust instead.
-
-**"A manual exit-ID pin turns the pool off for that connect."** Superseded by
-issue #146: there is no exit pin. A client cannot name an exit at all — it names a
-country and the coordinator picks the exit inside it. `core.Config.ExitID` is
-accepted-and-ignored and emits an error event when set, `poolExits` no longer
-exists (it is `poolCountries`, and its `Config.ExitID` fallback was removed), and
-this client never sets the field. The reasoning in the bullet was sound for the
-model it described; the model is gone. See ADR-0042.
-
-**"Node count is likewise a disabled placeholder: no hop-count concept exists
-anywhere in core yet."** The second half is superseded: core has multi-hop relay
-chaining (issue #142, ADR-0038, `-relay-hops`). The first half still holds — the
-GUI control remains unwired, and the Windows client has no way to configure a hop
-count, so nothing a user does here reaches that machinery. What changed is the
-reason: it is unwired because it has not been built in the GUI, not because the
-transport lacks the concept.
-
-The exit-picker workflow described throughout the Decision section is likewise
-historical. Live **country** switching (issue #137) replaced it; current behaviour
-is in `clients/windows/README.md`.

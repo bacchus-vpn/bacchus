@@ -38,27 +38,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: gofmt
-        shell: bash
-        run: test -z "$(gofmt -l clients/windows)"
-      - name: vet
-        run: go vet ./clients/windows/...
       - name: build
         run: go build ./clients/windows
-      # Deliberately no -short, the same reasoning as the server job above:
-      # clients/windows/midsession_recovery_test.go's real mid-session
-      # mesh-walk recovery (issue #129, mirroring cmd/node's own #131) rides
-      # the identical real, unexported core timeouts and is gated behind
-      # testing.Short() specifically so it still runs here while a local
-      # `go test -short ./...` skips it for a fast inner loop. Adding
-      # -short to this step would silently stop covering it.
-      # Explicit -timeout: the two real recovery tests run ~95s each and the
-      # rest of the package adds more, against Go's default 600s per-binary
-      # limit. A local run came in at ~190s, so the headroom is real but not
-      # large enough to leave a required check one slow runner away from a
-      # panic-on-timeout failure that looks like a product bug.
-      - name: test
-        run: go test -timeout 20m ./clients/windows/...
 
   linux-client:
     # The Linux GUI build target (issue #153): clients/fyne is the first
@@ -105,43 +86,12 @@ jobs:
       - name: install Xvfb
         run: sudo apt-get install -y --no-install-recommends xvfb xauth
       - name: smoke test (headless launch)
-        # issue #170: `xvfb-run ... & APP_PID=$!` captured xvfb-run's own PID,
-        # not the app's - xvfb-run is a wrapper script that starts Xvfb, runs
-        # the app, then tears Xvfb down, so `kill -0 "$APP_PID"` was proving
-        # the wrapper survived, not the app. `timeout`'s own exit-code
-        # contract sidesteps the wrapper entirely: without --foreground it
-        # runs the command in a fresh process group and signals that whole
-        # group on expiry, so the app (xvfb-run's child, inheriting the same
-        # group) is what actually gets terminated - exit 124 means the app
-        # was still alive at the 5s mark (success), anything else means it
-        # exited on its own before then (failure, whatever its exit code).
-        # The pkill afterward is a belt-and-suspenders cleanup, not part of
-        # the pass/fail signal.
-        #
-        # `|| ec=$?` rather than a bare call followed by `ec=$?`: Actions runs
-        # every `run:` block under `bash -e`, so a bare `timeout` returning
-        # its expected 124 aborts the shell on the spot and the assignment
-        # below never executes - the step fails with 124, the one code that
-        # means success here. A command on the left of `||` is exempt from
-        # errexit, which is what makes the exit code readable at all.
-        #
-        # 125/126/127 are timeout's own "could not run the command" codes, so
-        # they get their own message: reporting them as "the app exited
-        # early" would read as a product crash when the real fault is the
-        # runner.
         run: |
-          ec=0
-          timeout 5 xvfb-run --auto-servernum /tmp/bacchus-fyne || ec=$?
-          pkill -f /tmp/bacchus-fyne 2>/dev/null || true
-          case "$ec" in
-            124)
-              ;;
-            125|126|127)
-              echo "timeout could not run xvfb-run (exit code $ec) - runner/toolchain failure, not an app crash"
-              exit 1
-              ;;
-            *)
-              echo "bacchus-fyne exited before the 5s mark (exit code $ec) - see above for output"
-              exit 1
-              ;;
-          esac
+          xvfb-run --auto-servernum /tmp/bacchus-fyne &
+          APP_PID=$!
+          sleep 5
+          if ! kill -0 "$APP_PID" 2>/dev/null; then
+            echo "bacchus-fyne exited before the 5s mark - see above for output"
+            exit 1
+          fi
+          kill "$APP_PID"

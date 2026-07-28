@@ -19,6 +19,8 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -35,7 +37,7 @@ func main() {
 	role := flag.String("role", "client", "comma list: client,relay,exit")
 	socksAddr := flag.String("socks", "127.0.0.1:1080", "client SOCKS5 listen")
 	listenAddr := flag.String("listen", ":20000", "exit TCP listen (relay path)")
-	advertise := flag.String("advertise", "", "exit: host:port relays dial, e.g. 1.2.3.4:20000")
+	advertise := flag.String("advertise", "", "exit: host:port relays dial, e.g. 203.0.113.4:20000")
 	country := flag.String("country", "", "exit/relay country tag")
 	id := flag.String("id", "", "node id (auto if empty)")
 	doList := flag.Bool("list", false, "client: list the countries the coordinator will assign exits in, and quit (issue #146). Pass one to -geo")
@@ -44,7 +46,7 @@ func main() {
 	turnUser := flag.String("turn-user", "", "TURN username")
 	turnPass := flag.String("turn-pass", "", "TURN password")
 	forceRelay := flag.Bool("force-relay", false, "force traffic through TURN")
-	exitKey := flag.String("exit-key", "", "exit: X25519 static private key (64 hex); the node id becomes its public key. Generated if empty")
+	exitKey := flag.String("exit-key", "", "exit, and any relay serving -relay-ingress: X25519 static private key (64 hex); the node id becomes its public key. Generated if empty, which is fine ONLY for a node that is neither — both publish that id in a signed directory clients cache and authenticate against, so a fresh key per restart makes the node unreachable until a new directory propagates. Required with -relay-ingress")
 	dtlsFP := flag.String("dtls-fp", "auto", "DTLS ClientHello fingerprint: auto|chrome|firefox|off")
 	iceMDNS := flag.Bool("ice-mdns", false, "emit .local mDNS ICE host candidates instead of raw private IPs (see ADR-0022)")
 	transport := flag.String("transport", "webrtc", "session transport: webrtc|reality (issue #16)")
@@ -70,6 +72,9 @@ func main() {
 	meshPeers := flag.String("mesh-peers", "", "client: comma-separated peer courier addresses to walk when every coordinator is unreachable (issue #31). A relay/exit from a prior session, running -courier-listen. Empty disables mesh-walk recovery (fail cold, as before).")
 	meshProof := flag.String("mesh-proof", "", "client: path to a cached signed snapshot (e.g. cmd/coldstart-bootstrap -cache) presented to peers as proof of prior contact. Required with -mesh-peers.")
 	meshPubkey := flag.String("mesh-pubkey", "", "client: coordinator snapshot-signing public key (hex, from cmd/coordinator -print-bootstrap-pubkey), used to verify snapshots recovered via mesh-walk. Required with -mesh-peers.")
+	relayHops := flag.Int("relay-hops", 1, "client: how many nodes a RELAYED path is routed through, so no single relay links you to your exit (issue #142, ADR-0038). 1 is the default and is today's behaviour exactly — one relay, which sees both ends. 2+ builds a chain you assemble yourself from the signed directory: you pick your own exit and tell the coordinator only the first hop, so it never learns where you egress unless it colludes with a node in your path (see docs/design/relay-chaining.md on that limit). Max 4 — a higher number is refused, never quietly shortened. Costs a hop of latency and n times the volunteer bandwidth, needs -relay-directory, and DISABLES direct paths, since a direct path carries no chain")
+	relayIngress := flag.String("relay-ingress", "", "relay: TCP address to accept onion layers on, so this node can serve as an intermediate hop in someone else's chain (issue #142). It peels one layer and splices to the next node — it never egresses to the internet, and only forwards to nodes named in -relay-directory. Must be publicly reachable (a middle hop is reached by an outbound dial, not a hole-punch). Requires -relay-directory and -exit-key: a hop's node id IS its X25519 public key, and clients authenticate hops against the id in the signed directory, so an identity regenerated on each restart makes this node unreachable as a hop until a fresh directory propagates. Empty opens no such port")
+	relayDirectory := flag.String("relay-directory", "", "path to a coordinator-signed snapshot (e.g. cmd/coldstart-bootstrap -cache) used for relay chaining: a client picks its hops out of it, a -relay-ingress hop admits a forward only to an address in it. Verified against -mesh-pubkey and must be unexpired. Required by -relay-hops 2+ and by -relay-ingress")
 	flag.Parse()
 
 	var roles []string
@@ -88,6 +93,26 @@ func main() {
 			log.Fatalf("read admission credential %s: %v", *admissionCred, err)
 		}
 		admissionCredStr = strings.TrimSpace(string(b))
+	}
+	// The relay-chaining directory (issue #142), read here for the same reason. Its
+	// signature, freshness, and usefulness as a hop set are checked inside core.New,
+	// so a snapshot that is unsigned, expired, or names no usable hop is a startup
+	// failure rather than a node that quietly never chains.
+	var relayDir []byte
+	var relayDirKey ed25519.PublicKey
+	if *relayDirectory != "" {
+		b, err := os.ReadFile(*relayDirectory)
+		if err != nil {
+			log.Fatalf("read relay directory %s: %v", *relayDirectory, err)
+		}
+		relayDir = b
+		// The same coordinator snapshot-signing key mesh recovery uses, taken from the
+		// flag directly so chaining works without also configuring couriers.
+		pub, err := hex.DecodeString(strings.TrimSpace(*meshPubkey))
+		if err != nil || len(pub) != ed25519.PublicKeySize {
+			log.Fatalf("-relay-directory requires -mesh-pubkey (the coordinator snapshot-signing key, %d bytes of hex) to verify it", ed25519.PublicKeySize)
+		}
+		relayDirKey = ed25519.PublicKey(pub)
 	}
 	// The revocation bundle (issue #69) is read, verified, and — on an
 	// interval — reloaded by the engine itself (issue #90), so a bad path
@@ -128,6 +153,10 @@ func main() {
 		AdmissionRequireCRL: *requireCRL,
 		Limits:              limits,
 		QuotaStatePath:      *quotaState,
+		RelayHops:           *relayHops,
+		RelayIngress:        *relayIngress,
+		RelayDirectory:      relayDir,
+		RelayDirectoryKey:   relayDirKey,
 	}
 	if limits.SpeedCap != 0 || limits.MonthlyQuota != 0 {
 		// Echo the declared limits back at startup. An operator who mistyped "20Mb"
