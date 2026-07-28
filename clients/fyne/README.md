@@ -7,7 +7,7 @@ surface a security tool can have).
 
 > Skeleton — this is the app shell, the connection-state indicator, and a settings
 > window, not the full client. See ADR-0039's Scope section (and its 2026-07-22
-> amendment) for what's deliberately not here yet: a country/exit picker, and any
+> amendment) for what's deliberately not here yet: a country picker, and any
 > OS-level enforcement of split-tunnel/kill-switch/DNS or this client's own
 > kill-switch. `clients/windows` remains the full-featured client until those land
 > here.
@@ -18,19 +18,32 @@ A single window: a full-width color band showing one of four states —
 English, following the OS locale; see i18n below), plus one button that's always
 "the one thing you can do right now" (Connect, wait, or Disconnect).
 
-**Connect** resolves exits from the coordinator and auto-selects the first one
-advertised — there is no picker yet (issue #150 needs country-only assignment,
-issue #146, which doesn't exist). Everything below that (dialing the coordinator,
-the transport handshake, tearing a session down) is exactly `core.Engine`'s ordinary
-client-role lifecycle (`core.New` → `Start` → `ListExits` → `Connect` → `Stop`),
-driven by `internal/appstate.Controller` and rendered by `main.go`/`ui.go` — see
-`internal/appstate`'s package doc for the exact threading contract between the two.
+**Connect** names nothing: not an exit, and not a country. Naming an exit is not a
+thing any client can do — country-only assignment (issue #146, ADR-0042) removed it
+from the wire, so a client asks for a *place* and the coordinator picks the exit
+inside it. The country, by contrast, is a choice this client *could* make and
+doesn't: it leaves `core.Config.Geo` unset, which makes `core` resolve the country
+list itself and take the first country the coordinator reports as **assignable** —
+not merely the first one listed, since a country whose exits are all busy or
+withheld is skipped, and "every country is busy" is a named error rather than a
+silent pick. `core` announces the choice on the detail line (`no country
+configured — using NL`). There is no picker yet; that is `bacchus-vpn/bacchus#16`
+`[E3]` in the current tracker.
+
+Everything below that (dialing the coordinator, the transport handshake, tearing a
+session down) is exactly `core.Engine`'s ordinary client-role lifecycle — `core.New`
+→ `Start` → `Connect` → `Stop`, with no list call of its own, because `Connect`
+resolves the country internally. (`core.Engine` does expose `ListCountries`, and a
+client with a picker would call it to populate one; this client has no reason to.)
+The lifecycle is driven by `internal/appstate.Controller` and rendered by
+`main.go`/`ui.go` — see `internal/appstate`'s package doc for the exact threading
+contract between the two.
 
 ### Connection states (issue #149)
 | State | Meaning | Driven by |
 |---|---|---|
 | Disconnected | No tunnel. Not protected. | Initial state; after Disconnect or a failed connect attempt |
-| Connecting… | Resolving an exit and negotiating a session. | Set the moment Connect is pressed |
+| Connecting… | Resolving a country and negotiating a session. | Set the moment Connect is pressed |
 | Proxy ready | A session is up and the SOCKS5 proxy is listening on `127.0.0.1:1080`. **Not** device-wide protection — see below. | `core.Engine.Connect` returned successfully |
 | Blocked | The proxy was ready and the live path just died. | A transport-level ICE disconnect/failed/closed while the session was up — the same signal `clients/windows`'s tray status line already uses for this state (see ADR-0039) |
 
@@ -156,7 +169,7 @@ package list above, builds, `go vet`/`go test`, then launches the binary under
 run, matching `clients/windows`'s own CI job.
 
 ## Known limits (skeleton)
-- No country/exit picker (#150).
+- No country picker (#150; `bacchus-vpn/bacchus#16` `[E3]` in the current tracker).
 - **Carries no device traffic on its own.** No TUN, no route flip, no system proxy —
   only apps you point at SOCKS5 `127.0.0.1:1080` go through the tunnel. See "What
   'Proxy ready' means" above; this is the biggest gap between this client and
@@ -166,7 +179,9 @@ run, matching `clients/windows`'s own CI job.
 - No kill-switch enforcement in this client yet — see the Connection states table
   above. Nothing here prevents a leak; `Blocked` reports that the path died, and does
   not claim anything about what is or is not leaving the machine.
-- Connect always picks the first exit the coordinator advertises.
+- Connect always takes the first country the coordinator reports as assignable, and
+  the coordinator picks the exit inside it. Nothing here chooses a jurisdiction, so
+  a user who needs a specific one cannot express that yet — see "What it does" above.
 - Exit admission (ADR-0026/#60) and CRL revocation (#69) are **off unless configured**
   — set `admissionPubKey` (and optionally `admissionCrlPath`) in the config file. Left
   unset, core fails open and the client accepts any exit it can complete a handshake
