@@ -264,3 +264,45 @@ bring this client up to the node's CRL posture (`docs/design/node-admission.md`)
   `runNode`'s already-reviewed shape and, since the trigger cannot fire yet
   on this client, has no live path to exercise via an automated test beyond
   that. See the PR for the full reasoning.
+
+## Amendment (issue #5, 2026-07-28): "answered but unroutable" is no longer a mesh-walk trigger
+
+The trigger for warm recovery is that **every coordinator is silent**: rendezvous itself
+is unreachable, so a live coordinator has to be rediscovered through a peer. That is the
+right condition, and one case was reaching it that is not it.
+
+A coordinator that is up and answering in a shape this build cannot route produces the
+same non-event as silence at every leg that waits for a reply — nothing usable arrives,
+the deadline expires, the member reads as blocked. `readLoop` already noticed and said so
+(`noteUnroutable`, added when a protocol change shipped that no client could speak), but
+it was a **log line only**: the control flow was unchanged, so `ListCountries` still
+returned `ErrNoCoordinatorReachable`, `silentStreak` still climbed, and after
+`meshRecoveryAfter` passes the supervisor rebuilt the engine against a rediscovered
+coordinator — while the configured one was healthy throughout.
+
+Walking the mesh cannot help there, and that is the point rather than an inefficiency.
+Mesh-walk rediscovers coordinator **addresses**. An unroutable reply means the address is
+fine and the **protocol** is not, so the fresh directory names coordinators that answer
+identically — the engine is torn down and rebuilt to arrive back where it started. A
+version problem and a reachability problem want different recovery, and they were
+indistinguishable at the point that decides.
+
+`coordLink` now counts every reply it could not route (separately from the memo that
+bounds *logging* — a member whose second unroutable reply went unlogged has still
+answered), and both client legs sample it around their wait. The result is
+`ErrCoordinatorUnroutable`, which is deliberately **not** wrapped around the all-silent
+sentinel, so nothing keys mesh-walk off it.
+
+Both legs, not only the one #5 traced. The country list is where the chain to harm runs —
+after #146 every connect with no configured country takes it — but the connect leg has the
+identical hole, and a client with `Geo` set skips the list entirely. Fixing one would have
+left the configured client with exactly the original bug.
+
+The version fence could not have caught this either, which is why the diagnosis has to
+come from the drop site: `observeNetworkVersion` runs only for `session`/`countries`/
+`error`, so a reply this build cannot route never reaches the force-major check.
+
+**What does not change:** genuine silence still returns `ErrNoCoordinatorReachable` and
+still triggers recovery, and a run of all-silent passes still escalates exactly as this
+record describes. The existing all-silent tests are what pin that, and a mutation that
+reports every failure as unroutable kills them.
