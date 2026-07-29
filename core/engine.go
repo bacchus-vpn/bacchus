@@ -257,6 +257,45 @@ type Config struct {
 	// see buildExitVerifier. Only the client role reads it.
 	AdmissionRequireCRL bool
 
+	// RelayAdmissionPubKey is a SECOND, independent admission anchor (issue
+	// #26): the ed25519 public key (64 hex chars) a chaining client verifies
+	// each RELAY hop's admission credential against, extending the #60/#69
+	// end-to-end check from the exit to every intermediate hop. The wire seam
+	// already exists — every Noise responder presents its own admission
+	// credential in msg2 regardless of role (core/forwarder.go's
+	// exitTerminate presents Config.AdmissionCred the same way for a relay as
+	// for an exit) — a hop simply was not asked to prove it, until now.
+	//
+	// Empty — the default — means per-hop verification does not run
+	// (fail-open), and that is deliberately independent of AdmissionPubKey:
+	// the two anchors gate two different checks, so an operator who has only
+	// ever configured the exit anchor sees no change in hop-handling
+	// behavior the moment a build gains this field. A second, explicit
+	// anchor is what turns hop verification on, never a side effect of the
+	// first one being set.
+	//
+	// There is no separate RelayAdmissionCRL: a revoked hop is checked
+	// against the SAME revocation oracle AdmissionCRL/AdmissionCRLPath
+	// build for the exit anchor. ADR-0047 already settled this for the
+	// coordinator's multi-authority case — one revocation list covers every
+	// authority, because a serial names a credential, not an issuer — and
+	// that reasoning carries over unchanged. A hop whose credential is
+	// revoked, expired, wrong-role, wrong-subject, or simply absent fails
+	// the WHOLE chain rather than being quietly de-selected; see
+	// core/relaychain.go's dialChain doc for why.
+	//
+	// Unlike AdmissionPubKey, this is not threaded through New()'s eager
+	// construction path onto a pre-built Engine field. core/relaychain.go
+	// reads it directly off Config and builds the (small, cheap) per-hop
+	// verifier itself once per chain dial, sharing the exit anchor's CRL
+	// oracle rather than constructing its own. A malformed value is still a
+	// hard failure — a client told to verify against an unusable key must
+	// not silently fall through to trusting every hop — but it surfaces
+	// from the first chain dial that needs it rather than from New(). Only
+	// the client role reads it, and only once RelayHops >= 2 (the default
+	// depth builds no chain and dials no hop to verify).
+	RelayAdmissionPubKey string
+
 	// OnUnderlayDial, when set, is called synchronously on the client dial path
 	// the moment a transport has learned the physical host:port it is about to
 	// open an underlay connection to — BEFORE that connection is dialed. It

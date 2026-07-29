@@ -204,6 +204,52 @@ func TestBuildExitVerifier(t *testing.T) {
 	}
 }
 
+// TestBuildRelayVerifier mirrors TestBuildExitVerifier for the relay anchor
+// (issue #26): an empty key yields a nil verifier (fail-open); a valid key
+// yields one scoped to admission.RoleRelay; a malformed key is a construction
+// error (fail-loud), exactly like a malformed AdmissionPubKey.
+func TestBuildRelayVerifier(t *testing.T) {
+	if v, err := buildRelayVerifier("", nil); err != nil || v != nil {
+		t.Fatalf("empty key: got (%v, %v), want (nil, nil)", v, err)
+	}
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	v, err := buildRelayVerifier(hex.EncodeToString(pub), nil)
+	if err != nil || v == nil {
+		t.Fatalf("valid key: got (%v, %v), want (non-nil, nil)", v, err)
+	}
+
+	_, relayEnc, err := admission.Issue(priv, "hop-A", []admission.Role{admission.RoleRelay}, admissionNow.Add(-time.Hour), admissionNow.Add(time.Hour), "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := v.Verify(relayEnc, admissionNow, admission.RoleRelay, "hop-A"); err != nil {
+		t.Fatalf("a relay-role credential signed by the anchored key was rejected: %v", err)
+	}
+	// The same key's EXIT-role credential must not verify here: the relay anchor
+	// is scoped to RoleRelay only, unlike the client's single exit anchor (which
+	// NewVerifier scopes to every role, harmlessly, since its only Verify call is
+	// RoleExit — see Config.AdmissionPubKey's doc). Scoping this one narrowly is
+	// what makes it a genuinely separate authority rather than a second name for
+	// the same one.
+	_, exitEnc, err := admission.Issue(priv, "hop-A", []admission.Role{admission.RoleExit}, admissionNow.Add(-time.Hour), admissionNow.Add(time.Hour), "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	if _, err := v.Verify(exitEnc, admissionNow, admission.RoleExit, "hop-A"); err == nil {
+		t.Fatal("an exit-role credential verified against the relay anchor; it must be scoped to RoleRelay only")
+	}
+
+	if _, err := buildRelayVerifier("not-hex", nil); err == nil {
+		t.Fatal("malformed hex must error")
+	}
+	if _, err := buildRelayVerifier(hex.EncodeToString([]byte{1, 2, 3}), nil); err == nil {
+		t.Fatal("wrong-length key must error")
+	}
+}
+
 // TestNewRejectsMalformedAdmissionPubKey: a client told to verify against an
 // unusable key must fail construction, not silently fall through to trusting
 // every exit.

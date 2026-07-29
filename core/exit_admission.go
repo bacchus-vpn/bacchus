@@ -206,6 +206,105 @@ func (e *Engine) exitVerifyFunc(exitPub []byte) func(cred []byte) error {
 	}
 }
 
+// Per-hop relay-role admission credential verification (issue #26). A chain hop
+// is already authenticated by the X25519 key the client selected out of the
+// SIGNED directory (ADR-0038 §4.3) — a substituted hop simply cannot complete
+// that hop's Noise_NK layer, and nothing here changes that. What was missing is
+// the question #60 already asks of an exit: was this hop ever ADMITTED by an
+// authority the client trusts, or does it merely hold a key the directory
+// happens to name? The wire seam already exists — exitTerminate presents
+// Config.AdmissionCred in msg2 regardless of which role it is serving, so a
+// relay hop already sends a credential; core/relaychain.go's dialChain simply
+// discarded it (passed a nil verify func) until now.
+
+// errMissingHopCredential is errMissingExitCredential's hop-side counterpart: a
+// chain client that holds a relay anchor (Config.RelayAdmissionPubKey) reached
+// a hop that presented no credential at all — an old, un-credentialed, or
+// stripped hop. Kept distinct from errMissingExitCredential so a log line names
+// which side of the chain rejected.
+var errMissingHopCredential = errors.New("core: relay hop presented no admission credential")
+
+// errUnboundHopKey mirrors errUnboundExitKey (issue #29) for the same reason:
+// reaching the hop verify callback with no hop key to bind the credential to
+// would check an unbound credential, which admission.accept reads as bearer and
+// admits under ANY authorized hop's identity. dialChain always has
+// plan.hops[i].pub before it dials, so this names a plumbing bug, not something
+// a hop can trigger.
+var errUnboundHopKey = errors.New("core: relay hop admission check reached with no hop key to bind the credential to — an unbound check would accept any authorized hop's credential")
+
+// buildRelayVerifier constructs the client-side per-hop relay-admission
+// verifier from Config.RelayAdmissionPubKey (issue #26). An empty key returns a
+// nil Verifier: per-hop verification does not run (fail-open), and — the
+// deliberate part the issue calls out — that is independent of whether an exit
+// anchor (Config.AdmissionPubKey) is configured. The two anchors gate two
+// different checks, so a client that has only ever set the exit one sees no
+// change in hop-handling behavior the moment its build gains this code: hops
+// stay unverified until an operator opts into RelayAdmissionPubKey
+// deliberately, never as a side effect of the exit anchor already being set.
+//
+// crl backs the revoked oracle and may be nil (no anchor configured at all, or
+// no CRL configured under it) — this deliberately reuses the EXIT anchor's CRL
+// rather than building a second one: ADR-0047 already settled, for the
+// coordinator's multi-authority case, that one revocation list covers every
+// authority because a serial names a credential, not an issuer, and that
+// reasoning carries over unchanged here.
+//
+// Unlike buildExitVerifier, this is not called from New() and cached on an
+// Engine field: core/relaychain.go's dialChain calls it directly off
+// Config.RelayAdmissionPubKey once per chain dial, sharing the caller's
+// e.clientCRL. A malformed key is still a hard failure — a client told to
+// verify against an unusable key must not silently fall through to trusting
+// every hop — but it surfaces from the first chain dial that needs it rather
+// than from construction; see Config.RelayAdmissionPubKey's doc for why.
+func buildRelayVerifier(pubKeyHex string, crl *admission.ClientCRL) (*admission.Verifier, error) {
+	pubKeyHex = strings.TrimSpace(pubKeyHex)
+	if pubKeyHex == "" {
+		return nil, nil
+	}
+	pub, err := hex.DecodeString(pubKeyHex)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("core: RelayAdmissionPubKey must be %d hex-encoded bytes (the ed25519 relay admission authority public key)", ed25519.PublicKeySize)
+	}
+	var revoked func(string) bool
+	if crl != nil {
+		revoked = crl.Revoked
+	}
+	return admission.NewAuthoritySetVerifier([]admission.Authority{{Pub: pub, Roles: []admission.Role{admission.RoleRelay}}}, revoked)
+}
+
+// verifyHopCredential is verifyExitCredential's hop-side counterpart: given the
+// per-hop verifier, the hop's X25519 static key the Noise_NK handshake just
+// authenticated, and the credential bytes it presented, decide whether to
+// tunnel through it. The binding to hopPub is what makes a credential
+// non-transferable between hops, exactly as exitPub's binding does for an exit
+// — see verifyExitCredential's doc on issue #29 for why an unbound check would
+// be silently wrong rather than loudly absent.
+func verifyHopCredential(v *admission.Verifier, hopPub, cred []byte, now time.Time) error {
+	if len(hopPub) == 0 {
+		return errUnboundHopKey
+	}
+	if len(cred) == 0 {
+		return errMissingHopCredential
+	}
+	_, err := v.Verify(string(cred), now, admission.RoleRelay, hex.EncodeToString(hopPub))
+	return err
+}
+
+// hopVerifyFunc returns the per-handshake callback dialChain runs on the
+// credential a hop presents, or nil when v is nil (no relay anchor configured,
+// fail-open) — mirroring (*Engine).exitVerifyFunc's shape, but taking v
+// explicitly rather than reading it off the Engine: it is built fresh per chain
+// dial (buildRelayVerifier) rather than cached at construction, so there is no
+// Engine field to close over.
+func hopVerifyFunc(v *admission.Verifier, hopPub []byte) func(cred []byte) error {
+	if v == nil {
+		return nil
+	}
+	return func(cred []byte) error {
+		return verifyHopCredential(v, hopPub, cred, time.Now())
+	}
+}
+
 // admissionCRLReloadInterval is the default cadence reloadCRLLoop re-reads
 // Config.AdmissionCRLPath at (issue #90), mirroring cmd/coordinator's own
 // admission.reloadRevocationsLoop. CRLs are minted short-lived by design

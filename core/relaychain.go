@@ -1209,7 +1209,36 @@ func (e *Engine) dialE2E(raw io.ReadWriteCloser, plan *chainPlan, exitPub []byte
 // Layers are verified outermost-first, so a bad hop fails before the client
 // tunnels anything through it, and the exit's admission check is last and still
 // gates sending the real destination.
+//
+// Each hop layer now carries the same kind of check the exit layer already did
+// (issue #26): hopVerifyFunc verifies the hop's own admission credential
+// against Config.RelayAdmissionPubKey, bound to that hop's key exactly as the
+// exit check is bound to plan.exitPub. The verifier is built once, before the
+// loop, and reused for every hop in the chain — they share one anchor — so a
+// malformed RelayAdmissionPubKey fails here rather than partway through a
+// chain already half-dialed. An empty RelayAdmissionPubKey yields a nil
+// callback (fail-open), independent of whether an exit anchor is set; see
+// Config.RelayAdmissionPubKey's doc for why the two are deliberately separate
+// gates rather than one implying the other.
+//
+// A hop whose credential fails this check — revoked, expired, wrong role,
+// wrong subject, or simply absent — fails the WHOLE chain. Verification runs as
+// part of completing that hop's own clientHandshake, so its error propagates
+// through exactly the same path a substituted hop's failed Noise handshake
+// already takes below, with no special case added for it. De-selecting just the
+// bad hop and retrying with another was the alternative the issue named, and it
+// was set aside here: it would need candidate-exclusion state that lives in
+// hop SELECTION, above this function, whereas fail-closed needs nothing new and
+// already matches how every other verification failure in dialChain behaves.
 func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target string) (*noiseConn, error) {
+	// Built once and shared across every hop below rather than per-hop: all of
+	// them are checked against the same anchor, and building it here means a
+	// malformed anchor is reported before hop 1 is ever dialed.
+	hv, err := buildRelayVerifier(e.cfg.RelayAdmissionPubKey, e.clientCRL)
+	if err != nil {
+		return nil, fmt.Errorf("core: chain: %w", err)
+	}
+
 	cur := raw
 	for i, h := range plan.hops {
 		// Each hop is told only where to send the next layer: the hop after it, or —
@@ -1219,18 +1248,17 @@ func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target strin
 		if i+1 < len(plan.hops) {
 			next = plan.hops[i+1].dial
 		}
-		// verifyExit is nil for a relay hop: a hop is authenticated by holding the
-		// X25519 key the client selected from the SIGNED directory, which a
-		// substituted hop cannot do — its handshake simply fails here. Verifying a
-		// relay-ROLE admission credential on top of that is the deferred follow-up
-		// (ADR-0038 §4.3); the seam is already on the wire, since every responder
-		// presents its credential in msg2.
+		// A hop is authenticated by holding the X25519 key the client selected from
+		// the SIGNED directory — a substituted hop cannot do that, and its handshake
+		// simply fails below, independent of hopVerifyFunc's admission check (issue
+		// #26): the key check says "this is the hop I meant to dial", the credential
+		// check says "and it was admitted for the relay role".
 		// Sniff the stream this layer is dialed OVER, which is the previous hop's
 		// channel: a refusal found here was sealed by hop i-1 (see refusalSniffer),
 		// so it is reported against that hop and not against the one whose handshake
 		// happened to be in flight when it arrived.
 		sn := newRefusalSniffer(cur)
-		nc, err := clientHandshake(sn, h.pub, hopTargetPrefix+next, nil)
+		nc, err := clientHandshake(sn, h.pub, hopTargetPrefix+next, hopVerifyFunc(hv, h.pub))
 		if err != nil {
 			if cur != raw {
 				_ = cur.Close()
