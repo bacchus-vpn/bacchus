@@ -99,6 +99,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -108,9 +109,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core/asn"
+	"github.com/bacchus-vpn/bacchus/core/capacity"
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 	"github.com/bacchus-vpn/bacchus/core/geoip"
 )
@@ -138,6 +141,8 @@ var (
 	errHopNotInMesh     = errors.New("core: onion forward target is not a node in the signed directory")
 	errHopSelfDial      = errors.New("core: onion forward target is this node itself")
 	errForwardDisabled  = errors.New("core: this node does not forward onion layers")
+	errForwardPeerBusy  = errors.New("core: this hop is already carrying its per-previous-hop limit of forwarded circuits")
+	errForwardNodeBusy  = errors.New("core: this hop is already carrying its aggregate limit of forwarded circuits")
 )
 
 // relayHop is one node a chain can peel a layer at: its X25519 static key (the
@@ -1220,24 +1225,425 @@ func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target strin
 		// relay-ROLE admission credential on top of that is the deferred follow-up
 		// (ADR-0038 §4.3); the seam is already on the wire, since every responder
 		// presents its credential in msg2.
-		nc, err := clientHandshake(cur, h.pub, hopTargetPrefix+next, nil)
+		// Sniff the stream this layer is dialed OVER, which is the previous hop's
+		// channel: a refusal found here was sealed by hop i-1 (see refusalSniffer),
+		// so it is reported against that hop and not against the one whose handshake
+		// happened to be in flight when it arrived.
+		sn := newRefusalSniffer(cur)
+		nc, err := clientHandshake(sn, h.pub, hopTargetPrefix+next, nil)
 		if err != nil {
 			if cur != raw {
 				_ = cur.Close()
+			}
+			if i > 0 {
+				if reason, ok := sn.refusal(); ok {
+					prev := plan.hops[i-1]
+					return nil, fmt.Errorf("core: chain hop %d/%d: %w", i, len(plan.hops), &hopRefusedError{hop: shortID(prev.id), reason: reason})
+				}
 			}
 			return nil, fmt.Errorf("core: chain hop %d/%d (%s): %w", i+1, len(plan.hops), shortID(h.id), err)
 		}
 		cur = nc
 	}
-	// The innermost layer: unchanged, and deliberately so.
-	nc, err := clientHandshake(cur, plan.exitPub, target, e.exitVerifyFunc(plan.exitPub))
+	// The innermost layer: unchanged, and deliberately so — except that it is the
+	// layer the LAST hop's refusal surfaces on, since that hop's channel is what
+	// this one is dialed over.
+	sn := newRefusalSniffer(cur)
+	nc, err := clientHandshake(sn, plan.exitPub, target, e.exitVerifyFunc(plan.exitPub))
 	if err != nil {
 		if cur != raw {
 			_ = cur.Close()
 		}
+		if len(plan.hops) > 0 {
+			if reason, ok := sn.refusal(); ok {
+				last := plan.hops[len(plan.hops)-1]
+				return nil, fmt.Errorf("core: chain hop %d/%d: %w", len(plan.hops), len(plan.hops), &hopRefusedError{hop: shortID(last.id), reason: reason})
+			}
+		}
 		return nil, fmt.Errorf("core: chain exit layer: %w", err)
 	}
 	return nc, nil
+}
+
+// ---------- a hop's refusal, said out loud to the client ----------
+
+// A hop that declines to forward has to tell somebody, and the fail-closed rule
+// (ADR-0038, "Fail closed — the rule that governs every failure in the feature")
+// already settles the CONSEQUENCE: the path fails and selection moves on, never a
+// silent fall back to a shorter chain. What it does not settle is whether the
+// client can tell a deliberate refusal from a hop that is simply dead, and before
+// issue #25 it could not: both arrived as the same handshake failure on the next
+// layer. That conflation is worth removing, because the two want opposite
+// responses — a dead hop should be dropped from the client's candidates, while a
+// saturated one is a fine hop the client should come back to.
+//
+// # The channel this travels on already exists, and it is the right one
+//
+// A hop shares a Noise_NK channel with the CLIENT, not with its neighbours: the
+// telescoped construction means layer i is negotiated end-to-end between the
+// client and hop i, and every hop before it only splices that ciphertext (see this
+// file's header diagram). So a hop can seal a refusal to the client directly. The
+// result is authenticated (only the holder of the key the client picked out of the
+// SIGNED directory can produce it), confidential to every other hop in the path,
+// and — the property that matters most here — it carries NO new information to
+// anyone. It travels client<->hop only, on a channel that already exists, and the
+// only party who learns anything is the client, about a hop it selected itself.
+//
+// This is exactly why the refusal is a message and not a field. A field in the
+// onion layer would be read by every hop; this is read by one endpoint.
+//
+// # Every deliberate refusal carries it, and that is load-bearing
+//
+// The signal's meaning is "a hop decided", so its ABSENCE has to mean "no hop
+// decided" — i.e. the path broke. If only the new occupancy refusals were
+// signalled, silence would still mean either "dead hop" or "refused for one of the
+// older reasons", and the client would have gained nothing it can act on. So every
+// return in relayForward that is a decision emits one.
+const (
+	// hopRefusedMagic prefixes a refusal body. A real msg2 at this position is a
+	// 32-byte X25519 ephemeral followed by an AEAD tag, so a fixed prefix this long
+	// cannot be produced by one except with probability 2^-160.
+	hopRefusedMagic = "\x00bacchus-hop-refused\x00"
+	// maxHopRefusalReason bounds the reason token, so the client's sniff buffer is a
+	// small constant rather than something an upstream can grow.
+	maxHopRefusalReason = 32
+)
+
+// Refusal reasons. They are short stable tokens rather than the error text,
+// because they cross a version boundary — an old client reads a new hop's refusal
+// — and because the operator-facing wording should be free to change without
+// changing what the client parses.
+const (
+	refusedNodeBusy      = "node-busy"
+	refusedPeerBusy      = "peer-busy"
+	refusedNotInMesh     = "not-in-mesh"
+	refusedSelfTarget    = "self-target"
+	refusedForwardingOff = "forwarding-off"
+)
+
+// hopRefusalMeaning renders a reason token for the human reading the client's
+// "[relay] chain not built:" line. An unknown token is reported verbatim rather
+// than swallowed: a newer hop may name a reason this build predates, and "the hop
+// said something I do not know" is still strictly better than silence.
+var hopRefusalMeaning = map[string]string{
+	refusedNodeBusy:      "the hop is at its aggregate forwarded-circuit limit",
+	refusedPeerBusy:      "the hop is at its per-previous-hop forwarded-circuit limit",
+	refusedNotInMesh:     "the hop does not have the next node in its signed directory (its directory and yours have drifted)",
+	refusedSelfTarget:    "the hop was asked to forward to itself",
+	refusedForwardingOff: "the hop does not forward onion layers",
+}
+
+// hopRefusedError is a hop's own sealed statement that it declined the forward,
+// as opposed to any failure that merely LOOKS like one from outside.
+type hopRefusedError struct {
+	hop    string // short id of the refusing hop
+	reason string
+}
+
+func (e *hopRefusedError) Error() string {
+	meaning, ok := hopRefusalMeaning[e.reason]
+	if !ok {
+		meaning = "reason not known to this build"
+	}
+	return fmt.Sprintf("hop %s refused to forward (%s): %s — the hop is reachable and answered; it is not down", e.hop, e.reason, meaning)
+}
+
+// hopRefusalFrame builds the bytes a refusing hop writes into its client channel.
+//
+// It is length-prefixed the same way noiseConn frames its own messages, because
+// that is the position in the byte stream it occupies: the client is reading the
+// NEXT hop's handshake through this hop, so what it finds here has to be shaped
+// like the frame it was expecting or it cannot be parsed at all. The hop writes
+// the framing itself rather than getting it from noiseConn.Write, which seals and
+// frames at the layer BELOW this one.
+func hopRefusalFrame(reason string) []byte {
+	if len(reason) > maxHopRefusalReason {
+		reason = reason[:maxHopRefusalReason]
+	}
+	body := hopRefusedMagic + reason
+	out := make([]byte, 2+len(body))
+	binary.BigEndian.PutUint16(out[:2], uint16(len(body)))
+	copy(out[2:], body)
+	return out
+}
+
+// parseHopRefusal recovers a reason from bytes read where a handshake reply was
+// expected, or reports that these were not a refusal.
+func parseHopRefusal(b []byte) (string, bool) {
+	if len(b) < 2 {
+		return "", false
+	}
+	n := int(binary.BigEndian.Uint16(b[:2]))
+	if n < len(hopRefusedMagic) || len(b) < 2+n {
+		return "", false
+	}
+	body := b[2 : 2+n]
+	if string(body[:len(hopRefusedMagic)]) != hopRefusedMagic {
+		return "", false
+	}
+	return string(body[len(hopRefusedMagic):]), true
+}
+
+// signalHopRefused seals a refusal to the client on the hop's own channel, then
+// leaves the caller to close as it would have anyway. Best-effort by construction:
+// if the write fails the client sees the ordinary broken path, which is where it
+// was before this existed.
+//
+// nil-safe, because relayForward's earliest refusals are reachable before there is
+// a channel to speak on (and are driven that way by test).
+func signalHopRefused(nc *noiseConn, reason string) {
+	if nc == nil || nc.enc == nil {
+		return
+	}
+	_, _ = nc.Write(hopRefusalFrame(reason))
+}
+
+// refusalSniffer wraps the stream one layer is dialed over and keeps a copy of the
+// first few bytes read through it, so that when a handshake fails the caller can
+// ask whether what arrived was a refusal rather than a broken hop.
+//
+// This lives here, not in clientHandshake, on purpose: only a CHAINED dial can
+// receive a hop refusal — a direct client<->exit connect has no hop to refuse —
+// so the generic handshake has no business growing a branch for it. The cost is
+// one length check per read once the buffer is full, and the buffer is a fixed
+// small constant, so nothing here scales with traffic.
+type refusalSniffer struct {
+	io.ReadWriteCloser
+	buf []byte
+}
+
+func newRefusalSniffer(rw io.ReadWriteCloser) *refusalSniffer {
+	return &refusalSniffer{ReadWriteCloser: rw, buf: make([]byte, 0, 2+len(hopRefusedMagic)+maxHopRefusalReason)}
+}
+
+func (s *refusalSniffer) Read(p []byte) (int, error) {
+	n, err := s.ReadWriteCloser.Read(p)
+	if n > 0 && len(s.buf) < cap(s.buf) {
+		s.buf = append(s.buf, p[:min(n, cap(s.buf)-len(s.buf))]...)
+	}
+	return n, err
+}
+
+// refusal reports the reason a hop gave, if the bytes read through this sniffer
+// began with one.
+func (s *refusalSniffer) refusal() (string, bool) { return parseHopRefusal(s.buf) }
+
+// ---------- relay side: bounding what one previous hop can occupy ----------
+
+// Default forwarding occupancy caps (issue #25, ADR-0038 §6). They apply to any
+// node that opted into forwarding at all, because a cap that ships off bounds
+// nothing and forwarding is ALREADY opt-in — RelayIngress is the switch, and an
+// operator who threw it did not thereby ask to be unbounded.
+//
+// The numbers are deliberately generous rather than tuned. Hop selection is
+// random over the signed directory, so the honest load one previous hop sends a
+// given next hop is its own client count divided by the directory size; a
+// per-peer ceiling of 32 concurrent circuits is far above that for any directory
+// worth chaining through, while still being ~8x below the aggregate, so no single
+// neighbour can take the node. An operator whose node is bigger or smaller than
+// that guess overrides both (-relay-forward-max-per-peer, -relay-forward-max-total).
+const (
+	defaultForwardMaxPerPeer = 32
+	defaultForwardMaxTotal   = 256
+)
+
+// forwardLimits bounds what an intermediate hop will carry: concurrent forwarded
+// circuits per PREVIOUS HOP and in aggregate, plus an optional per-previous-hop
+// byte pace. It is the "rate-limit per previous hop and in aggregate" ADR-0038 §6
+// called for and #142 shipped without.
+//
+// # Why the previous hop is the key
+//
+// It is the only key there is. An intermediate hop cannot see the client — that is
+// the entire point of the onion — so it cannot key on the party actually
+// responsible for a circuit. What it can see is the TCP peer that dialed its
+// ingress, which is the previous hop. ADR-0038 §6 states this and it is a
+// constraint, not a design choice.
+//
+// It has a consequence worth naming rather than discovering later: a hop's budget
+// is shared by everything arriving through the same neighbour. An attacker that
+// routes through a busy honest hop spends that hop's budget and degrades the
+// honest circuits behind it. What the key DOES buy is containment — that attacker
+// cannot spend any OTHER neighbour's budget, and cannot take the node, because the
+// per-peer ceiling is a fraction of the aggregate. Bounding the blast radius to one
+// neighbour is the most this key can do, and it is worth having.
+//
+// # Shed, do not queue
+//
+// A circuit that would exceed either cap is REFUSED, not parked. Queueing a
+// forward would convert an occupancy bound into a latency bound and leave the node
+// holding exactly the state the cap exists to deny it. The client's answer to a
+// refusal is to build its chain somewhere else, which is a thing it can do
+// immediately and this node cannot do for it.
+//
+// Bytes are the other way round: once a circuit is admitted its bytes are PACED,
+// not dropped. That is not an inconsistency, it is the same rule applied to the
+// resource that is actually scarce at each layer. A circuit is admission — you
+// either take the state or you do not. A byte is throughput — cutting a splice
+// mid-copy destroys a circuit that was already admitted and paid for, to save
+// bandwidth that pacing reclaims anyway. ADR-0027 makes the same call for the
+// reality splice and ADR-0040's aggregate limiter already paces every forwarded
+// byte on this path; this adds the per-peer share of it that was missing.
+type forwardLimits struct {
+	maxPerPeer int
+	maxTotal   int
+	peerRate   capacity.Rate // per-previous-hop byte pace; 0 is unpaced
+
+	mu        sync.Mutex
+	total     int
+	saturated bool // aggregate cap reached; drives the edge-triggered log
+	refused   uint64
+	peers     map[string]*forwardPeer
+}
+
+// forwardPeer is one previous hop's live occupancy. It exists only while that peer
+// has at least one circuit up, which is what keeps the map bounded by maxTotal
+// rather than by the number of source addresses an attacker can dial from — an
+// attacker-keyed map that outlived its entries would be its own memory DoS.
+type forwardPeer struct {
+	circuits  int
+	pace      *capacity.Limiter // nil (inert) when peerRate is 0
+	saturated bool
+	refused   uint64
+}
+
+func newForwardLimits(perPeer, total int, peerRate capacity.Rate) *forwardLimits {
+	if perPeer <= 0 {
+		perPeer = defaultForwardMaxPerPeer
+	}
+	if total <= 0 {
+		total = defaultForwardMaxTotal
+	}
+	// A per-peer ceiling above the aggregate is not a configuration, it is a typo
+	// that silently disables the per-peer cap: the aggregate would always bind
+	// first and one neighbour could hold every slot on the node. Clamp rather than
+	// refuse, because the caps are a safety net an operator should not be able to
+	// turn into a footgun by fat-fingering one of two numbers.
+	if perPeer > total {
+		perPeer = total
+	}
+	return &forwardLimits{
+		maxPerPeer: perPeer,
+		maxTotal:   total,
+		peerRate:   peerRate,
+		peers:      map[string]*forwardPeer{},
+	}
+}
+
+// acquire takes one forwarding slot for peer, or reports why it will not.
+//
+// The aggregate is checked FIRST so that a node at its total refuses uniformly
+// rather than depending on which neighbour happened to ask; a per-peer refusal
+// then always means "you specifically are over your share", which is the
+// distinction an operator reading the log needs.
+//
+// On success it returns the peer's byte pacer and a release that must be called
+// when the circuit ends. On refusal, first reports whether this begins a
+// saturation episode — the edge the operator log is triggered on.
+func (f *forwardLimits) acquire(peer string) (pace *capacity.Limiter, release func() (uint64, bool), first bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.total >= f.maxTotal {
+		first = !f.saturated
+		f.saturated = true
+		f.refused++
+		return nil, nil, first, errForwardNodeBusy
+	}
+	p := f.peers[peer]
+	if p == nil {
+		p = &forwardPeer{pace: capacity.NewLimiter(f.peerRate)}
+		f.peers[peer] = p
+	}
+	if p.circuits >= f.maxPerPeer {
+		first = !p.saturated
+		p.saturated = true
+		p.refused++
+		// Do not leave a zero-circuit entry behind for a peer that only ever got
+		// refused: that would be the unbounded attacker-keyed map this type avoids.
+		// Reachable only with maxPerPeer <= 0, which newForwardLimits does not build.
+		if p.circuits == 0 {
+			delete(f.peers, peer)
+		}
+		return nil, nil, first, errForwardPeerBusy
+	}
+	p.circuits++
+	f.total++
+	return p.pace, func() (uint64, bool) { return f.release(peer) }, false, nil
+}
+
+// release returns one slot, and reports the size of the saturation episode it just
+// ended, if it ended one. A release always drops the holder below both caps, so it
+// is the only place an episode can end.
+func (f *forwardLimits) release(peer string) (refused uint64, ended bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.total > 0 {
+		f.total--
+	}
+	if f.saturated {
+		refused, ended = f.refused, true
+		f.saturated, f.refused = false, 0
+	}
+	if p := f.peers[peer]; p != nil {
+		p.circuits--
+		if p.saturated {
+			// A peer episode and an aggregate episode can end on the same release. Report
+			// the sum rather than one of them: the operator's question is "how many
+			// forwards did I turn away", and attributing it is what the edge line did.
+			refused, ended = refused+p.refused, true
+			p.saturated, p.refused = false, 0
+		}
+		if p.circuits <= 0 {
+			delete(f.peers, peer)
+		}
+	}
+	return refused, ended
+}
+
+// counts reports live occupancy for peer and in aggregate. Tests read it; nothing
+// on the data path does.
+func (f *forwardLimits) counts(peer string) (perPeer, total int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p := f.peers[peer]; p != nil {
+		perPeer = p.circuits
+	}
+	return perPeer, f.total
+}
+
+// forwardPeerKey is the previous hop's identity for accounting, and it is the
+// source IP WITHOUT the port. A peer dials a fresh ephemeral port for every
+// circuit it hands us, so keying on host:port would give every circuit its own
+// bucket and cap nothing at all — the single mistake that would make this whole
+// type inert while still passing a naive test.
+//
+// An empty key is returned for a channel with no addressable remote, and that is a
+// key like any other: everything unaddressable shares one budget, which is the
+// conservative direction. In practice a forward always arrives on the TCP ingress
+// listener and always has one.
+//
+// It takes the channel rather than the stream underneath so the nil case is handled
+// once, here. relayForward is reachable with a nil channel — its earliest refusals
+// return before there is one, and a test drives it that way — and a peer key is the
+// first thing past those refusals that would touch it.
+func forwardPeerKey(nc *noiseConn) string {
+	if nc == nil {
+		return ""
+	}
+	ra, ok := nc.raw.(interface{ RemoteAddr() net.Addr })
+	if !ok || ra == nil {
+		return ""
+	}
+	addr := ra.RemoteAddr()
+	if addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
 }
 
 // ---------- relay side: peel one layer, splice the rest ----------
@@ -1278,18 +1684,30 @@ func (e *Engine) forwardOn() bool {
 // "hop:<my own ingress>" passes the allow-list. Serving it would splice this node
 // to itself, and since the layer inside is still addressed to this node's key it
 // would be peeled again and forwarded again: one attacker socket becomes two, then
-// four. Refusing a self-target is the cheap half of the amplification work tracked
-// in #174 — it does not bound a ring of three nodes pointed at each other, which
-// needs a hop counter or a rate limit, and is why that issue stays open.
+// four. That is the cheap half of the amplification work tracked in #25; the caps
+// below are the other half, and forwardLimits' doc says what they bound and why a
+// ring needed no hop counter to bound it.
+//
+// # Why it refuses when it is full
+//
+// A forwarded circuit costs this node a socket, a goroutine pair and a share of an
+// uplink its operator pays for, for as long as the client keeps it up — and until
+// issue #25 there was no bound on how many of them one neighbour could hold.
+// forwardLimits supplies the bound (ADR-0038 §6); every refusal here is sealed
+// back to the client so it can tell a full hop from a dead one.
 //
 // Both directions are metered (e.meter), because a forwarded byte spends this
 // operator's uplink exactly as an exit's does and their ISP bills it the same way
 // — the rule core/forwarder.go's meter doc states for every unbounded-volume path.
+// The per-peer pace sits INSIDE that: e.meter is the operator's whole declared
+// cap (ADR-0040), and pace is the share of it this one neighbour may take.
 func (e *Engine) relayForward(nc *noiseConn, next string) {
 	if !e.forwardOn() {
+		signalHopRefused(nc, refusedForwardingOff)
 		return
 	}
 	if e.isSelfAddr(next) {
+		signalHopRefused(nc, refusedSelfTarget)
 		e.emit(EventError, "", "onion: refusing to forward to %s: %v", next, errHopSelfDial)
 		return
 	}
@@ -1298,15 +1716,59 @@ func (e *Engine) relayForward(nc *noiseConn, next string) {
 		// drifted from the client's, or someone is probing this node as an open proxy.
 		// The operator wants to see both, and the line names only an address this node
 		// was offered — never a client, which it cannot see anyway.
+		signalHopRefused(nc, refusedNotInMesh)
 		e.emit(EventError, "", "onion: refusing to forward to %s: %v", next, errHopNotInMesh)
 		return
 	}
+	// Occupancy is taken BEFORE the dial, so a refused circuit costs this node no
+	// outbound connection, and AFTER the two checks above, so a target that was
+	// never going to be served does not spend a slot it would immediately return.
+	peer := forwardPeerKey(nc)
+	pace, release, first, err := e.forwardLimits.acquire(peer)
+	if err != nil {
+		reason := refusedPeerBusy
+		if errors.Is(err, errForwardNodeBusy) {
+			reason = refusedNodeBusy
+		}
+		signalHopRefused(nc, reason)
+		if first {
+			e.emitForwardRefusal(peer, err)
+		}
+		return
+	}
+	defer func() {
+		if refused, ended := release(); ended {
+			e.emit(EventInfo, "", "onion: forwarding for %s is back under its limits after turning away %d circuit(s)", peerLabel(peer), refused)
+		}
+	}()
 	up, err := net.DialTimeout("tcp", next, 10*time.Second)
 	if err != nil {
 		e.emit(EventError, "", "onion: dial next hop %s: %v", next, err)
 		return
 	}
 	defer up.Close()
-	go func() { _, _ = io.Copy(up, e.meter(nc)); _ = up.Close() }()
-	_, _ = io.Copy(nc, e.meter(up))
+	go func() { _, _ = io.Copy(up, e.meter(pace.LimitReads(e.limiterCtx, nc))); _ = up.Close() }()
+	_, _ = io.Copy(nc, e.meter(pace.LimitReads(e.limiterCtx, up)))
+}
+
+// emitForwardRefusal reports a cap refusal to the operator on the EDGE — the first
+// refusal of an episode — and reports the episode's size when it ends (see
+// forwardLimits.release). Logging every refusal instead would hand an attacker a
+// log amplifier: they choose the refusal rate, and a node that is already declining
+// work should not be spending more per declined circuit than per served one.
+//
+// The line names the previous hop's address, which is a mesh node this operator is
+// already peered with, and never a client — an intermediate hop cannot see one.
+func (e *Engine) emitForwardRefusal(peer string, err error) {
+	e.emit(EventError, "", "onion: refusing forwards from %s: %v (further refusals in this episode are counted, not logged)", peerLabel(peer), err)
+}
+
+// peerLabel names a previous hop for an operator-facing line. The empty key is the
+// one forwardPeerKey returns for a conn with no addressable remote, and it reads as
+// nothing at all in a log line, so it gets words instead.
+func peerLabel(peer string) string {
+	if peer == "" {
+		return "an unaddressable peer"
+	}
+	return peer
 }

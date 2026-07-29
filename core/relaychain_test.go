@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core/admission"
+	"github.com/bacchus-vpn/bacchus/core/capacity"
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 	"github.com/flynn/noise"
 )
@@ -49,6 +50,20 @@ func signTestSnapshot(t *testing.T, priv ed25519.PrivateKey, entries []coldstart
 // egress to the internet (see TestRelayOnlyNodeRefusesInternetEgress).
 func startForwardNode(t *testing.T, key noise.DHKey, dir *relayDirectory) string {
 	t.Helper()
+	addr, _ := startForwardNodeCapped(t, key, dir, 0, 0, 0)
+	return addr
+}
+
+// startForwardNodeCapped is startForwardNode with the forwarding occupancy caps
+// under test (issue #25). Zero for either takes the production default, which is
+// what startForwardNode passes, so every existing caller keeps running a node
+// configured exactly as a real one is.
+//
+// It returns the engine as well as the address, because a test that asserts a cap
+// held has to read the occupancy the cap was counting, not just observe that
+// something failed.
+func startForwardNodeCapped(t *testing.T, key noise.DHKey, dir *relayDirectory, perPeer, total int, peerRate capacity.Rate) (string, *Engine) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("hop listen: %v", err)
@@ -58,6 +73,13 @@ func startForwardNode(t *testing.T, key noise.DHKey, dir *relayDirectory) string
 		roles:   map[string]bool{RoleRelay: true},
 		exitKey: key,
 		cfg:     Config{RelayIngress: ln.Addr().String()},
+		// Built here rather than left nil for the same reason newEngine always builds
+		// one: relayForward does not branch on it, so a nil would be a panic on the
+		// first forward instead of a node that forwards without limits.
+		forwardLimits: newForwardLimits(perPeer, total, peerRate),
+		// A real engine always has one (newEngine sets it before anything serves), and
+		// a paced reader parked on a nil context panics rather than waits.
+		limiterCtx: context.Background(),
 	}
 	e.relayDir.Store(dir)
 	go func() {
@@ -72,7 +94,7 @@ func startForwardNode(t *testing.T, key noise.DHKey, dir *relayDirectory) string
 			go e.exitTerminate("", c)
 		}
 	}()
-	return ln.Addr().String()
+	return ln.Addr().String(), e
 }
 
 // chainFixture is a whole assembled mesh for one test: a real exit, n forwarding
