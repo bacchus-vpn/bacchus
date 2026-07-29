@@ -154,24 +154,38 @@ func describeAuthorities(authorities []admission.Authority) string {
 	return strings.Join(out, " ")
 }
 
-// admit reports whether a credential-bearing message m may proceed. When
-// admission is disabled (nil verifier) everything is admitted, preserving the
-// pre-#42 open behavior. Otherwise it verifies m.Cred for the given role and
-// subject binding (subject "" for clients, the node id for nodes); on rejection
-// it replies to src with a reject naming the reason — admission errors carry
-// only protocol facts, never a secret, so they are safe to send and log — and
-// returns false, on which the caller stops handling m (nothing is registered,
-// listed, or paired).
-func admit(m wire, src *net.UDPAddr, want admission.Role, subject string) bool {
+// admit reports whether a credential-bearing message m may proceed, and returns
+// the credential it verified. When admission is disabled (nil verifier)
+// everything is admitted, preserving the pre-#42 open behavior. Otherwise it
+// verifies m.Cred for the given role and subject binding (subject "" for
+// clients, the node id for nodes); on rejection it replies to src with a reject
+// naming the reason — admission errors carry only protocol facts, never a
+// secret, so they are safe to send and log — and returns false, on which the
+// caller stops handling m (nothing is registered, listed, or paired).
+//
+// The returned Credential is the VERIFIED one, and it is meaningful only when ok
+// is true. On the disabled path it is the zero value, which is not a credential
+// that said nothing — it is the absence of one, and a caller reading standing off
+// it must distinguish the two by checking admissionVerifier itself. resolveTier
+// (tier.go) is the caller that does, and its case 3 says why the difference
+// matters.
+//
+// It returns the credential rather than being called twice because standing now
+// rides it: issue #58's (trust, plan) pair indexes the signed policy's tiers
+// table, and re-verifying to read a field the gate above already parsed would
+// spend a second ed25519 verification per connect on the hot path and, worse,
+// leave two call sites that could disagree about which credential they read.
+func admit(m wire, src *net.UDPAddr, want admission.Role, subject string) (admission.Credential, bool) {
 	if admissionVerifier == nil {
-		return true
+		return admission.Credential{}, true
 	}
-	if _, err := admissionVerifier.Verify(m.Cred, time.Now(), want, subject); err != nil {
+	cred, err := admissionVerifier.Verify(m.Cred, time.Now(), want, subject)
+	if err != nil {
 		log.Printf("admission: reject %s from %s: %v", want, src, err)
 		send(src, wire{Type: "reject", Reason: err.Error()})
-		return false
+		return admission.Credential{}, false
 	}
-	return true
+	return cred, true
 }
 
 // reloadRevocationsLoop (re)loads the revocation file into a fresh
