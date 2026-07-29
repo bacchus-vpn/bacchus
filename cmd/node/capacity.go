@@ -15,6 +15,19 @@ import (
 // that serves without limit and finds out from their ISP. A volunteer who asked
 // for a cap and silently did not get one is the exact harm #143 exists to prevent,
 // so a limit that cannot be parsed stops the node rather than being approximated.
+// parseForwardPeerRate turns -relay-forward-peer-rate into the per-previous-hop
+// pace a forwarding hop applies (issue #25). Same bits/s vocabulary as -max-speed,
+// parsed by the same function, and fatal on a typo for the same reason: an
+// operator who asked to divide their uplink between neighbours and silently did
+// not get it has the problem they were trying to avoid.
+func parseForwardPeerRate(s string) capacity.Rate {
+	r, err := capacity.ParseRate(s)
+	if err != nil {
+		log.Fatalf("-relay-forward-peer-rate: %v", err)
+	}
+	return r
+}
+
 func parseLimits(maxSpeed, monthlyQuota string, cycleDay int) capacity.Limits {
 	speedCap, err := capacity.ParseRate(maxSpeed)
 	if err != nil {

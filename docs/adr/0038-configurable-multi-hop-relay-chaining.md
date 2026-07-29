@@ -426,8 +426,9 @@ doc's §7 and filed as issue #190 rather than claimed away.
   pass. The check is against the node's own **directory** entry, not its local
   listener: a hop binds a wildcard or an OS-assigned port while upstreams dial the
   address the coordinator observed, so a guard written against the listener would pass
-  every real self-dial. This is the cheap half of #174 and does not bound a ring of
-  nodes pointed at each other.
+  every real self-dial. This is the cheap half of #25 and does not bound a ring of
+  nodes pointed at each other. (Superseded on that last point by the issue #25
+  amendment at the end of this file, which bounds the ring without a hop counter.)
 - **"At depth 1 every code path in this file is unreachable" was false.**
   `setupRelayChaining`, `loadRelayDirectory` and `relayForward` all run at depth 1, and
   `relayForward` is an intermediate hop's entire hot path. The claim is about the
@@ -578,3 +579,161 @@ re-reading `Load()` per field.
 relay-side DoS controls; per-hop relay admission credentials; NAT-traversed
 intermediate hops; coordinator-independent relay identity (#190). This change is
 **Part of #76** and does not close it.
+
+## Amendment (issue #25, 2026-07-29): forwarding is bounded per previous hop and in aggregate; no hop counter
+
+§6 committed relays to "rate-limit per previous hop and in aggregate". #142 shipped
+the forwarding path without it. `relayForward` metered forwarded bytes against the
+operator's declared limits (ADR-0040) and refused to dial itself, and that was the
+whole of its self-defence: **one neighbour could hold an unbounded number of
+forwarded circuits open on any node in the mesh**, and nothing bounded a cycle of
+nodes pointed at each other. This lands the caps §6 named, and records two decisions
+the issue text left open.
+
+**What landed** (`core/relaychain.go`, `core/engine.go`, `cmd/node`):
+
+- **A per-previous-hop and an aggregate cap on concurrent forwarded circuits**
+  (`forwardLimits`), defaulting to 32 and 256. Zero means the default, never
+  unlimited — forwarding is already opt-in behind `RelayIngress`, and an operator
+  who threw that switch did not thereby ask to be unbounded. A per-peer value above
+  the aggregate is clamped to it, since otherwise the aggregate always binds first
+  and the per-peer cap is silently inert.
+- **A circuit over either cap is refused, never queued.** Queueing converts an
+  occupancy bound into a latency bound and leaves the node holding exactly the state
+  the cap exists to deny it.
+- **An optional per-previous-hop byte pace** (`-relay-forward-peer-rate`, off by
+  default). Bytes are *paced*, not dropped — the split is deliberate and is the same
+  rule applied to two different resources. A circuit is admission: you either take
+  the state or you do not. A byte is throughput: cutting a splice mid-copy destroys a
+  circuit already admitted and paid for, to save bandwidth pacing reclaims anyway
+  (ADR-0027 makes the same call for the reality splice). Aggregate forwarding
+  bandwidth was already bounded by ADR-0040; this divides that budget between
+  neighbours, which is the part §6 asked for and #142 did not have.
+
+### Why the previous hop, and what that key cannot do
+
+It is the only key available: an intermediate hop cannot see the client — that is the
+point of the onion — so it cannot meter the party actually responsible for a circuit.
+§6 already said this; the consequence is worth stating rather than discovering.
+
+**A hop's budget is shared by everything arriving through the same neighbour.** An
+attacker routing through a busy honest hop spends that hop's budget and degrades the
+honest circuits behind it. What the key does buy is **containment**: that attacker
+cannot spend any other neighbour's budget, and cannot take the node, because the
+per-peer ceiling is a fraction of the aggregate. Bounding the blast radius to one
+neighbour is the most this key can do, and it is worth having. It is not the same
+thing as fairness between clients, and nothing here should be read as claiming it.
+
+### One §6 sentence was too strong
+
+§6 says "Forwarding is 1:1 with no amplification vector", and the issue text repeated
+it. That is true of **bytes** and false of **occupancy** the moment a cycle exists.
+A→B→C→A is 1:1 on every link and still turns one attacker socket into a slot on every
+node of the ring, once per lap, for as many laps as the attacker builds. The
+self-dial guard #142 added closed the degenerate one-node case and said so; the
+general case is what this amendment closes.
+
+### The ring: bounded by the caps, and no hop counter added
+
+The obvious fix is a hop counter — a TTL each node decrements and refuses at zero.
+**Rejected**, and the reasoning matters more than the conclusion because the
+alternative is not obviously wrong.
+
+A hop counter in the onion layer does not work at all: each hop shares a key with the
+client and nobody else, so the field would be *written by the client*, and an attacker
+building a ring writes 1 every time. Making it unforgeable means each hop decrements
+and re-seals it — and a hop can only re-seal what it can read. **Unforgeable and
+non-leaking are mutually exclusive here.** The workable shape is therefore a
+*cleartext* TTL outside the encryption, rewritten hop by hop, clamped on receipt so an
+attacker cannot start it high. That would bound the ring. It was rejected on cost:
+
+1. **The caps already bound the ring, by the specific mechanism the counter was
+   wanted for.** Every revisit to a node in a cycle arrives from the *same*
+   predecessor — its ring-predecessor — so every lap past the first draws on one
+   per-previous-hop budget and the ring runs out of it. Measured, not assumed:
+   `TestRingOfForwardingNodesTerminates` builds three real forwarding nodes in a cycle
+   and it dies at depth 10 with a per-peer cap of 3. A cycle of *m* nodes at per-peer
+   cap *P* terminates around *mP* layers, and every slot it took came out of a
+   per-peer bucket, so it starved no other neighbour on the way.
+2. **There is no autonomous spin to stop.** The chain does not self-extend: each lap
+   costs the attacker another full Noise_NK handshake driven through the whole chain
+   built so far, so the attacker's cost per lap grows with depth while the mesh's
+   stays flat. "A loop consuming a slot on every node indefinitely" describes the
+   occupancy, not a runaway process — nothing continues once the attacker stops
+   paying.
+3. **The aggregate cap is the ceiling regardless of topology.** Mesh-wide forwarded
+   occupancy is at most the sum of every node's aggregate cap. A cycle cannot exceed
+   that; it can only fill it in a particular shape. A hop counter does not lower that
+   number by one circuit.
+4. **The counter costs a property this design spends its whole complexity budget
+   on.** Today an intermediate hop knows it is not first (it was reached by a plain
+   dial to its ingress, not the coordinator-brokered rendezvous of §5) and not the
+   exit (its target carries `hop:`). It does *not* know how many hops precede it, or
+   whether the node it dials is the exit or one more relay. A readable depth, against
+   a published `RelayHopsMax`, converts that into position: at depth 3 the middle hop
+   learns the address it is dialing **is the exit**. Handing one node the exit's
+   identity for a flow whose predecessor it also knows is precisely the linkage §2
+   and Correction 3 deny. As cleartext between hops it is worse than a leak to the
+   hop — it is a position fingerprint for any passive observer of a single inter-hop
+   link, which does not exist today.
+
+So: the bound is **occupancy, taken where the resource is spent**, and the onion
+keeps its property that a hop knows its two neighbours and nothing else.
+
+**What would reopen this.** Argument 2 is the load-bearing one. If a change ever made
+a cycle cheap to sustain without per-lap attacker cost — a hop that re-dials on its
+own, or server-side chain extension arriving with NAT-traversed middle hops (§9 item
+9) — the ring stops being attacker-paced and this decision should be taken again.
+
+### The failure mode: a refusal is fail-closed *and* legible
+
+Refusing a forward fails the client's chain build. That half was already settled by
+this ADR's fail-closed rule — the path fails and selection moves on, never a silent
+fall back to a shorter chain — and nothing here changes it.
+
+**The sheddability test both ADR-0043 and ADR-0045 apply lands clearly on "shed".** A
+saturated hop is the most sheddable failure in the system: the client picked it at
+random out of a directory of many and can pick another immediately, which is the same
+structural reason ADR-0043 fails closed (a pool with rotation) rather than a template
+borrowed from it. ADR-0045's opposite answer turns on a condition no client can
+rotate away from, which is not this.
+
+But that test answers *whether to refuse*, not *whether the refusal is legible*, and
+here the second question has teeth the other two never had. A refused coordinator and
+a crashed coordinator both mean "rotate", so ADR-0043/0045 never needed the
+distinction. A refused hop and a **dead** hop do not mean the same thing: a dead hop
+should be dropped from the client's candidates, a full one is a good hop worth coming
+back to. Before this they were the same handshake failure on the next layer.
+
+**So a hop that declines says so, on its own Noise channel to the client.** The
+channel already exists and needs no new field: the telescoped construction negotiates
+layer *i* end-to-end between the client and hop *i*, so a hop can seal a statement the
+client alone can read. It is authenticated (only the holder of the key the client
+picked from the **signed** directory can produce it), confidential to every other hop,
+and — the property that decided the shape — it carries **no new information to
+anyone**. It travels client↔hop on a channel that already exists. That is exactly why
+it is a message and not a field: a field in the onion layer is read by every hop, this
+is read by one endpoint.
+
+Two consequences worth recording:
+
+- **Every deliberate refusal carries it**, including the older self-target,
+  not-in-mesh and forwarding-disabled cases. The signal means "a hop decided", so its
+  absence has to mean "no hop decided". Signalling only the new refusals would leave
+  silence ambiguous and the client no better off.
+- **It reports a reason token, never a number.** `node-busy` discloses one coarse bit
+  of load to a party that already holds a circuit's worth of evidence; occupancy
+  counts would be a load oracle anyone could poll to map the mesh's spare capacity. A
+  hostile hop can of course claim to be busy — but it can already refuse by simply not
+  forwarding, and this signal only ever lowers a client's opinion of a hop, never
+  raises it, so there is nothing to gain by lying.
+
+Operator side, the refusals are edge-triggered: the first refusal of a saturation
+episode is logged and the episode's total is logged when it ends. Logging every
+refusal would hand an attacker a log amplifier at a rate they choose, on a node that
+is already declining work.
+
+**Still deferred:** chain liveness + rebuild (§9 item 6); IP-derived AS diversity;
+per-hop relay admission credentials; NAT-traversed intermediate hops;
+coordinator-independent relay identity (#190). This change is **Part of #76** and does
+not close it.

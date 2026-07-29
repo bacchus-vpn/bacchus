@@ -394,6 +394,32 @@ type Config struct {
 	// validity window with uptime.
 	RelayDirectoryPath string
 
+	// Forwarding occupancy caps (issue #25, ADR-0038 §6), relay role, and read only
+	// by a node that serves RelayIngress. They bound what ONE previous hop, and all
+	// of them together, can hold open on this node at once; a circuit over either
+	// cap is refused rather than queued. See core/relaychain.go's forwardLimits for
+	// why the previous hop is the only key available, and what that does and does
+	// not buy.
+	//
+	// Zero means the built-in default, NOT unlimited — the same shape as
+	// RelayHops, and for a stronger reason: an unbounded default would leave every
+	// forwarding node in the fleet with no bound at all, while forwarding is
+	// already opt-in behind RelayIngress. An operator who wants a different number
+	// says a different number; there is deliberately no way to say "none".
+	RelayForwardMaxPerPeer int
+	RelayForwardMaxTotal   int
+
+	// RelayForwardPeerRate paces forwarded bytes per previous hop, in bits/s.
+	//
+	// Zero — the default — is unpaced, and that is the honest default rather than a
+	// timid one: the operator's AGGREGATE forwarding bandwidth is already bounded
+	// by Limits.SpeedCap (ADR-0040), which is the cap that keeps their ISP bill
+	// where they put it. This one divides that budget between neighbours, and a
+	// sensible value depends on the uplink and the peer count, so it is a knob an
+	// operator reaches for after seeing one neighbour crowd the others out, not a
+	// number this package can guess for them.
+	RelayForwardPeerRate capacity.Rate
+
 	// Client device credential (issue #50/#51, ADR-0045, ADR-0046), client role.
 	// Appended after RelayDirectoryPath to keep the struct tail a stable seam.
 	//
@@ -665,6 +691,14 @@ type Engine struct {
 	// quota — it is one ISP bill, not one per session.
 	limiter *capacity.Limiter
 	quota   *capacity.Quota
+
+	// forwardLimits bounds onion-forwarding occupancy per previous hop and in
+	// aggregate (issue #25, ADR-0038 §6). Always non-nil, even on a node that never
+	// forwards, so relayForward needs no branch — the same idiom as limiter, one
+	// level up: nil here would be a nil map write the first time an unexpected
+	// forward arrived, and "this node does not forward" is already answered by
+	// forwardOn.
+	forwardLimits *forwardLimits
 
 	// limiterCtx is cancelled by Stop. It exists so a data-path reader parked
 	// waiting for rate-limiter tokens unblocks at shutdown rather than holding the
@@ -1047,6 +1081,11 @@ func newEngine(cfg Config, roles map[string]bool, exitKey noise.DHKey) (*Engine,
 	if cfg.Limits.MonthlyQuota != 0 && cfg.QuotaStatePath == "" {
 		e.emit(EventInfo, "", "quota: %s declared with no state path — usage will NOT survive a restart", cfg.Limits.MonthlyQuota)
 	}
+	// Forwarding occupancy caps (issue #25). Built for every engine, not only a
+	// forwarding one: it costs an empty map, and the alternative is a nil this
+	// node's data path would have to check on a hot path it does not otherwise
+	// branch on.
+	e.forwardLimits = newForwardLimits(cfg.RelayForwardMaxPerPeer, cfg.RelayForwardMaxTotal, cfg.RelayForwardPeerRate)
 
 	tr, err := newTransport(cfg, func(kind, msg string) { e.emit(kind, "", "%s", msg) })
 	if err != nil {
@@ -1154,6 +1193,15 @@ func (e *Engine) Start(ctx context.Context) error {
 		go e.serveExit(ln)
 		e.emit(EventInfo, "", "relay onion ingress on %s (forwarding to %d known mesh addresses)",
 			ln.Addr(), len(e.relayDir.Load().dialable))
+		// The caps that actually took effect, printed where an operator will look for
+		// them: zeros in the config mean the defaults, and a per-peer value above the
+		// aggregate is clamped, so what was configured is not always what runs.
+		pace := "unpaced (aggregate bandwidth is bounded by the declared speed cap)"
+		if e.cfg.RelayForwardPeerRate != 0 {
+			pace = e.cfg.RelayForwardPeerRate.String() + " per previous hop"
+		}
+		e.emit(EventInfo, "", "relay forwarding limits: %d circuits per previous hop, %d in aggregate, %s — a circuit over either is refused, not queued",
+			e.forwardLimits.maxPerPeer, e.forwardLimits.maxTotal, pace)
 	}
 	// The client's chain depth, reported once so an operator can see what actually
 	// took effect. There is no clamp notice to print: a depth above RelayHopsMax is

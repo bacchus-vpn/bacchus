@@ -75,6 +75,9 @@ func main() {
 	meshPubkey := flag.String("mesh-pubkey", "", "client: coordinator snapshot-signing public key (hex, from cmd/coordinator -print-bootstrap-pubkey), used to verify snapshots recovered via mesh-walk. Required with -mesh-peers.")
 	relayHops := flag.Int("relay-hops", 1, "client: how many nodes a RELAYED path is routed through, so no single relay links you to your exit (issue #142, ADR-0038). 1 is the default and is today's behaviour exactly — one relay, which sees both ends. 2+ builds a chain you assemble yourself from the signed directory: you pick your own exit and tell the coordinator only the first hop, so it never learns where you egress unless it colludes with a node in your path (see docs/design/relay-chaining.md on that limit). Max 4 — a higher number is refused, never quietly shortened. Costs a hop of latency and n times the volunteer bandwidth, needs -relay-directory, and DISABLES direct paths, since a direct path carries no chain")
 	relayIngress := flag.String("relay-ingress", "", "relay: TCP address to accept onion layers on, so this node can serve as an intermediate hop in someone else's chain (issue #142). It peels one layer and splices to the next node — it never egresses to the internet, and only forwards to nodes named in -relay-directory. Must be publicly reachable (a middle hop is reached by an outbound dial, not a hole-punch). Requires -relay-directory and -exit-key: a hop's node id IS its X25519 public key, and clients authenticate hops against the id in the signed directory, so an identity regenerated on each restart makes this node unreachable as a hop until a fresh directory propagates. Empty opens no such port")
+	relayFwdPerPeer := flag.Int("relay-forward-max-per-peer", 0, "relay serving -relay-ingress: most forwarded circuits ONE upstream neighbour may hold open here at once (issue #25, ADR-0038 §6). An intermediate hop cannot see the client — that is the point of the onion — so the neighbour that dialed it is the only thing it can meter, and one neighbour's traffic shares one budget. 0 uses the built-in default (32); there is no way to say unlimited, since forwarding is already opt-in behind -relay-ingress. A circuit over the cap is refused outright, never queued, and the client is told so it can try a different hop rather than treat yours as dead")
+	relayFwdTotal := flag.Int("relay-forward-max-total", 0, "relay serving -relay-ingress: most forwarded circuits this node will carry in total, across every neighbour (issue #25). 0 uses the built-in default (256). This is the number that bounds what forwarding can cost you; the per-peer cap only decides how it is shared out. A per-peer value above this one is clamped to it, since otherwise one neighbour could hold every slot")
+	relayFwdPeerRate := flag.String("relay-forward-peer-rate", "", "relay serving -relay-ingress: pace forwarded traffic per upstream neighbour, e.g. 5Mbit (issue #25). Empty — the default — is unpaced, because your TOTAL forwarding bandwidth is already bounded by -max-speed; this only divides that budget between neighbours, and is what you reach for when one of them crowds out the rest. Unlike the circuit caps, bytes are slowed rather than dropped: a circuit already admitted is not worth destroying mid-copy to save bandwidth that pacing reclaims anyway")
 	relayDirectory := flag.String("relay-directory", "", "path to a coordinator-signed snapshot (e.g. cmd/coldstart-bootstrap -cache) used for relay chaining: a client picks its hops out of it, a -relay-ingress hop admits a forward only to an address in it. Verified against -mesh-pubkey and must be unexpired. Required by -relay-hops 2+ and by -relay-ingress. Re-read from this same path on an interval (issue #27), so an operator rotating the file in place is picked up without a restart — a bad, expired, or unreadable reload leaves the previous directory enforcing unchanged")
 	flag.Parse()
 
@@ -121,6 +124,7 @@ func main() {
 	// typo.
 
 	limits := parseLimits(*maxSpeed, *monthlyQuota, *quotaCycleDay)
+	relayFwdRate := parseForwardPeerRate(*relayFwdPeerRate)
 
 	cfg := core.Config{
 		Coordinators:        parseCoordinators(*coords),
@@ -160,6 +164,10 @@ func main() {
 		RelayDirectory:      relayDir,
 		RelayDirectoryKey:   relayDirKey,
 		RelayDirectoryPath:  *relayDirectory,
+
+		RelayForwardMaxPerPeer: *relayFwdPerPeer,
+		RelayForwardMaxTotal:   *relayFwdTotal,
+		RelayForwardPeerRate:   relayFwdRate,
 	}
 	if limits.SpeedCap != 0 || limits.MonthlyQuota != 0 {
 		// Echo the declared limits back at startup. An operator who mistyped "20Mb"

@@ -602,7 +602,9 @@ func TestRelayTagWireContract(t *testing.T) {
 // A node's own addresses are in the directory it checks targets against, so
 // "hop:<my own ingress>" passes the allow-list. Splicing it would hand the layer
 // back to this same node, which would peel it and forward it again — one attacker
-// socket becoming two, then four. It is the cheap half of #174.
+// socket becoming two, then four. It is the cheap half of #25, whose other half —
+// the per-previous-hop and aggregate caps that bound a RING rather than a self-dial
+// — is pinned in relay_forward_limits_test.go.
 //
 // Driven through relayForward with a real directory rather than through a unit call
 // on the predicate, so a build that removed the CALL (and not just the function)
