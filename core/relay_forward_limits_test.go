@@ -159,31 +159,47 @@ func TestForwardLimitsClampPerPeerToAggregate(t *testing.T) {
 	}
 }
 
-// TestForwardLimitsForgetIdlePeers pins that the peer map is bounded by live
-// occupancy rather than by how many source addresses an attacker can dial from. A
-// map that outlived its entries would be a memory DoS inside the type that exists
-// to prevent one.
-func TestForwardLimitsForgetIdlePeers(t *testing.T) {
-	f := newForwardLimits(4, 100, 0)
-	releases := make([]func() (uint64, bool), 0, 20)
+// TestForwardLimitsBoundIdleRetention pins that the peer map stays bounded even
+// though issue #72 stops it forgetting a peer the instant its last circuit
+// closes. Before #72 this test pinned "every peer forgotten at zero circuits";
+// that is now wrong on purpose — a peer that reopens before eviction has to
+// find its pace bucket still there (TestForwardLimitsRetainsPaceAcrossReopen is
+// the test for that half) — but the map still must not grow with every address
+// an attacker dials from, which is what this pins instead: retention is bounded
+// and it is the OLDEST idle entries that go, not an arbitrary subset.
+func TestForwardLimitsBoundIdleRetention(t *testing.T) {
+	const total = 5 // small on purpose, so the bound is exercised inside the loop below
+	f := newForwardLimits(4, total, 0)
+
+	// One at a time — acquire then immediately release — so live occupancy never
+	// exceeds 1 regardless of how small `total` is. What grows across iterations
+	// is idle RETENTION, which is the thing under test, not the aggregate cap.
 	for i := range 20 {
-		_, release, _, err := f.acquire(net.JoinHostPort(fmt.Sprintf("203.0.113.%d", i), "0"))
+		key := net.JoinHostPort(fmt.Sprintf("203.0.113.%d", i), "0")
+		_, release, _, err := f.acquire(key)
 		if err != nil {
 			t.Fatalf("acquire %d: %v", i, err)
 		}
-		releases = append(releases, release)
-	}
-	if got := len(f.peers); got != 20 {
-		t.Fatalf("live peers = %d, want 20", got)
-	}
-	for _, release := range releases {
 		release()
 	}
-	if got := len(f.peers); got != 0 {
-		t.Errorf("peers still tracked after every circuit closed = %d, want 0 — the map grows with every address an attacker dials from and is never reclaimed", got)
+	if got := len(f.peers); got > total {
+		t.Fatalf("peers retained after every circuit closed = %d, want <= %d — bounded idle retention (issue #72) must not have become unbounded retention", got, total)
 	}
-	// Refusing a peer must not create an entry for it either, or the same growth
-	// arrives through the refusal path instead of the admission path.
+
+	// LRU, not merely bounded: an operator's most-recently-active neighbours are
+	// the last ones to have gone idle, so they are what should survive a bound
+	// that cannot hold everyone.
+	newest := net.JoinHostPort("203.0.113.19", "0")
+	oldest := net.JoinHostPort("203.0.113.0", "0")
+	if f.peers[newest] == nil {
+		t.Error("the most recently idled peer was evicted; retention is not LRU")
+	}
+	if f.peers[oldest] != nil {
+		t.Error("the longest-idle peer survived past the retention bound; retention is not LRU")
+	}
+
+	// Refusing a peer must still create no entry at all — retention is for a peer
+	// that actually held a circuit, not an excuse to track everyone who knocked.
 	full := newForwardLimits(1, 1, 0)
 	if _, _, _, err := full.acquire("203.0.113.1"); err != nil {
 		t.Fatalf("first: %v", err)
@@ -193,6 +209,66 @@ func TestForwardLimitsForgetIdlePeers(t *testing.T) {
 	}
 	if got := len(full.peers); got != 1 {
 		t.Errorf("peers tracked after 20 REFUSED circuits = %d, want 1 (only the admitted one)", got)
+	}
+}
+
+// TestForwardLimitsRetainsPaceAcrossReopen is the #72 regression at the
+// forwardLimits layer, directly: the SAME *capacity.Limiter — not a fresh one
+// — must come back out of acquire for a peer that reopens before its idle
+// entry is evicted, because a fresh limiter is exactly the free 64KB burst the
+// issue describes. TestForwardingHopRetainsPaceAcrossReopen below is the same
+// property proven through the real forwarding path.
+func TestForwardLimitsRetainsPaceAcrossReopen(t *testing.T) {
+	f := newForwardLimits(4, 100, capacity.Rate(800_000))
+
+	pace1, release, _, err := f.acquire("203.0.113.50")
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	if pace1 == nil {
+		t.Fatal("a nonzero peerRate must build a real pace limiter")
+	}
+	release()
+
+	pace2, release2, _, err := f.acquire("203.0.113.50")
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	defer release2()
+	if pace2 != pace1 {
+		t.Error("a peer that reopened before eviction got a NEW pace limiter — its drained bucket was discarded in favor of a fresh, full one, exactly the leak issue #72 describes")
+	}
+}
+
+// TestForwardLimitsEvictedPeerGetsFreshPace is the other side of the same
+// mechanism: once a peer's idle entry is actually evicted, a later reopen
+// legitimately gets a fresh limiter. Retention is bounded, not permanent, and
+// this pins the boundary rather than assuming the eviction path works because
+// the retention path does.
+func TestForwardLimitsEvictedPeerGetsFreshPace(t *testing.T) {
+	f := newForwardLimits(4, 1, capacity.Rate(800_000)) // maxIdleRetained() == 1
+
+	pace1, release, _, err := f.acquire("203.0.113.60")
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	release()
+
+	// A second, different peer going idle is what evicts the first: the bound is
+	// 1, so it cannot hold both.
+	_, otherRelease, _, err := f.acquire("203.0.113.61")
+	if err != nil {
+		t.Fatalf("other peer acquire: %v", err)
+	}
+	otherRelease()
+
+	pace2, release2, _, err := f.acquire("203.0.113.60")
+	if err != nil {
+		t.Fatalf("second acquire: %v", err)
+	}
+	defer release2()
+	if pace2 == pace1 {
+		t.Error("a peer reopening after its retention bound was exceeded kept the OLD limiter — nothing is actually being evicted")
 	}
 }
 
@@ -387,6 +463,57 @@ func TestForwardingHopPacesOnePreviousHop(t *testing.T) {
 	if elapsed < floor {
 		t.Fatalf("%d KB crossed a hop paced at %s in %v, under the %v the bucket alone would take — the per-previous-hop pace is not applied, so one neighbour can take the whole uplink through circuits the count caps allow",
 			payload/1024, rate, elapsed, floor)
+	}
+}
+
+// TestForwardingHopRetainsPaceAcrossReopen is the #72 regression through the
+// production forwarding path: a previous hop that closes its one circuit and
+// immediately reopens must not get a second free 64KB burst. The bounded-
+// retention arithmetic itself is pinned directly on forwardLimits
+// (TestForwardLimitsRetainsPaceAcrossReopen); this drives the same property
+// through a real close and a real reopen, which is the half that would not
+// notice if the wiring between relayForward and forwardLimits dropped the
+// pace pointer on the floor somewhere in between.
+//
+// The floor logic mirrors TestForwardingHopPacesOnePreviousHop: 64KB rides the
+// bucket's burst for free exactly once. Circuit one spends that burst and
+// closes; if circuit two's bucket is the SAME one — drained, not fresh — its
+// own 64KB has no burst left to ride and is paced the whole way, which is what
+// the floor catches. A bug (a fresh bucket per reopen) can only make circuit
+// two FASTER than the floor, never slower, so a loaded test machine cannot
+// produce a false failure here any more than it can in the test above.
+func TestForwardingHopRetainsPaceAcrossReopen(t *testing.T) {
+	const (
+		rate  = capacity.Rate(800_000) // 800 kbit/s == 100 KB/s
+		burst = 64 * 1024
+		floor = 300 * time.Millisecond // well under the ~640ms a drained bucket needs for another 64KB
+	)
+	sink, sinkAddr := startSink(t)
+	hop, hopAddr, hopKey := startCappedHop(t, sinkAddr, 10, 100, rate)
+
+	first := dialForward(t, hopAddr, hopKey, sinkAddr)
+	<-sink.first
+	if _, err := first.Write(make([]byte, burst)); err != nil {
+		t.Fatalf("write through circuit one: %v", err)
+	}
+	sink.waitBytes(t, burst, 30*time.Second)
+	_ = first.Close()
+	// Wait for the HOP to see the close and release the slot, not just for this
+	// process's Close() to return — those are different events, and racing ahead
+	// would open circuit two before circuit one's pace state has actually been
+	// handed back.
+	waitForwardCount(t, hop, "127.0.0.1", 0)
+
+	second := dialForward(t, hopAddr, hopKey, sinkAddr)
+	defer second.Close()
+	start := time.Now()
+	if _, err := second.Write(make([]byte, burst)); err != nil {
+		t.Fatalf("write through circuit two: %v", err)
+	}
+	sink.waitBytes(t, 2*burst, 30*time.Second)
+	if elapsed := time.Since(start); elapsed < floor {
+		t.Fatalf("circuit two's %d KB crossed a reopened hop in %v, under the %v floor a drained bucket would take — the previous hop's close/reopen got a fresh, full pace bucket instead of resuming its drained one",
+			burst/1024, elapsed, floor)
 	}
 }
 

@@ -96,6 +96,7 @@ package core
 // attempt. It is the single most important behavioural property in this file.
 
 import (
+	"container/list"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -1522,17 +1523,30 @@ type forwardLimits struct {
 	saturated bool // aggregate cap reached; drives the edge-triggered log
 	refused   uint64
 	peers     map[string]*forwardPeer
+	// idle is an LRU of peer keys with circuits == 0, retained past release so a
+	// neighbour that reopens resumes its pace bucket instead of a fresh one
+	// (issue #72). Front is most-recently-idled; back is evicted first. See
+	// retirePeer.
+	idle *list.List
 }
 
-// forwardPeer is one previous hop's live occupancy. It exists only while that peer
-// has at least one circuit up, which is what keeps the map bounded by maxTotal
-// rather than by the number of source addresses an attacker can dial from — an
-// attacker-keyed map that outlived its entries would be its own memory DoS.
+// forwardPeer is one previous hop's occupancy and pace state. Before issue #72 it
+// existed only while that peer had at least one circuit up; now a peer that drops
+// to zero circuits can still be RETAINED — see idleElem — but only up to a bound,
+// which is what keeps the map from growing without limit from the number of
+// source addresses an attacker can dial from rather than from live occupancy.
 type forwardPeer struct {
 	circuits  int
 	pace      *capacity.Limiter // nil (inert) when peerRate is 0
 	saturated bool
 	refused   uint64
+
+	// idleElem is this peer's node in forwardLimits.idle while circuits == 0 —
+	// retained so its pace bucket survives a close/reopen cycle instead of being
+	// rebuilt full (issue #72) — and nil while the peer is live (circuits > 0) or
+	// not tracked at all. A peer that never held a circuit (refused at creation)
+	// never gets one: there is no pace state on it worth preserving.
+	idleElem *list.Element
 }
 
 func newForwardLimits(perPeer, total int, peerRate capacity.Rate) *forwardLimits {
@@ -1555,6 +1569,7 @@ func newForwardLimits(perPeer, total int, peerRate capacity.Rate) *forwardLimits
 		maxTotal:   total,
 		peerRate:   peerRate,
 		peers:      map[string]*forwardPeer{},
+		idle:       list.New(),
 	}
 }
 
@@ -1582,6 +1597,13 @@ func (f *forwardLimits) acquire(peer string) (pace *capacity.Limiter, release fu
 	if p == nil {
 		p = &forwardPeer{pace: capacity.NewLimiter(f.peerRate)}
 		f.peers[peer] = p
+	} else if p.idleElem != nil {
+		// Reactivated before eviction: keep the pace bucket it already had rather
+		// than rebuilding a fresh, full one (issue #72) — a returning neighbour
+		// resumes whatever allowance it had left, exactly as if it had never
+		// dropped to zero circuits.
+		f.idle.Remove(p.idleElem)
+		p.idleElem = nil
 	}
 	if p.circuits >= f.maxPerPeer {
 		first = !p.saturated
@@ -1623,10 +1645,43 @@ func (f *forwardLimits) release(peer string) (refused uint64, ended bool) {
 			p.saturated, p.refused = false, 0
 		}
 		if p.circuits <= 0 {
-			delete(f.peers, peer)
+			f.retirePeer(peer, p)
 		}
 	}
 	return refused, ended
+}
+
+// retirePeer moves peer's zero-circuit entry into the bounded idle LRU instead
+// of deleting it outright (issue #72), so a neighbour that reopens before
+// eviction resumes the pace bucket it had rather than a fresh, full one. Called
+// with f.mu already held.
+//
+// The map stays bounded by maxIdleRetained rather than by the number of
+// distinct keys an attacker can dial from: pushing this peer to the front can
+// take idle past its cap, in which case the LEAST recently idled entry —
+// necessarily some OTHER peer, since this one was just pushed — is evicted from
+// both the list and the map. A one-shot prober's entry ages out under a
+// sustained mix of returning neighbours; a returning neighbour's does not, as
+// long as it comes back before maxIdleRetained other peers have gone idle
+// ahead of it.
+func (f *forwardLimits) retirePeer(peer string, p *forwardPeer) {
+	p.idleElem = f.idle.PushFront(peer)
+	for f.idle.Len() > f.maxIdleRetained() {
+		back := f.idle.Back()
+		if back == nil {
+			break
+		}
+		f.idle.Remove(back)
+		delete(f.peers, back.Value.(string))
+	}
+}
+
+// maxIdleRetained bounds how many zero-circuit peers keep their pace bucket
+// alive at once. Tied to maxTotal — the aggregate scale the operator already
+// configured — rather than a new knob: an attacker cannot grow retained state
+// past what the node's own circuit cap already lets it hold live at once.
+func (f *forwardLimits) maxIdleRetained() int {
+	return f.maxTotal
 }
 
 // counts reports live occupancy for peer and in aggregate. Tests read it; nothing
