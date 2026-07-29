@@ -1,6 +1,6 @@
 # 43. The coordinator enforces signed network policy it cannot author, and fails closed when it goes stale
 
-- Status: accepted (issue #39); amended (issue #15 — see the amendment at the end)
+- Status: accepted (issue #39); amended (issue #15, issue #67 — see the amendments at the end)
 - Date: 2026-07-28
 
 ## Context
@@ -146,6 +146,11 @@ No lookup is built for them on this side; the account service resolves the tier 
 and stamps the numbers into credentials, and this coordinator enforces a number it is
 handed.
 
+> **The `tiers` half of this decision was reversed — see the amendment (issue #67) at
+> the end of this document.** The `vouch` half stands unchanged: the coordinator still
+> never scores trust and never sees the vouch graph. The paragraph above is kept as the
+> record of what was decided in #39, not as a description of current behaviour.
+
 ## Consequences
 
 - A coordinator with `-policy-root-pubkey` set and no reachable policy source
@@ -245,3 +250,67 @@ it.
 Enforcing this floor therefore needs a new byte-valued field on the register wire,
 which reverses an explicit ADR-0040 privacy decision. That is deferred to its own card
 rather than smuggled in here. The field is parsed and validated; nothing reads it.
+
+---
+
+## Amendment (issue #67) — the network reads the `tiers` table; the credential carries only the key
+
+§6 above decided that the account service resolves the tier table and stamps the
+resulting numbers into a credential, and that this repository would never build a
+lookup for `tiers`. **That half is reversed.** The division is now:
+
+- the **signed policy** carries the limits — `speed_cap_bps`, `priority`, `endpoint_quality`, per `(trust, plan)` row;
+- the **credential** carries only the `(trust, plan)` pair that indexes them;
+- the **network** — coordinator and exit — resolves the pair against the policy it already holds and enforces what it finds.
+
+The producer side of this shipped in `bacchus-payment#6`: an issued credential now
+carries `trust` and `plan` and does not carry limits. The consumer side is **#58**,
+which is where `core/admission.Credential` grows the matching fields and the
+coordinator and exit start resolving them. This amendment records the ruling so the
+public repository states it before #58 rather than after.
+
+### Why this direction
+
+§6's arrangement made every limit a **number frozen at issuance**. A credential minted
+under one policy keeps enforcing that policy for its whole lifetime, so changing a
+tier's speed cap could not take effect until every outstanding credential had aged
+out — and the network had no way to know which policy any given credential was
+stamped under. Carrying the key instead means the limits are resolved from the
+document the network already re-fetches, re-verifies and fails closed on (§2, §3), so
+a re-signed policy takes effect at its own cadence and the sequence floor and grace
+window that protect every other number protect these too.
+
+It also removes a signed assertion the network had no way to check. Under §6 the
+coordinator enforced a speed cap it was handed and could not verify was the one the
+operator's own policy specified; now it enforces one it read out of a document it
+verified against the policy root itself.
+
+The cost is that a credential is no longer self-contained: an enforcer without a
+policy cannot resolve a tier at all. That is the correct failure and it is already
+this ADR's standing rule — a coordinator with `-policy-root-pubkey` set and no
+policy held **assigns nothing** (§3, Consequences). There is no state in which a
+missing policy silently means "no limits".
+
+### An unknown `(trust, plan)` pair is an error, never a default
+
+`Policy.Limits` already implements this and its doc already says why; the rule is
+restated here because it is the one place this reversal could turn into a hole rather
+than an outage.
+
+A zero `TierLimit` means **uncapped** — zero `SpeedCapBps` is "no cap", zero
+`EndpointQuality` "admits anything". So a permissive fallback row would hand full
+speed and unrestricted endpoint access to exactly the credential whose tier nobody
+signed a policy row for: the failure mode is silent, and it opens at the moment
+someone ships a new plan and forgets the policy. A restrictive fallback is not the
+answer either — it is an outage with no diagnosable cause, since the enforcer would be
+applying a number that appears nowhere in the signed document.
+
+Both are refused. The lookup returns `ErrUnknownTier` naming the missing pair, and
+#58 decides how each surface reports it — but not by substituting a number.
+
+### What this does not change
+
+- **`vouch` is still parsed, validated, and unread here.** The coordinator does not score trust and does not see the vouch graph. Nothing in this amendment gives it a reason to.
+- **`Policy.Limits` is unchanged.** It was already correct; what was wrong was the surrounding documentation asserting nothing would ever call it.
+- **No wire change in this repository, and none in this change.** `core/admission.Credential` gains its fields in #58.
+- **`min_declared_quota_bytes` is still enforced by nothing**, for the reason the #15 amendment gives above.

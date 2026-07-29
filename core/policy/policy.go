@@ -194,11 +194,16 @@ type Backpressure struct {
 
 // Vouch holds the social-vouch parameters, read by the ACCOUNT SERVICE.
 //
-// The coordinator receives these fields and has NO use for either them or Tiers:
-// it never scores trust and never sees the vouch graph. They are parsed and
-// validated here because they are part of the signed document and a malformed one
-// must be refused whole — not because anything in this repository reads them.
-// Deliberately no lookup helper is built for them on this side.
+// The coordinator receives these fields and has no use for them: it never scores
+// trust and never sees the vouch graph. They are parsed and validated here because
+// they are part of the signed document and a malformed one must be refused whole —
+// not because anything in this repository reads them. Deliberately no lookup helper
+// is built for Vouch on this side.
+//
+// This says nothing about Tiers, which is a different case (ADR-0043's issue #67
+// amendment): the network DOES resolve the tier table, and Limits is its lookup
+// helper. An earlier version of this comment grouped the two together and was
+// wrong about the second.
 type Vouch struct {
 	// K is the number of distinct stable vouchers required to admit one new member.
 	K int `json:"k"`
@@ -223,20 +228,30 @@ type Vouch struct {
 	AdmitCapPerPeriod int `json:"admit_cap"`
 }
 
-// TierLimit maps one (Trust, Plan) pair to the limits the account service stamps
-// into a credential, read by the ACCOUNT SERVICE.
+// TierLimit maps one (Trust, Plan) pair to the limits that pair is entitled to,
+// read by the NETWORK (ADR-0043's issue #67 amendment).
 //
-// The limits are computed there and stamped; they are never computed by the
-// network. The coordinator enforces a number it is handed and never learns how it
-// was derived.
+// The limits live here, in the signed policy, and are resolved by whoever enforces
+// them — see Limits. A credential carries only the (trust, plan) pair that indexes
+// this table, never the numbers themselves, so re-signing the policy changes what a
+// tier gets without waiting for every outstanding credential to age out, and an
+// enforcer applies a number it verified against the policy root rather than one it
+// was handed.
+//
+// Note what this makes a zero value mean: an absent row is NOT an unprivileged
+// tier, because zero here reads as "uncapped" on two of the three fields. Limits
+// therefore refuses an unknown pair rather than returning this struct's zero value.
 type TierLimit struct {
 	// Trust is the earned tier. Closed vocabulary — see Trust.
 	Trust Trust `json:"trust"`
 
 	// Plan is the purchased plan, an opaque operator label. Deliberately NOT closed,
-	// unlike Trust: plans are commercial, change without any protocol change, and
-	// never reach the network. The empty string is a legitimate plan name meaning
-	// "no paid plan", spelled explicitly rather than being the absence of a row.
+	// unlike Trust: plans are commercial and a new one is a new row in a re-signed
+	// policy, never a protocol change. It DOES reach the network — it is half the
+	// key a credential carries (ADR-0043's issue #67 amendment) — but only ever as
+	// an opaque label to match on; nothing here interprets it. The empty string is a
+	// legitimate plan name meaning "no paid plan", spelled explicitly rather than
+	// being the absence of a row.
 	Plan string `json:"plan"`
 
 	// SpeedCapBps is the per-session cap the exit shapes to, in bits per second.
@@ -267,9 +282,11 @@ type TierKey struct {
 // nobody could diagnose. The error names the missing pair, and both failure modes
 // become one loud one.
 //
-// Nothing in this repository calls this — the coordinator never resolves a tier.
-// It exists because the lookup rule is part of the format, and a porter reading
-// only this package should not have to infer that an unknown pair is fatal.
+// Nothing in this repository calls this YET. #58 is where the coordinator and the
+// exit start resolving a credential's (trust, plan) pair through it; until then the
+// table is parsed, validated and unread. That is a statement about what has been
+// built, not about what belongs here — an earlier version of this comment said the
+// coordinator never resolves a tier, which ADR-0043's issue #67 amendment reversed.
 func (p Policy) Limits(trust Trust, plan string) (TierLimit, error) {
 	for _, t := range p.Tiers {
 		if t.Trust == trust && t.Plan == plan {
@@ -338,7 +355,7 @@ func (p Policy) Validate() error {
 		return fmt.Errorf("%w: negative admission cap %d", ErrInvalid, p.Vouch.AdmitCapPerPeriod)
 	}
 	if len(p.Tiers) == 0 {
-		return fmt.Errorf("%w: no tier limits (the account service could stamp nothing)", ErrInvalid)
+		return fmt.Errorf("%w: no tier limits (no credential's (trust, plan) pair could resolve)", ErrInvalid)
 	}
 	seen := make(map[TierKey]struct{}, len(p.Tiers))
 	for _, t := range p.Tiers {
