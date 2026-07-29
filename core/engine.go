@@ -304,8 +304,10 @@ type Config struct {
 	// is not engaged at all, and this field costs exactly nothing. 2 and above opt
 	// into a client-assembled onion (core/relaychain.go): the client telescopes
 	// Noise_NK layers through hops IT picks from the signed directory, naming each
-	// hop's successor only inside the previous hop's encrypted stream. Values above
-	// RelayHopsMax are clamped, with a logged notice.
+	// hop's successor only inside the previous hop's encrypted stream. A value above
+	// RelayHopsMax is refused at construction rather than clamped — the same
+	// silent-downgrade rule the last paragraph below states, applied to the knob
+	// itself, and enforced in exactly one place (setupRelayChaining).
 	//
 	// It applies only once the selection ladder has reached the relay tier —
 	// direct paths are unaffected, since there is no relay to chain. Depth is
@@ -463,9 +465,12 @@ type Config struct {
 }
 
 // RelayHopsMax is the hard ceiling on Config.RelayHops (ADR-0038 §6). The client
-// clamps its own knob and cannot be coerced past it, because the client — not the
+// bounds its own knob and cannot be coerced past it, because the client — not the
 // coordinator — builds the onion and a coordinator never sees or writes the inner
-// layers, so it has nowhere to inject an extra hop.
+// layers, so it has nowhere to inject an extra hop. ADR-0038 §6 calls that
+// "client-clamped", meaning only that the bound is the client's to enforce: what
+// enforcement DOES is refuse at construction, never shorten a chain (see
+// Config.RelayHops).
 //
 // Four is well past the point of diminishing anonymity returns for a low-latency
 // system: the property multi-hop buys is "no SINGLE relay sees both endpoints,"
