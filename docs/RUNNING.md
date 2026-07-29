@@ -153,8 +153,9 @@ go run ./cmd/asn-stage -in ip2asn-combined.tsv.gz -out core/asn/table.tsv.gz -gz
 go test ./core/asn/ ./core/
 ```
 
-Then update the retrieval date, hashes and row counts in `core/asn/TABLE.md`, and
-commit the regenerated table with them.
+Then, in the same commit, set `TableRetrieved` in `core/asn/embedded.go` to today and
+update the retrieval date, hashes and row counts in
+[`core/asn/TABLE.md`](../core/asn/TABLE.md).
 
 `asn-stage` turns upstream's address **ranges** into the **disjoint CIDR prefixes**
 `asn.Load` requires: it drops the unused country and description columns, drops the
@@ -165,13 +166,17 @@ output — which is what lets a reviewer re-run it and compare against the commi
 file. The download is a separate manual step on purpose, so the transform itself
 stays hermetic.
 
-**Cadence is a security parameter, and this step has no automation behind it yet.**
-The mapping drifts ~1.3% per month and ~3.6% per quarter, so a client that has not
-been rebuilt in a year mis-scores roughly one AS verdict in nine. It degrades
-*safely* — a stale answer falls into the unknown-pooling rule, never into a false
-claim of diversity — but it degrades. When the signed release channel (#34) lands and
-brings a release checklist with it, this belongs in that checklist; until then it
-lives here and in `TABLE.md`.
+**Cadence is a security parameter, and CI enforces a floor under it.** The mapping
+drifts ~1.3% per month and ~3.6% per quarter, so a client that has not been rebuilt in
+a year mis-scores roughly one AS verdict in nine. It degrades *safely* — a stale
+answer falls into the unknown-pooling rule, never into a false claim of diversity —
+but it degrades. `TestEmbeddedTableIsFresh` fails once the committed table is more
+than **90 days** old, matching both the GeoIP threshold above and the quarterly
+cadence ADR-0044 §6 costed.
+
+That check is a floor, not a schedule: it tells you the table has gone stale, it does
+not refresh anything. Wiring the refresh into the release process proper belongs with
+the signed release channel (#34) and is tracked separately.
 
 ## Transport selection
 `-transport` picks the session transport (ADR-0008): `webrtc` (default; UDP/DTLS

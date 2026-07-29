@@ -253,8 +253,9 @@ func TestParseToleratesFreeTextDescriptions(t *testing.T) {
 		"192.0.2.0/24\t64496")
 }
 
-// TestFamilyFilter covers -family, the switch ADR-0044 §6 costed as the v4-only
-// fallback if binary size were ever pressing.
+// TestFamilyFilter covers -family. ADR-0044's second amendment §2 declined the
+// IPv4-only reduction on measurement (0.65 MB saved, every IPv6 hop blinded), so this
+// covers a diagnostic switch rather than a shipping configuration — both families ship.
 func TestFamilyFilter(t *testing.T) {
 	feed := strings.Join([]string{
 		"192.0.2.0\t192.0.2.255\t64496\tZZ\tdoc",

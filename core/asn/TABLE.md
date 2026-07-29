@@ -79,10 +79,22 @@ public routing table, which is exactly why it identifies nothing about Bacchus.
 ```bash
 curl -O https://iptoasn.com/data/ip2asn-combined.tsv.gz
 go run ./cmd/asn-stage -in ip2asn-combined.tsv.gz -out core/asn/table.tsv.gz -gzip
+sha256sum ip2asn-combined.tsv.gz core/asn/table.tsv.gz
 go test ./core/asn/ ./core/
 ```
 
-Then update the retrieval date, both hashes and the row counts above.
+Then, in the same commit:
+
+1. Set `TableRetrieved` in [`embedded.go`](embedded.go) to today's date. **This is not
+   optional bookkeeping** — `TestEmbeddedTableIsFresh` reads it and fails once the
+   table is more than 90 days old, so leaving it behind either hides a stale table or
+   fails CI on a table that is actually fresh.
+2. Update the retrieval date, both hashes and the row counts in the tables above.
+
+The date is a hand-maintained constant rather than something `asn-stage` stamps into
+the file, and that is deliberate: a tool that writes "today" into its output produces
+different bytes every run, which would destroy the determinism the whole
+regenerate-and-compare check rests on.
 
 The fetch is deliberately a separate manual step rather than something the tool does:
 that is what keeps `asn-stage` hermetic — file in, file out — so a reviewer can re-run

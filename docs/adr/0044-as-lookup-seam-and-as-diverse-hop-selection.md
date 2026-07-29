@@ -182,10 +182,26 @@ trusted stream is fed.
 
 ### 6. **OPEN — how the table ships and refreshes**
 
-> **Superseded: this was ruled on — option A. See the amendment at the end.** The
+> **Superseded: this was ruled on — option A. See the amendments at the end.** The
 > section is kept as written because the measured evidence is what the ruling rests
 > on, and a decision is only auditable while the numbers that produced it are still
 > readable.
+>
+> **Two figures below did not survive contact with the shipped form. Do not quote
+> them as the cost of this decision.**
+>
+> - **"~1.4 MB compressed" is not what a client carries. The shipped table is
+>   3.14 MB.** The 1.38 MB row is a correct measurement of a *delta-varint binary*
+>   encoding of *ranges* — a form this project did not adopt, because it would have
+>   put a custom decoder in front of a security-relevant parser. What ships is gzipped
+>   **text** holding **disjoint CIDR prefixes**, and *both* differences cost bytes: an
+>   arbitrary range is not one prefix, so 494,257 ranges become 700,442 prefixes. The
+>   figure below is therefore accurate about a thing that was measured and misleading
+>   about the thing that was built. The second amendment §1 has the full table.
+> - **"IPv4-only (1.07 MB)" is no longer a live option.** It was offered here as a
+>   further reduction "if binary size is pressing". Measured on the shipped form the
+>   saving is 0.65 MB — about a fifth — in exchange for resolving *every* IPv6 hop to
+>   unknown. That trade was declined; both families ship. See the second amendment §2.
 
 **This is the owner's decision and this record does not make it.** What follows is
 measured evidence and a recommendation.
@@ -457,7 +473,32 @@ lookup. Parsing is lazy and happens at most once per process (`sync.OnceValues`)
 which is load-bearing rather than tidy — the relay directory *reloads* on an interval
 (#27), and every reload asks for this table.
 
-### 2. The source: iptoasn.com, PDDL v1.0, confirmed at the source
+### 2. Both address families ship — the IPv4-only reduction is declined
+
+§6 kept a size lever alive: *"Shipping IPv4-only first (1.07 MB) is a reasonable
+further reduction if binary size is pressing, at the cost of resolving every IPv6 hop
+to unknown."* Measured on the form actually shipped, that trade is worse than it
+looked, and it is **declined**.
+
+| | gzip | IPv6 hops resolvable |
+|---|---|---|
+| **both families — shipped** | **3.14 MB** | yes |
+| IPv4 only | 2.49 MB | **no** |
+
+**0.65 MB — about a fifth — to make the control blind on IPv6.** Every IPv6 hop would
+resolve to unknown, which §3 pools into a single bucket contributing no diversity. That
+is *safe*, in the sense that it never becomes a false claim of diversity, but a control
+that cannot see half the address space is not doing the job #23 asked for, and a
+v6-heavy directory would degrade straight through to the operator-only rung.
+
+§6 conditioned the reduction on binary size being **pressing**. At 3.14 MB in a desktop
+binary it is not, and 0.65 MB does not change that. Both families ship.
+
+`cmd/asn-stage` keeps a `-family` flag, and this does not reopen the option: it is a
+measurement and diagnostic capability — it is how the row above was produced, and how a
+future re-measurement would be — not a supported shipping configuration.
+
+### 3. The source: iptoasn.com, PDDL v1.0, confirmed at the source
 
 §6 measured "a public BGP-derived range→ASN dataset" without naming one, and the first
 amendment named `iptoasn.com` as the obvious candidate **to be confirmed at the
@@ -491,7 +532,7 @@ commit a bulk dataset: `.gitignore` excludes MaxMind's database because its term
 not ours to redistribute under. This table is committed because PDDL says it can be.
 **The deciding factor is the licence, not the size.**
 
-### 3. What shipped
+### 4. What shipped
 
 - **`cmd/asn-stage`** — the staging transform, as the first amendment required ("the
   transform becomes a shipped tool, not a local script"). Upstream ranges → disjoint
@@ -512,7 +553,7 @@ not ours to redistribute under. This table is committed because PDDL says it can
   a knob to describe a constant. `core/engine.go` is unchanged by this work.
 - **The refresh procedure**, in `docs/RUNNING.md` and `core/asn/TABLE.md`.
 
-### 4. On gaps: the guard is arithmetic, not bookkeeping
+### 5. On gaps: the guard is arithmetic, not bookkeeping
 
 §6 required unrouted gaps to stay explicit "so a lookup returns *unknown* rather than
 inheriting a neighbour's AS". In a prefix table that requirement is met by **omitting**
@@ -530,7 +571,7 @@ threading AS0 rows through the merge as sentinels; the tests pass identically wi
 them, because the arithmetic was doing the work throughout. The sentinel logic was
 removed rather than left in as reassurance.
 
-### 5. What this closes, and what it does not
+### 6. What this closes, and what it does not
 
 **Closed.** #23's client-side property is delivered. A client build resolves real hop
 addresses to real autonomous systems; `selectHops` refuses a chain placing two hops in
@@ -545,9 +586,25 @@ bytes are here.
 - **C and E remain the upgrade path, not superseded.** A signed out-of-band correction
   still wants a delivery channel that does not exist. When #34 lands, correcting a bad
   table without shipping a release becomes worth building.
-- **The refresh is a manual step with no automation behind it.** It is recorded in two
-  places and enforced by neither. When #34 brings a release checklist, it belongs
-  there — this amendment does not pretend a documented step is a guaranteed one.
+- **The refresh is manual, but no longer unenforced.** `core/asn.TableRetrieved`
+  records when the committed table was downloaded, and `TestEmbeddedTableIsFresh`
+  fails once that is more than 90 days old — the same threshold `core/geoip` uses and
+  the quarterly cadence §6 costed. The check is a **floor, not a schedule**: it says
+  the table has gone stale, it does not refresh anything, and performing the refresh
+  remains a documented human step.
+
+  The date is a hand-maintained constant rather than something `asn-stage` stamps into
+  the table, because a tool writing "today" into its output would differ on every run
+  and destroy the determinism that makes the committed table reviewable at all.
+
+  The check runs in CI rather than at client startup, which is where it diverges from
+  `core/geoip`'s otherwise identical warning. GeoIP warns an **operator**, who can go
+  and stage a fresher file. Nobody can act on this one at runtime — the table is fixed
+  in the binary, and only whoever cuts the next release can change it — so warning a
+  user would tell the wrong audience about a problem they have no lever on.
+
+  Wiring the refresh into the release process proper still belongs with #34, and is
+  tracked separately rather than assumed.
 - **Release cadence remains a security parameter**, on §6's numbers: ~1.3% drift per
   month, ~3.6% per quarter, degrading toward §3's unknown handling rather than toward
   a false claim of diversity.
@@ -556,7 +613,7 @@ bytes are here.
   without a client release — and #52's design of one seam with two independent
   implementations is what makes that unremarkable.
 
-### 6. Consequences
+### 7. Consequences
 
 - **Every clone now carries 3.14 MB of third-party data, permanently.** This was ruled
   in the first amendment and is restated because it is now real rather than prospective.

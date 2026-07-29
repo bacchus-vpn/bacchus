@@ -3,6 +3,7 @@ package asn
 import (
 	"net/netip"
 	"testing"
+	"time"
 )
 
 // The embedded table (issue #55) is deliberately tested THINLY.
@@ -99,6 +100,52 @@ func TestEmbeddedTableReturnsUnknownForUnroutableSpace(t *testing.T) {
 		if as, ok := tab.LookupAS(netip.MustParseAddr(s)); ok {
 			t.Errorf("LookupAS(%s) = %s, want unknown — no AS announces this space", s, as)
 		}
+	}
+}
+
+// tableMaxAge is how stale the committed table may get before CI says so.
+//
+// 90 days, which is both core/geoip's staleness threshold and the quarterly cadence
+// ADR-0044 §6 measured: at ~1.3% drift per month the error is near 3.6% at this point,
+// which §6 treats as the acceptable operating range for an embedded table. A project
+// shipping quarterly never sees this fire; one that has not shipped in a quarter is
+// exactly the case where somebody should be told.
+const tableMaxAge = 90 * 24 * time.Hour
+
+// TestEmbeddedTableIsFresh is the forcing function behind "refreshed per release".
+//
+// Before this existed the refresh was written down in two places and enforced by
+// neither, which made it folklore: nothing in the repository could even tell you the
+// table was old, because the retrieval date lived only in TABLE.md prose and the gzip
+// header's mtime is deliberately zeroed for determinism.
+//
+// It FAILS rather than logs. A t.Log on a passing test is invisible without -v, so a
+// warning here would be indistinguishable from no check at all. The cost of failing is
+// real and worth naming: once the table goes stale this blocks unrelated work until
+// somebody refreshes it. That is the intended pressure — the threshold is generous
+// enough that hitting it means the table genuinely is out of the range ADR-0044
+// costed, and the message says exactly what to run.
+func TestEmbeddedTableIsFresh(t *testing.T) {
+	retrieved, err := time.Parse(time.DateOnly, TableRetrieved)
+	if err != nil {
+		t.Fatalf("TableRetrieved = %q, which is not a YYYY-MM-DD date: %v", TableRetrieved, err)
+	}
+	if retrieved.After(time.Now()) {
+		t.Fatalf("TableRetrieved = %s is in the future; was it typed rather than taken from the refresh?", TableRetrieved)
+	}
+	if age := time.Since(retrieved); age > tableMaxAge {
+		t.Errorf(`the committed IP→AS table was retrieved %s, %d days ago (limit %d).
+
+At ~1.3%% drift per month it is now roughly %.1f%% wrong, which is outside the range
+ADR-0044 costed for an embedded table. Refresh it:
+
+    curl -O https://iptoasn.com/data/ip2asn-combined.tsv.gz
+    go run ./cmd/asn-stage -in ip2asn-combined.tsv.gz -out core/asn/table.tsv.gz -gzip
+
+then set TableRetrieved in core/asn/embedded.go to today and update the hashes and row
+counts in core/asn/TABLE.md.`,
+			TableRetrieved, int(age.Hours()/24), int(tableMaxAge.Hours()/24),
+			1.3*age.Hours()/24/30)
 	}
 }
 

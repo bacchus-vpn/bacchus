@@ -17,8 +17,14 @@ go run ./cmd/asn-stage -in ip2asn-combined.tsv.gz -out core/asn/table.tsv.gz -gz
 go test ./core/asn/ ./core/
 ```
 
-Then update the retrieval date, hashes and row counts in
-[`core/asn/TABLE.md`](../../core/asn/TABLE.md).
+Then, in the same commit, set `TableRetrieved` in
+[`core/asn/embedded.go`](../../core/asn/embedded.go) to today and update the retrieval
+date, hashes and row counts in [`core/asn/TABLE.md`](../../core/asn/TABLE.md).
+
+`TestEmbeddedTableIsFresh` reads that constant and fails once the table is more than
+90 days old, so the refresh is enforced rather than merely documented. The tool does
+**not** stamp the date into the table itself: writing "today" into the output would
+make it differ on every run and destroy the determinism below.
 
 | flag | |
 |---|---|
@@ -27,10 +33,12 @@ Then update the retrieval date, hashes and row counts in
 | `-gzip` | gzip the output at best compression |
 | `-family` | `both` (default), `v4`, or `v6` |
 
-`-family v4` is ADR-0044 §6's costed fallback if binary size ever becomes pressing:
-~2.49 MB instead of ~3.14 MB, at the cost of resolving every IPv6 hop to unknown —
-which the unknown-pooling rule handles safely, but which makes the control inert for a
-v6-heavy fleet.
+`-family` is a **measurement and diagnostic** switch, not a shipping configuration.
+ADR-0044 §6 once offered IPv4-only as a size reduction; its second amendment §2
+declined it on measurement — 2.49 MB instead of 3.14 MB, a saving of 0.65 MB in
+exchange for resolving *every* IPv6 hop to unknown and blinding the diversity control
+on half the address space. **Both families ship.** The flag remains because it is how
+that comparison is produced and how it would be re-measured.
 
 ## What it does
 

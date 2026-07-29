@@ -34,6 +34,31 @@ import (
 //go:embed table.tsv.gz
 var embeddedGz []byte
 
+// TableRetrieved is the date table.tsv.gz was downloaded from upstream, in RFC 3339
+// date form. **Update it whenever the table is refreshed** — TestEmbeddedTableIsFresh
+// fails once it is more than tableMaxAge old.
+//
+// # Why this is a hand-maintained constant and not something the tool stamps
+//
+// asn-stage could write the date into the table itself, and that would be one less
+// step to forget. It would also destroy the property the staging tool exists to have:
+// determinism. ADR-0044 committed the table specifically so a reviewer can regenerate
+// it from the same feed and compare bytes; a tool that stamps "today" produces a
+// different file every day and makes that check impossible. So the date lives beside
+// the data rather than inside it, and the transform stays a pure function of its input.
+//
+// # Why the check is in a test rather than at startup
+//
+// core/geoip's staleness warning fires at coordinator startup, which is right there
+// because an OPERATOR can act on it — they go and stage a fresher file. Nobody can act
+// on this one at runtime: the table is fixed in the binary, and the only party who can
+// refresh it is whoever cuts the next release. Warning a user about a table they
+// cannot replace tells the wrong audience about a problem they have no lever on.
+//
+// So the check runs where the person who CAN act will see it: in CI, before a release
+// carries a stale table.
+const TableRetrieved = "2026-07-29"
+
 // embeddedOnce parses the embedded table at most once per process.
 //
 // Once matters more than it looks. The table is ~700k rows and costs roughly 190 ms
