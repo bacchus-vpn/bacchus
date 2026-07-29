@@ -17,6 +17,12 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 )
 
+// wire's Challenge/DeviceCred/IssuerCert/DeviceAssert fields (issue #50/#51,
+// ADR-0045) are built by presentDeviceCredential and awaited by awaitChallenge,
+// both in core/devicecred_connect.go — kept out of this already-large file, but
+// splicing into attemptWith's connect message right here, the one chokepoint
+// every client path (single-transport and pool) funnels through.
+
 // CountryInfo is one country the coordinator will assign exits in, and the whole of
 // what a client learns about the network's shape (issue #146, ADR-0042).
 //
@@ -830,6 +836,21 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	// Taken after the drain and before the send, so it counts only what THIS attempt
 	// drew (issue #5).
 	mark := l.unroutableMark()
+
+	// Device-credential presentation (issue #50/#51, ADR-0045): answers the
+	// coordinator's connect-time entitlement gate when this client has a
+	// credential to present, and degrades to a plain connect (every field below
+	// stays "") when it does not — see presentDeviceCredential. started measures
+	// only this phase, so a slow or silent challenge round trip shrinks
+	// awaitSession's remaining budget below rather than silently extending the
+	// caller's overall deadline for this attempt.
+	started := time.Now()
+	fields, _ := e.presentDeviceCredential(ctx, l, timeout)
+	sessionTimeout := timeout - time.Since(started)
+	if sessionTimeout < time.Second {
+		sessionTimeout = time.Second
+	}
+
 	l.sendN(wire{
 		Type:            "connect",
 		Country:         req.wireCountry(),
@@ -838,9 +859,13 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 		Nonce:           nonce,
 		Cred:            e.cfg.AdmissionCred,
 		ExcludeSessions: req.exclude,
+		Challenge:       fields.challenge,
+		DeviceCred:      fields.cred,
+		IssuerCert:      fields.issuerCert,
+		DeviceAssert:    fields.assert,
 	}, 3)
 
-	reply, res := e.awaitSession(ctx, l, timeout)
+	reply, res := e.awaitSession(ctx, l, sessionTimeout)
 	switch res {
 	case pairSilent:
 		// Silence and "answered unintelligibly" are the same non-event to a leg
