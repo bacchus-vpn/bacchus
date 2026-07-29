@@ -24,6 +24,32 @@ const (
 	RoleExit   Role = "exit"
 )
 
+// AllRoles returns every role this build understands, in a fixed order. It is
+// also what a single anchored authority is trusted for — NewVerifier, and the
+// coordinator's -admission-pubkey, both mean "this one key, every role" (issue
+// #64).
+//
+// ADDING A ROLE MEANS ADDING IT HERE. A role left out of this list is one that
+// a single-key deployment silently stops admitting, and the omission would show
+// up as an unexplained rejection rather than as a build failure.
+//
+// It returns a fresh slice each call so no caller can edit the canonical set out
+// from under another.
+func AllRoles() []Role { return []Role{RoleClient, RoleRelay, RoleExit} }
+
+// Known reports whether r is a role this build understands. The coordinator's
+// flag parser uses it to reject a typo at startup rather than anchoring an
+// authority for a role string nothing will ever ask for — an authority scoped to
+// "exists" would look configured and admit nothing.
+func (r Role) Known() bool {
+	for _, k := range AllRoles() {
+		if r == k {
+			return true
+		}
+	}
+	return false
+}
+
 // CredentialVersion is the wire/format version of a Credential's signed body.
 // Bump it on any breaking change to the field set; parse rejects anything else
 // so an old coordinator never silently misreads a newer credential.
@@ -87,6 +113,7 @@ var (
 	ErrRoleNotAuthorized  = errors.New("admission: credential does not authorize this role")
 	ErrSubjectMismatch    = errors.New("admission: credential subject does not match node id")
 	ErrRevoked            = errors.New("admission: credential revoked")
+	ErrNoAuthorityForRole = errors.New("admission: no anchored authority admits this role")
 )
 
 // signedLen is the fixed ed25519 signature size; Sign appends exactly this many

@@ -64,6 +64,19 @@ var errMissingExitCredential = errors.New("core: exit presented no admission cre
 //
 // now is passed in rather than read here so tests use a fixed clock,
 // matching verifyExitCredential; New passes the wall clock.
+//
+// The anchor here stays ONE key while the coordinator's became a role-scoped set
+// (issue #64, ADR-0047), and that asymmetry is deliberate rather than unfinished.
+// The coordinator has to tell two issuers apart because it admits every role from
+// both. A client does not: its only Verify call is admission.RoleExit, the
+// authority that mints exit credentials is the operator, and a coldstart invite
+// carries exactly one AdmissionKey (core/coldstart, the v2/v3 shape) — so the one
+// key it already holds is the one authority it needs. admission.NewVerifier
+// anchors it for every role, which costs nothing here: a credential is still
+// admitted only if its own Roles field authorizes RoleExit and its Subject is
+// this exit's key. Should a client ever need a second authority — a separate
+// relay anchor for per-hop verification, issue #26 — this becomes an
+// admission.NewAuthoritySetVerifier call and nothing else about the path moves.
 func buildExitVerifier(pubKeyHex, crlEncoded, crlPath string, requireCRL bool, now time.Time) (*admission.Verifier, *admission.ClientCRL, error) {
 	pubKeyHex = strings.TrimSpace(pubKeyHex)
 	crlEncoded = strings.TrimSpace(crlEncoded)
