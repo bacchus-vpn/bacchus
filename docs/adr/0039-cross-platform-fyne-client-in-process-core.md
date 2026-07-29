@@ -438,3 +438,78 @@ this one doesn't.
 - This does not require #35 to resolve first. It only requires accepting that
   `clients/fyne` is getting a country picker regardless of what happens to
   `clients/windows` — which is already true under every option on the table.
+
+## Amendment (2026-07-29): #35 is ruled — Fyne everywhere, `clients/windows` retires at parity
+
+The amendment above set out the evidence, the parity bar and the seam, and explicitly
+declined to choose. This is the choice.
+
+### Decision
+
+**Option 1. `clients/fyne` becomes the client on all three desktop platforms.
+`clients/windows` is retired — not now, but once Fyne clears the eight-point parity
+bar above on Windows.** Owner, 2026-07-29: *"We finish fyne, drop the old one when we
+will have all functionality in the new one."*
+
+Three consequences follow immediately, and they are the whole reason #35 blocked
+three cards:
+
+1. **The eight-point parity bar above is now binding, not hypothetical.** Every "if
+   Option 1 is chosen" in it reads as "is". A platform ships enforcement when it
+   clears all eight; `clients/windows` is retired when *Windows* clears all eight.
+   The bar's own closing sentence — that a partial `Enforcer` shipped as parity is
+   this ADR's Scope-section lie wearing a new platform — is now a rule rather than a
+   caution.
+2. **`clients/internal/enforcement` is the architecture, not a proposal.** `[E9]`
+   (#36) and `[E10]` (#37) implement `Enforcer` for their platforms. They are two
+   backends behind one interface, not two clients.
+3. **#16 `[E3]` is built in Fyne.** The recommendation above becomes the instruction;
+   under this option a Fyne picker is immediately the Windows picker too, so there is
+   no throwaway.
+
+### What "drop the old one" does *not* mean
+
+`clients/windows` is not deprecated today and does not stop being maintained today.
+It is the only thing on any platform that actually routes a device, and it stays the
+answer on Windows until the bar is cleared. Retirement is an event with a written
+trigger, and the trigger is the bar — not a date, not "when Fyne feels ready", and
+not the first release in which Fyne can connect.
+
+That distinction is the one this decision is most likely to lose. "Fyne everywhere"
+read as "stop working on the walk client" would leave every platform with a client
+that routes nothing, which is strictly worse than the position this ADR started in.
+
+### The work this creates, and where it is tracked
+
+Choosing Option 1 turns the 652 lines the amendment above identified —
+`routes.go` + `killswitch.go` — into three separate implementations against three
+unrelated OS APIs, plus the fold of the existing Windows implementation behind the
+seam. That is the honest price of one codebase, it was measured before the choice was
+made, and it does not become cheaper for having been chosen.
+
+Specifically not carded by this amendment, because each belongs to its own card:
+
+- **Windows:** fold `clients/windows`'s working enforcement behind `Enforcer`. This
+  is the cheapest of the three — the implementation exists and is hardened — but it
+  is also the one that gates retirement, since the bar is cleared on Windows first or
+  it is never cleared anywhere.
+- **`[E10]` #37 (Linux):** netlink or `ip route`, nftables or iptables.
+- **`[E9]` #36 (macOS):** a BSD routing socket or `route`/`networksetup`, `pf`/`pfctl`.
+
+Each carries parity item 8 — a traffic-level test, not a state-level one — as an
+acceptance criterion rather than a nice-to-have. The four portable files
+(`splittunnel.go`, `poolroutes.go`, `tun2socks.go`, `tunnel.go`; 1,317 of the 1,969
+lines) move once, not three times, and the hardening history recorded in the
+amendment above is what a port has to preserve, not merely the behaviour.
+
+### Consequences
+
+- **#35 closes.** It asked for a decision, a parity bar, a seam and a home for #16;
+  all four now exist.
+- **`[E9]`, `[E10]` and #16 unblock.** They were blocked on this and nothing else.
+- **`clients/fyne/README.md`'s line — "`clients/windows` remains the full-featured
+  client until those land here" — becomes accurate rather than provisional.** It was
+  describing a temporary state nobody had committed to; it now describes a committed
+  plan with a written end condition.
+- **Two Windows clients exist for a while, deliberately.** That is the cost of
+  retiring one safely rather than switching over and discovering the bar was not met.
