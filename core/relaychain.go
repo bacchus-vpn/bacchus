@@ -211,17 +211,22 @@ type relayDirectory struct {
 	exitAddr map[string]string
 
 	// as resolves a hop's OBSERVED address to the autonomous system announcing it,
-	// for selectHops' diversity control (issue #23). Nil means no table, which every
-	// build ships with today and which resolves every hop to unknown — see
-	// selectHops for what that does and ADR-0044 for why the client cannot have a
-	// table until the distribution question is answered.
+	// for selectHops' diversity control (issue #23). It is the table embedded in this
+	// binary (asn.Embedded, issue #55), set by loadRelayDirectory. Nil is still a
+	// meaningful value — it resolves every hop to unknown, which is what the relaxed
+	// rungs of selectHops' ladder exist for — but it is no longer the state a normal
+	// build ships in.
 	//
 	// It is deliberately NOT loaded from the signed snapshot alongside the rest of
 	// this struct. The whole point of #23 is that the AS is derived by the party
 	// relying on it, from an address the coordinator observed but did not choose; a
-	// table the coordinator also shipped would be a tag with extra steps. It is a
-	// field here rather than on *Engine so the seam lands without reshaping the
-	// engine's configuration around a distribution mechanism nobody has picked yet.
+	// table the coordinator also shipped would be a tag with extra steps.
+	//
+	// It stays a field here rather than moving to *Engine now that the distribution
+	// mechanism IS picked. Embedding is not configuration — there is nothing for an
+	// operator to set, no path, no flag, no fetch — so routing it through the
+	// engine's config would add a knob to describe a constant. The consumer is this
+	// struct, so the table is attached where this struct is built.
 	as asn.Lookup
 
 	// own is every address the directory publishes for THIS node, and it is how a
@@ -300,6 +305,35 @@ func (d *relayDirectory) contradictedIn(cc string) int {
 	return n
 }
 
+// embeddedAS is the AS table this binary ships (issue #55, ADR-0044's amendments),
+// resolved once and shared by every directory this process builds.
+//
+// A failure DEGRADES rather than refuses. Returning an error here would mean a
+// client that cannot build chains at all, and ADR-0044 §3 already settled that trade
+// in the other direction: with no table every hop resolves to unknown, the ladder
+// falls through to its operator-only rung, and the client builds exactly the chain it
+// built before AS diversity existed — reported as degraded, never silently. That is
+// strictly better than not connecting.
+//
+// Nothing is swallowed by this. The embedded bytes cannot change between build and
+// run — they are in the binary's read-only data — so the only way this fails is a
+// committed table that never loaded, which is a build fault that
+// TestEmbeddedTableLoads catches in CI. What is left here is defence in depth, and
+// the degradation it falls back to is itself reported: buildChain emits the
+// "no hop resolved" notice, which on a normal build no longer fires.
+//
+// The untyped nil matters. A nil *asn.Table stored in an asn.Lookup is a non-nil
+// interface holding a nil pointer, which works — every Table method is nil-safe — but
+// returning a plain nil interface is what asn.OfHostPort's own nil check is written
+// against, and keeping the two agreed is cheaper than relying on both.
+func embeddedAS() asn.Lookup {
+	t, err := asn.Embedded()
+	if err != nil {
+		return nil
+	}
+	return t
+}
+
 // loadRelayDirectory verifies signed under pub and indexes it for chaining. It
 // enforces expiry, unlike the mesh-walk proof-of-prior-contact check
 // (coldstart.VerifySigned): a recovery proof is legitimately stale, but a hop
@@ -329,6 +363,7 @@ func loadRelayDirectory(signed []byte, pub ed25519.PublicKey, selfID string, now
 		exitAddr:       map[string]string{},
 		own:            map[string]bool{},
 		reloadInterval: relayDirReloadInterval,
+		as:             embeddedAS(),
 	}
 	for _, ent := range snap.Entries {
 		if selfID != "" && ent.ID == selfID {
@@ -643,12 +678,18 @@ func (e *Engine) buildChain(n int, country string) (*chainPlan, error) {
 	// see is indistinguishable from the control working, which is the failure mode
 	// #23 names — so the degradation is REPORTED, not just permitted.
 	//
-	// The level splits on whether the table was working. A staged table that could
-	// not keep two hops apart is a real weakening on a real deployment and an
-	// operator can act on it (add a hop in another network); no table at all is the
-	// state every build ships in until the distribution question is settled
-	// (ADR-0044), so raising it as an error would cry wolf on every connect, for
-	// every user, about a decision none of them can take.
+	// The level splits on whether the table was working. A table that could not keep
+	// two hops apart is a real weakening on a real deployment and an operator can act
+	// on it (add a hop in another network); nothing resolving AT ALL is the older,
+	// blunter condition and stays at Info.
+	//
+	// That split was drawn (#52) when no build shipped a table and the Info path was
+	// the normal case. Since #55 embedded one it is the abnormal case — a normal
+	// client resolves its hops — but the level is deliberately unchanged. What
+	// reaches Info now is a chain of hops NONE of which the table places: addresses
+	// in unrouted or documentation space, which is every local smoke stack and every
+	// developer box. Promoting that to Error would cry wolf exactly where it did
+	// before, just for a different reason.
 	if div.degraded() {
 		kind := EventError
 		if div.resolved == 0 {
@@ -947,10 +988,11 @@ type hopDiversity struct {
 	opRepeated bool
 
 	// resolved and unresolved count the chosen hops the table could and could not
-	// place. resolved == 0 on a non-empty chain is the no-table state every build
-	// ships in today, and it is worth telling apart from a staged table that failed
-	// on one address: the first is a distribution question nobody has answered yet,
-	// the second is an operator's to look at.
+	// place. resolved == 0 on a non-empty chain is worth telling apart from a table
+	// that failed on one address: since #55 embedded a table in every client, the
+	// first means these hops are all in space no AS announces — a local stack on
+	// loopback, or documentation addresses — while the second is one hop an operator
+	// can go and look at.
 	resolved, unresolved int
 }
 

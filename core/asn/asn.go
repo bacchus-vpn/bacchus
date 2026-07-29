@@ -24,7 +24,9 @@
 // this whole subsystem exists to deny — and would add a dependency on reaching a
 // foreign endpoint from inside a censored network. There is no fetch path in this
 // package, on purpose: nothing here can ever make a network call. How the table
-// GETS to disk is a separate question, and an open one — see ADR-0044.
+// REACHES a client is a separate question, and ADR-0044's amendments answered it:
+// the table is embedded in the build and committed to the repository. See
+// Embedded in embedded.go, and TABLE.md for the data's source and licence.
 //
 // # Table format
 //
@@ -45,8 +47,11 @@
 //
 // The text format, rather than a packed binary one, follows core/geoip's reasoning:
 // it needs no decoder, the whole parse is auditable in one screen, and a fixture is
-// readable by anyone reviewing a diversity test. ADR-0044 records what the compact
-// encodings measure at, for the distribution decision that has not been made yet.
+// readable by anyone reviewing a diversity test. That decision survived the
+// distribution ruling: the embedded table is this same text, gzipped, at a measured
+// 3.14 MB against 1.38 MB for the delta-varint binary form ADR-0044 §6 priced. The
+// difference buys keeping the only decoder in front of this parser a
+// standard-library one.
 package asn
 
 import (
@@ -117,9 +122,9 @@ type span struct {
 //
 // Every method is nil-safe, and a nil *Table is a meaningful value: it is a lookup
 // that resolves nothing. That is what makes "no table staged" behave as "every
-// address is unknown" rather than as a crash, and it is the state the client ships
-// in today — see ADR-0044 on why the client cannot have a table until the
-// distribution question is answered.
+// address is unknown" rather than as a crash. A client no longer ships in that state
+// — Embedded gives it a real table — but a coordinator started without -asn-table
+// still does, and so does any caller holding a Lookup nothing filled in.
 type Table struct {
 	// v4 and v6 are each sorted by network address and verified DISJOINT at load
 	// (see validate). Disjointness is what lets LookupAS be a single binary search
