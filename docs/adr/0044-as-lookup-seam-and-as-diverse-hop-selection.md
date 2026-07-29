@@ -1,11 +1,13 @@
 # 44. An independent IP→AS lookup behind one seam, AS-diverse hop selection, and the distribution question left open
 
-- Status: accepted (issue #23); §6 amended — see the amendment at the end.
+- Status: accepted (issue #23); amended twice — see the amendments at the end.
   The seam, the unknown-case rule, the hop-selection ladder and the coordinator's
   use of it were accepted and implemented when this record was written. **How the
-  table ships and refreshes was left open**, and has since been ruled on: option A,
-  embedded in the client build. Issue #23 stays open until the bytes reach a client
-  (#55); the ruling unblocks that work rather than completing it.
+  table ships and refreshes was left open**, and was then ruled on: option A,
+  embedded in the client build (first amendment). The two questions that ruling
+  explicitly left unsettled — the encoding, and the source's licence — are measured
+  and closed in the second amendment, which is where the bytes actually reach a
+  client (#55). Issue #23 is delivered on both sides as of that amendment.
 - Date: 2026-07-29
 
 ## Context
@@ -405,3 +407,171 @@ redistribution.
 - **Fixtures stay synthetic.** Committing the real table is the product; pointing the
   tests at it is not. `core/asn/testdata` keeps using documentation address space, and
   a table this size in the test path would also make failures unreadable.
+
+## Amendment (2026-07-29, issue #55) — the encoding is measured, the source is licensed, and the bytes ship
+
+The first amendment ruled option A and named two things it did **not** settle: the
+encoding, and the source's licence. Both are closed here, by measurement and by
+reading the licence rather than by inheriting either from a previous sentence. The
+client now carries a table.
+
+### 1. The encoding: gzipped text, measured at 3.14 MB
+
+The expectation was "a gzipped **text** table decompressed through the existing
+parser — standard-library only, format unchanged, at a size somewhere above §6's
+2.53 MB fixed-width figure". That expectation held, and the number is:
+
+| form | entries | bytes | gzip |
+|---|---|---|---|
+| upstream as published | 711,289 | 45.07 MB | 8.87 MB |
+| §6 reduced, fixed-width **ranges** | 632,669 | 6.93 MB | 2.53 MB |
+| §6 reduced, delta-varint **ranges** | 632,669 | 4.53 MB | 1.38 MB |
+| **staged, disjoint CIDR text — shipped** | **700,442** | **15.48 MB** | **3.14 MB** |
+| staged, disjoint CIDR text, IPv4 only | 550,049 | 12.05 MB | 2.49 MB |
+| staged, disjoint CIDR text, IPv6 only | 150,393 | 3.43 MB | 0.65 MB |
+
+Measured 2026-07-29 against the same dataset §6 measured: the upstream figures
+reproduce §6's row (45.07 MB / 8.87 MB) to the byte, and the entry count differs by
+0.03% — the feed rebuilds hourly.
+
+**Why the shipped form is larger than §6's rows, and why that is not a regression.**
+The two are not the same object. §6 measured **ranges**; `core/asn` requires
+**disjoint CIDR prefixes**, and an arbitrary range is not one prefix — it decomposes
+into up to 2·bits aligned blocks. That expansion (494,257 merged ranges → 700,442
+prefixes) is the cost of the format §2 chose *for the lookup*, and it was already
+paid: §2 pushed flattening into staging precisely so the client would not carry a
+longest-prefix implementation. The gzip figure of 3.14 MB is 1.24× §6's fixed-width
+range form and 2.28× the delta-varint form.
+
+**The trade, stated plainly.** Adopting delta-varint would save ~1.76 MB per binary
+and would put a custom decoder in front of the parser that decides a security
+control — reversing this package's stated reason for being text ("it needs no
+decoder, the whole parse is auditable in one screen"). The first amendment said to
+come back if the number were unacceptable rather than quietly adopt a binary format.
+It is not unacceptable: 3.14 MB is affordable in a desktop binary, the only decoder
+in the path is `compress/gzip`, and the committed artifact is still readable with
+`gunzip -c`. **Text stands.**
+
+Runtime cost, for completeness: ~190 ms and ~28 MB of heap to parse, ~113 ns per
+lookup. Parsing is lazy and happens at most once per process (`sync.OnceValues`),
+which is load-bearing rather than tidy — the relay directory *reloads* on an interval
+(#27), and every reload asks for this table.
+
+### 2. The source: iptoasn.com, PDDL v1.0, confirmed at the source
+
+§6 measured "a public BGP-derived range→ASN dataset" without naming one, and the first
+amendment named `iptoasn.com` as the obvious candidate **to be confirmed at the
+source, not inherited from that sentence**. Confirmed:
+
+- **Dataset:** `ip2asn-combined.tsv.gz`, the combined IPv4+IPv6 range→ASN feed.
+  Columns `range_start range_end AS_number country_code AS_description`, which reduce
+  to §6's "reduced" form once the last two are dropped — as §6 predicted.
+- **Licence: PDDL v1.0**, stated by the publisher and verified against the licence
+  text itself. It grants "a worldwide, royalty-free, non-exclusive, licence to Use
+  the Work", covering any act restricted by copyright or database rights "whether in
+  the original medium or any other", with the right to sublicense; it permits
+  commercial use and combination with other databases; and it explicitly does **not**
+  require attribution or impose share-alike.
+- **Retrieved:** 2026-07-29. Upstream rebuilds hourly, so the recorded hash pins the
+  snapshot rather than a re-downloadable artifact.
+
+That is what makes shipping the data inside an AGPL-3.0 binary sound: a public-domain
+dedication imposes no condition the redistribution could violate. The provenance
+recorded in `core/asn/TABLE.md` is therefore a record we keep because a
+security-relevant input should say where it came from — **not** a licence obligation
+being discharged.
+
+**CAIDA `routeviews-prefix2as` was not used for the shipped data**, and the two are
+kept apart exactly as the first amendment required. It ships under an Acceptable Use
+Agreement; §6 used it for the churn series only, which is measurement and not
+redistribution. §6's churn numbers are unchanged and are not re-derived here.
+
+The contrast with GeoLite2 is worth stating, because the repository already refuses to
+commit a bulk dataset: `.gitignore` excludes MaxMind's database because its terms are
+not ours to redistribute under. This table is committed because PDDL says it can be.
+**The deciding factor is the licence, not the size.**
+
+### 3. What shipped
+
+- **`cmd/asn-stage`** — the staging transform, as the first amendment required ("the
+  transform becomes a shipped tool, not a local script"). Upstream ranges → disjoint
+  CIDR prefixes: it drops the unused columns, drops the unrouted `AS0` markers so
+  unrouted space becomes a **gap**, merges genuinely adjacent same-AS runs, and splits
+  the remainder into aligned blocks. It is **deterministic** — same feed, byte-identical
+  output — which is what makes "committed, not fetched at build time" reviewable: a
+  reviewer regenerates the file and compares. The fetch is deliberately a separate
+  manual step, so the transform itself is hermetic.
+- **`core/asn/table.tsv.gz`** — 700,442 rows (550,049 IPv4 + 150,393 IPv6), 86,612
+  distinct ASNs, 3.14 MB. Committed. The repository carries the growth, as ruled.
+- **`asn.Embedded()`** — `go:embed` of the gzipped text through the existing `Read`.
+  No fetch path was added and none can be: the package still cannot make a network
+  call, and embedded bytes are in the binary before it starts.
+- **The wiring**, at `loadRelayDirectory` where `relayDirectory` is constructed —
+  **not** in engine configuration. Embedding is not configuration: there is no path,
+  no flag and nothing for an operator to set, so routing it through `Config` would add
+  a knob to describe a constant. `core/engine.go` is unchanged by this work.
+- **The refresh procedure**, in `docs/RUNNING.md` and `core/asn/TABLE.md`.
+
+### 4. On gaps: the guard is arithmetic, not bookkeeping
+
+§6 required unrouted gaps to stay explicit "so a lookup returns *unknown* rather than
+inheriting a neighbour's AS". In a prefix table that requirement is met by **omitting**
+the unrouted ranges: `core/asn` resolves by containment, so an address in a gap matches
+no prefix and is unknown. Carrying the markers as rows is not available in any case —
+`asn.Read` rejects AS0 (RFC 7607), and its error message already says to omit the row.
+§6's explicit markers were an artifact of the delta-varint form it was costing, where a
+run of contiguous spans needs something to break the run.
+
+What keeps a merge from silently spanning a gap is that adjacency is tested on
+**addresses** (`end + 1 == next.start`). An unrouted span between two same-AS ranges
+occupies the addresses that would have made them adjacent, so it defeats the merge
+whether or not its marker is still in hand. The tool was first written the other way,
+threading AS0 rows through the merge as sentinels; the tests pass identically without
+them, because the arithmetic was doing the work throughout. The sentinel logic was
+removed rather than left in as reassurance.
+
+### 5. What this closes, and what it does not
+
+**Closed.** #23's client-side property is delivered. A client build resolves real hop
+addresses to real autonomous systems; `selectHops` refuses a chain placing two hops in
+one AS while a diverse alternative exists; and `buildChain`'s "no hop resolved" notice
+— which fired on *every* connect for *every* user between #52 and #55, because no
+client had a table — no longer fires on a normal client. The seam, the ladder, the
+unknown rule and the reporting were built in #52; what was missing was bytes, and the
+bytes are here.
+
+**Not closed, and deliberately so:**
+
+- **C and E remain the upgrade path, not superseded.** A signed out-of-band correction
+  still wants a delivery channel that does not exist. When #34 lands, correcting a bad
+  table without shipping a release becomes worth building.
+- **The refresh is a manual step with no automation behind it.** It is recorded in two
+  places and enforced by neither. When #34 brings a release checklist, it belongs
+  there — this amendment does not pretend a documented step is a guaranteed one.
+- **Release cadence remains a security parameter**, on §6's numbers: ~1.3% drift per
+  month, ~3.6% per quarter, degrading toward §3's unknown handling rather than toward
+  a false claim of diversity.
+- **The coordinator's `-asn-table` is untouched.** It is a separate consumer with a
+  separate lifecycle — an operator-run machine can be handed a file and refreshed
+  without a client release — and #52's design of one seam with two independent
+  implementations is what makes that unremarkable.
+
+### 6. Consequences
+
+- **Every clone now carries 3.14 MB of third-party data, permanently.** This was ruled
+  in the first amendment and is restated because it is now real rather than prospective.
+  Each refresh commits a wholly new binary blob; the repository grows by roughly that
+  much per refresh, and git cannot delta gzip usefully.
+- **A corrupt embedded table degrades rather than refusing.** `embeddedAS` falls back to
+  nil, every hop resolves to unknown, and the ladder produces the pre-#23 chain, reported
+  as degraded. Refusing would mean a client that cannot connect at all, which §3 already
+  rejected in the other direction. The failure cannot arise at runtime — the bytes are in
+  read-only data — so what catches it is `TestEmbeddedTableLoads`, in CI, before a release.
+- **"The table ships" and "the table is used" are tested as two claims.** Removing the
+  wiring at `loadRelayDirectory` fails two named tests and *nothing else in the suite* —
+  #52's diversity tests construct their directory by hand and inject a synthetic lookup,
+  which is right for testing the ladder and is exactly why they cannot test the attachment.
+- **Fixtures stayed synthetic.** `core/asn/testdata` is unchanged and still documentation
+  space only. The real table is exercised by a thin smoke test and by assertions that never
+  pin a specific AS to a specific address, so a refresh that renumbers an allocation does
+  not fail the suite for being correct.
