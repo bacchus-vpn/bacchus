@@ -1,11 +1,11 @@
 # 44. An independent IP→AS lookup behind one seam, AS-diverse hop selection, and the distribution question left open
 
-- Status: **partly accepted, partly proposed** (issue #23).
+- Status: accepted (issue #23); §6 amended — see the amendment at the end.
   The seam, the unknown-case rule, the hop-selection ladder and the coordinator's
-  use of it are **accepted** and implemented. **How the table ships and refreshes
-  is NOT decided** — §6 sets out the options with measured costs and a
-  recommendation, and it is the owner's call. Issue #23 stays open until that
-  ruling lands; this record must not be read as making it.
+  use of it were accepted and implemented when this record was written. **How the
+  table ships and refreshes was left open**, and has since been ruled on: option A,
+  embedded in the client build. Issue #23 stays open until the bytes reach a client
+  (#55); the ruling unblocks that work rather than completing it.
 - Date: 2026-07-29
 
 ## Context
@@ -180,6 +180,11 @@ trusted stream is fed.
 
 ### 6. **OPEN — how the table ships and refreshes**
 
+> **Superseded: this was ruled on — option A. See the amendment at the end.** The
+> section is kept as written because the measured evidence is what the ruling rests
+> on, and a decision is only auditable while the numbers that produced it are still
+> readable.
+
 **This is the owner's decision and this record does not make it.** What follows is
 measured evidence and a recommendation.
 
@@ -323,3 +328,80 @@ The seam is in place and both consumers use it; what is missing is bytes on a cl
   `unresolved` term of `degraded()`, or the report in `buildChain` each makes a
   specific named test fail. A diversity control whose tests have never been seen to
   *reject a chain* is not testing anything.
+
+## Amendment (issue #23) — §6 is ruled: option A, embedded in the client build
+
+§6 set out five options and declined to choose. This is the choice.
+
+### Decision
+
+**A — the IP→AS table is embedded in the client build and refreshed per release.**
+
+B (scheduled fetch) is rejected on §6's own measurement. Fetching buys back roughly
+1.3% of accuracy per month and costs a predictable, periodic, fingerprintable request
+from every client on a censored network — the exact property the transport spends its
+whole budget avoiding, and a blocking target besides. The measurement is what makes
+that a finding rather than a preference: had the churn been 15% a month, the trade
+would have gone the other way.
+
+C (signed, policy-delivered) and E (embedded baseline plus signed correction) remain
+the upgrade path, not the starting point. Both want a delivery channel that does not
+exist yet; C additionally has the shape mismatch §6 describes, and neither is worth
+building before there is a release channel (#34 `[G7]`) to hang them on.
+
+D stays rejected for the reason §6 gives: a table the coordinator supplied is a tag
+with extra steps.
+
+### Sub-decision: the table is committed, not fetched at build time
+
+§6 did not distinguish these, and they are not the same decision. Fetching the table
+during the build keeps the repository small, but makes the build **non-reproducible**
+and introduces a third-party dependency into it. Reproducibility is load-bearing here:
+the signed release channel (#34) and code signing (#38) both rest on a reviewer being
+able to establish that a published binary corresponds to published source, and a
+censorship-resistance tool whose users cannot check that has given away part of what
+it is for.
+
+So the table is committed, and the repository carries the growth. That cost is real
+and permanent — every clone pays it forever — and it is accepted deliberately rather
+than by omission.
+
+### What this does *not* settle
+
+**The encoding.** §6's headline figure of ~1.4 MB compressed is the delta-varint
+binary form, while `core/asn` deliberately reads text, because "it needs no decoder,
+the whole parse is auditable in one screen". Embedding the varint form would reverse
+that decision and put a custom decoder in front of a security-relevant parser. The
+expected resolution is a gzipped **text** table decompressed through the existing
+parser — standard-library only, format unchanged, at a size somewhere above §6's
+2.53 MB fixed-width figure. That is an expectation, not a measurement, and #55 is to
+measure it and come back if the number is unacceptable rather than quietly adopting a
+binary format.
+
+**The source and its licence.** §6 measured against a public BGP-derived range→ASN
+dataset without naming one, which was adequate for a size estimate and is not adequate
+for redistribution. This repository is AGPL-3.0 and would ship the data inside a
+binary, so the source's terms must permit that. `iptoasn.com` publishes a combined
+IPv4+IPv6 range→ASN feed under PDDL v1.0 — public domain, no attribution required —
+and its `range_start range_end AS_number country_code AS_description` columns reduce
+to exactly §6's "reduced" form, which makes it the obvious candidate and very likely
+what §6 measured. It is to be confirmed at the source, not inherited from this
+sentence. CAIDA `routeviews-prefix2as`, used for §6's churn series, ships under an
+Acceptable Use Agreement; suitable for measurement, not assumed suitable for
+redistribution.
+
+### Consequences
+
+- **#23 stays open and moves back to claimable work.** The ruling removes the blocker;
+  it does not deliver the bytes. That is #55.
+- **The staging transform becomes a shipped tool, not a local script.** §6 already
+  pushed disjointness into staging; committing the output means the transform that
+  produced it has to be reviewable and repeatable, because "refreshed per release" is
+  a step someone performs repeatedly.
+- **Release cadence is now a security parameter.** At ~1.3% drift per month, quarterly
+  releases hold the error near 3.6%. Slower releases degrade the control — safely,
+  toward §3's unknown handling rather than toward a false claim of diversity, but
+  degradation is what it is, and it is now a property of how often Bacchus ships.
+- **Fixtures stay synthetic.** Committing the real table is the product; pointing the
+  tests at it is not. `core/asn/testdata` keeps using documentation address space, and
+  a table this size in the test path would also make failures unreadable.
