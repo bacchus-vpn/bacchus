@@ -60,18 +60,52 @@ func (e *Engine) startFwdSession(m wire, l *coordLink) {
 // looks inside the stream), so there is nothing for exitTerminate to key
 // accounting state by there — the relay-side accounting gap #17/ADR-0033 defers
 // to a follow-up. See core/accounting.go.
+//
+// The tier's per-session speed cap (issue #58, ADR-0048) is built here, once per
+// assignment, for the same reason and along the same seam: it belongs to the
+// session the coordinator assigned, so it exists only where a session id does.
+// sessionPace returns nil when the assignment carries no cap, and a nil *Limiter
+// is inert, so "no cap" needs no branch anywhere downstream.
 func (e *Engine) handlerFor(m wire) func(Stream) {
 	if m.ExitAddr != "" {
 		ea := m.ExitAddr
 		return func(st Stream) { e.relayPipe(st, ea) }
 	}
-	sid := m.Session
-	return func(st Stream) { e.exitDirect(sid, st) }
+	sid, pace := m.Session, sessionPace(m)
+	return func(st Stream) { e.exitDirect(sid, pace, st) }
+}
+
+// sessionPace builds the per-session rate limiter for an assignment (issue #58,
+// ADR-0048): the coordinator resolved the connecting account's (trust, plan) pair
+// against the signed policy it verified and stamped the resulting speed_cap_bps
+// on the assign, and this is where the exit turns that number into enforcement.
+//
+// The exit does NOT resolve the tier itself, and does not see the client's
+// admission credential at all. That is a privacy decision, not a layering
+// convenience: a credential's Serial is a stable per-device identifier that
+// outlives any one session, and the exit is the single party that sees the user's
+// actual traffic, so handing it a credential would hand it a join key for linking
+// one user's sessions to each other — exactly the correlation ADR-0042 and
+// ADR-0035 exist to deny. It receives a number instead, which links nothing.
+//
+// The cost is stated rather than hidden: a hostile coordinator can send a large
+// cap, or none, and this node will honour it. That is a revenue-integrity
+// failure, not a linkability one — and it is bounded from above by this node's
+// OWN declared aggregate cap (ADR-0040), which e.limiter enforces locally and no
+// coordinator can raise. See ADR-0048 §4.
+//
+// Returns nil — inert — for an assignment carrying no cap, which is every
+// assignment from an unpoliced coordinator and every one predating #58.
+func sessionPace(m wire) *capacity.Limiter {
+	return capacity.NewLimiter(capacity.Rate(m.SessionCapBps))
 }
 
 // exitDirect is the exit-side egress for a direct (client<->exit) session: it
-// terminates the end-to-end channel over the transport stream.
-func (e *Engine) exitDirect(sid string, st Stream) { e.exitTerminate(sid, st) }
+// terminates the end-to-end channel over the transport stream, shaped to the
+// tier's per-session cap (nil pace = uncapped).
+func (e *Engine) exitDirect(sid string, pace *capacity.Limiter, st Stream) {
+	e.exitTerminate(sid, pace, st)
+}
 
 // exitTerminate runs the Noise responder over raw, reads the client's requested
 // destination from the encrypted channel, dials it, and splices. It is the sole
@@ -98,7 +132,14 @@ func (e *Engine) exitDirect(sid string, st Stream) { e.exitTerminate(sid, st) }
 // are now gated on actually holding the exit role. The distinction is carried by
 // the client's encrypted target, so a hop is the same Noise_NK exchange as every
 // other and needs no new message type and no coordinator involvement.
-func (e *Engine) exitTerminate(sid string, raw io.ReadWriteCloser) {
+//
+// pace is the tier's per-session speed cap (issue #58, ADR-0048), nil for
+// uncapped. It travels with sid and is nil in exactly the same places sid is
+// empty, because both name the coordinator-assigned session: a relay-forwarded
+// connection arrives through serveExit's bare TCP listener, which the coordinator
+// never assigned a session, so there is no tier to shape it to. See ADR-0048 §5
+// and the follow-up it names.
+func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWriteCloser) {
 	defer raw.Close()
 	// The exit presents its admission credential (issue #60) in the handshake so
 	// the client can verify end-to-end that this exit is admission-authorized.
@@ -142,6 +183,12 @@ func (e *Engine) exitTerminate(sid string, raw io.ReadWriteCloser) {
 		return
 	}
 	if prefix == udpTargetPrefix {
+		// NOT shaped to the tier cap: the UDP relay hand-rolls its own datagram loop
+		// and paces through meterN/WaitN rather than through an io.Reader, so pace
+		// has nothing to wrap here (core/udprelay.go). The operator's own aggregate
+		// cap and quota still apply to every datagram; what does not is the
+		// per-session tier limit. ADR-0048 §5 records it as a known gap with a
+		// follow-up rather than leaving it to be discovered.
 		e.exitTerminateUDP(sid, nc, addr)
 		return
 	}
@@ -163,8 +210,22 @@ func (e *Engine) exitTerminate(sid string, raw io.ReadWriteCloser) {
 	if sid != "" && e.acctEnabled() {
 		ctr = e.acctCounter(sid)
 	}
-	go func() { _, _ = io.Copy(remote, e.meter(ctr.CountReads(nc))); _ = remote.Close() }()
-	_, _ = io.Copy(nc, e.meter(ctr.CountReads(remote)))
+	// Three wrappers, three different questions, innermost first: the accounting
+	// counter says what the session MOVED (a receipt's claim, ADR-0021), the
+	// per-session limiter says what this user's TIER is entitled to (#58), and
+	// e.meter says what this OPERATOR is willing to carry (#143, ADR-0040). The
+	// tier cap sits inside the operator's, which is the composition ADR-0048 §4
+	// depends on: a coordinator stamping a large SessionCapBps widens only the
+	// inner bound, and the node's own aggregate limiter still paces the result.
+	//
+	// Order does not change any count — every limiter delays bytes rather than
+	// dropping them — so this reads as three independent facts about the same
+	// bytes, which is what it is.
+	go func() {
+		_, _ = io.Copy(remote, e.meter(pace.LimitReads(e.limiterCtx, ctr.CountReads(nc))))
+		_ = remote.Close()
+	}()
+	_, _ = io.Copy(nc, e.meter(pace.LimitReads(e.limiterCtx, ctr.CountReads(remote))))
 }
 
 // meter applies this node's DECLARED limits (issue #143, ADR-0040) to one
@@ -305,6 +366,13 @@ func (e *Engine) serveExit(ln net.Listener) {
 				continue
 			}
 		}
-		go e.exitTerminate("", c) // relay-forwarded: no session id available, see exitTerminate's doc
+		// Relay-forwarded: no session id and, for the same reason, no tier cap. The
+		// coordinator assigned this exit nothing — a peer-relay assign goes to the
+		// RELAY — so there is no (trust, plan) resolution attached to this
+		// connection to shape it by (issue #58, ADR-0048 §5). Closing that needs the
+		// exit to be given an identity for a relayed session, which is a separate
+		// decision: the splice is transparent by design
+		// (TestPeerRelaySplicePreservesE2E) and is the whole point of ADR-0033.
+		go e.exitTerminate("", nil, c) // see exitTerminate's doc
 	}
 }
