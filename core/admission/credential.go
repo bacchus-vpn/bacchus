@@ -93,6 +93,45 @@ type Credential struct {
 	// leaves it false is byte-identical to one from before #157, and an older verifier
 	// that does not know the field ignores it and reads false — never a spurious vouch.
 	Vouched bool `json:"vouched,omitempty"`
+
+	// Trust is the account's trust tier at issuance (issue #58, the public half of
+	// bacchus-payment#6): the earned half of the (trust, plan) pair that indexes the
+	// signed policy's tiers table (core/policy.Policy.Limits, ADR-0043's issue #67
+	// amendment). The credential carries the KEY and never the numbers, so a
+	// re-signed policy changes what a tier is worth without waiting for every
+	// outstanding credential to age out.
+	//
+	// A plain string rather than policy.Trust: this is a wire field mirrored by an
+	// independent implementation in the account service, and the closed vocabulary
+	// that gives it meaning is core/policy's to own, not this package's. An
+	// unrecognized value therefore parses fine here and simply resolves no tier row,
+	// which is the loud failure ADR-0006 decision 5 requires — see
+	// cmd/coordinator/tier.go.
+	//
+	// Stamped by the ACCOUNT SERVICE, exactly like Vouched and for the same reason:
+	// this repository has no trust graph and cmd/admission-issue never sets it, so in
+	// this build every credential minted here carries an empty Trust. Additive and
+	// omitempty, so an operator-issued or pre-#58 credential is byte-identical to one
+	// from before this field existed, and an older verifier that does not know the
+	// field ignores it — it can never read a tier a credential did not claim.
+	Trust string `json:"trust,omitempty"`
+
+	// Plan is the account's purchased plan at issuance (issue #58): the commercial
+	// half of the same key. It is an opaque label to match on — nothing here or in
+	// core/policy interprets it — and the empty string is the legitimate "no paid
+	// plan" value spelled explicitly, not an unset one (see policy.TierLimit.Plan).
+	//
+	// Same provenance and same additivity as Trust: stamped by the account service,
+	// never by any issuer in this repository, and omitempty so a free-tier credential
+	// stays byte-identical to a pre-#58 one.
+	//
+	// DECLARATION ORDER IS THE CONTRACT. Trust precedes Plan and both follow Vouched
+	// because encoding/json marshals in declaration order and the marshaled form is
+	// the signed body: bacchus-payment's internal/admission.Credential declares the
+	// same three fields in the same order, and a credential minted there verifies
+	// here only while that holds. See this type's doc, and the conformance vectors in
+	// bacchus-payment/internal/admission/testdata that pin it.
+	Plan string `json:"plan,omitempty"`
 }
 
 // IsVouched reports whether this credential was issued to a vouched account (issue
