@@ -67,6 +67,7 @@ func main() {
 	admissionPubKey := flag.String("admission-pubkey", "", "client: the admission authority's public key, hex (issue #60). The client verifies each exit's admission credential against it end-to-end and refuses an exit the authority never authorized, even via a hostile coordinator. Overrides the anchor carried in a coldstart invite. Empty does not verify (fail-open)")
 	admissionCRL := flag.String("admission-crl", "", "client: path to a signed revocation bundle, minted by cmd/admission-issue -crl (issue #69). The client rejects an exit whose credential appears in it, even if not yet expired, and re-reads this file on an interval to pick up an operator's rotated bundle without a restart (issue #90). Requires -admission-pubkey. Overrides the bundle carried in a coldstart invite. Empty does not check revocation (fail-open)")
 	requireCRL := flag.Bool("require-crl", false, "client: refuse to start when an admission anchor is configured (-admission-pubkey, or one carried in a coldstart invite) but no CRL is, instead of the default fail-open-on-revocation (issue #91). Opt-in; guards against a hostile or buggy coordinator stripping the CRL from a v3 invite. Has no effect without an anchor")
+	deviceCredDir := flag.String("device-cred-dir", "", "client: directory to persist this device's own keypair and the device credential + issuer cert issued for it across restarts (issue #50/#51/#53) — a DIFFERENT credential from -admission-cred; see core/devicecred's package doc. Empty means in-memory only: a fresh device identity every restart and nothing to present, ever, so this node connects exactly as one predating #50 does. The credential itself is not obtained here (enrollment is account-service work, tracked separately, issue #9) — this only says where to keep whatever gets provisioned into it")
 	courierListen := flag.String("courier-listen", "", "relay/exit: UDP address to serve mesh-walk recovery snapshots on (issue #31, design §4.3). A node caches the coordinator-signed snapshot and hands it, verbatim, to a recovering client that can no longer reach any coordinator — a courier, never an author. Empty disables the courier.")
 	courierInvite := flag.String("courier-invite", "", "relay/exit: bacchus1: invite (from cmd/coldstart-issue) the courier uses to fetch and refresh the snapshot it serves; supplies the coordinator address, fetch secret, and snapshot public key. Required with -courier-listen.")
 	meshPeers := flag.String("mesh-peers", "", "client: comma-separated peer courier addresses to walk when every coordinator is unreachable (issue #31). A relay/exit from a prior session, running -courier-listen. Empty disables mesh-walk recovery (fail cold, as before).")
@@ -151,6 +152,7 @@ func main() {
 		AdmissionPubKey:     *admissionPubKey,
 		AdmissionCRLPath:    *admissionCRL,
 		AdmissionRequireCRL: *requireCRL,
+		DeviceCredDir:       *deviceCredDir,
 		Limits:              limits,
 		QuotaStatePath:      *quotaState,
 		RelayHops:           *relayHops,
