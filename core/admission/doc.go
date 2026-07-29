@@ -16,6 +16,25 @@
 // checked with a Verifier at the one place that already gates matchmaking: the
 // coordinator's register (nodes) and list/connect (clients) handlers.
 //
+// A Verifier anchors a SET of authorities, each scoped to the roles it may admit
+// (issue #64, ADR-0047), because two structurally different issuers mint this
+// format: the operator by hand (cmd/admission-issue, relay/exit credentials
+// bound to a node id — low volume, offline, deliberate) and the account service
+// automatically (client credentials — bearer, short-lived, reissued on every
+// renewal, always online). With one anchor those two would have to share a
+// private key, putting the credentials that admit a host as forwarding
+// infrastructure behind the busiest and most exposed issuer. Anchoring the
+// account service for RoleClient alone closes that: the roles inside a
+// credential are chosen by whoever holds the signing key, but the roles an
+// authority may admit are not reachable from any signing key at all.
+//
+// The set is filtered by the requested role BEFORE any signature is verified, so
+// a client authority's signature is never even a candidate for an exit check —
+// the scoping is structural rather than a check that follows verification and
+// could be reordered away. A single anchored authority trusted for every role
+// (NewVerifier) is the coordinator's pre-#64 behaviour exactly, and remains the
+// client's shape: it needs only the authority that mints exits.
+//
 // The signature envelope mirrors core/coldstart byte-for-byte — canonical JSON
 // followed by a fixed-length ed25519 signature — so the coordinator, a small
 // dependency-light binary, can verify credentials exactly like it already

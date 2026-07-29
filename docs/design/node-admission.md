@@ -25,8 +25,8 @@ This is authentication, deliberately separate from the license decision
 
 ## The credential
 
-A `core/admission.Credential` is a signed statement by the operator's admission
-authority:
+A `core/admission.Credential` is a signed statement by an admission authority the
+coordinator anchors (see [The authority set](#the-authority-set-issue-64-adr-0047)):
 
 | Field       | Meaning                                                             |
 |-------------|---------------------------------------------------------------------|
@@ -63,10 +63,44 @@ credential just expired or was revoked is fenced within one interval — the
 "fence stale nodes" property ADR-0015 asked for, now keyed on credential
 validity.
 
+## The authority set (issue #64, ADR-0047)
+
+A verifier anchors a **set** of authorities, each scoped to the roles it may
+admit — not one key trusted for everything. Two structurally different issuers
+mint this format: the operator by hand (`cmd/admission-issue`; `relay`/`exit`,
+bound to a node id, low volume, offline) and the account service automatically
+(`client`, bearer, short-lived, reissued on every renewal, always online). Under
+a single anchor those two would share a private key, putting the credentials that
+admit a host as **forwarding infrastructure** behind the busiest and most exposed
+issuer.
+
+| Statement | Written by | Reachable from a signing key? |
+|-----------|------------|-------------------------------|
+| `Credential.Roles` — "this subject may act as an exit" | the **issuer** | yes: whoever holds the key writes it freely |
+| `Authority.Roles` — "this issuer may mint exits at all" | the **anchor** (operator config) | no |
+
+Both are checked, and only the second constrains a compromised issuer. The
+coordinator anchors the set (`-admission-pubkey` + `-admission-authority`, see
+[RUNNING.md](../RUNNING.md)); a **client** anchors one key, because its only check
+is `exit`, the authority that mints exits is the operator, and a coldstart invite
+carries exactly one anchor.
+
 ## Verification order
 
-`Verifier.Verify` decodes, checks the ed25519 signature and version (`parse`),
-then applies the policy (`accept`) over the now-trusted fields, in this order:
+`Verifier.Verify` decodes, **filters the anchored authorities by the role the
+peer is taking**, checks the ed25519 signature and version of each survivor in
+turn (`parse`), then applies the policy (`accept`) over the now-trusted fields.
+
+The role filter runs before any signature verification, so a client authority's
+key is never even a candidate for an exit check — the scoping is structural
+rather than a check that follows verification and could be reordered away. One
+consequence, deliberate: a credential correctly signed by an authority anchored
+for some *other* role comes back `ErrBadSignature`, not `ErrRoleNotAuthorized`,
+because no signature was ever checked against its key. A role no anchored
+authority covers is reported distinctly (`ErrNoAuthorityForRole`) — that is a
+fact about the coordinator's configuration, not about the credential.
+
+`accept` then runs in this order:
 
 1. **Revocation** — `revoked(serial)`. Checked first: an explicitly revoked
    credential is the freshest, most decisive operator signal, and surfacing
@@ -77,6 +111,10 @@ then applies the policy (`accept`) over the now-trusted fields, in this order:
    credential *starts* is harmless; being lenient about when it *ends* would
    extend a rotated/revoked credential's life, so expiry is strict.
 3. **Role** — the credential must authorize the role the peer is taking now.
+   Not redundant with the anchor filter above: that one asks whether the
+   *authority* may admit this role, this one whether the *credential* it signed
+   says so. An operator authority anchored for every role must still not have a
+   client credential it minted admitted as an exit.
 4. **Subject binding** — for a node (`subject != ""`), the credential's subject
    must equal the id presenting it.
 
@@ -107,8 +145,10 @@ failing open (a malformed file must never silently un-revoke everyone).
 
 ## Enforcement toggle & rollout
 
-Admission is **on when the coordinator is configured with `-admission-pubkey`**,
-open otherwise, with a loud startup warning when off. This is deliberate for a
+Admission is **on when the coordinator is configured with `-admission-pubkey` or
+`-admission-authority`**, open otherwise, with a loud startup warning when off.
+(`-admission-pubkey` anchors one authority for every role; `-admission-authority`
+is the role-scoped, repeatable form — ADR-0047.) This is deliberate for a
 staged rollout: an operator can issue credentials to the fleet first, then flip
 enforcement on, rather than needing a synchronized flag day. It is *not*
 fail-closed — until the anchor is configured the network serves anyone — and
@@ -310,6 +350,10 @@ operators who opt in.
   above): `-admission-crl`/`Config.AdmissionCRLPath` is re-read on an interval,
   mirroring the coordinator's own `reloadRevocationsLoop`, so a long-lived
   client picks up an operator's rotated bundle without a restart.
+- ~~**One authority for every role.**~~ **Done — issue #64, ADR-0047** (see "The
+  authority set" above): a verifier anchors a role-scoped set, so the account
+  service can hold a `client`-only key and a compromise of the always-online
+  issuer cannot mint credentials that admit a host as forwarding infrastructure.
 - **Mandatory (fail-closed) admission** once the fleet is fully credentialed.
 - **Per-device client identity** to make client credentials non-bearer.
 - **Fast-fail on the client.** An admission `reject` on `list`/`connect` is

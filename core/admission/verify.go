@@ -3,6 +3,7 @@ package admission
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -19,24 +20,131 @@ import (
 // unsynchronized consumer clocks without meaningfully widening the window.
 const ClockSkew = 2 * time.Minute
 
-// Verifier holds the admission authority's public key and a revocation oracle,
-// and turns an encoded credential from the wire into an accept/reject decision.
-// It is safe for concurrent use as long as the revoked func is (a
-// *RevocationList swapped via atomic.Pointer, as the coordinator does, is).
-type Verifier struct {
-	pub     ed25519.PublicKey
-	revoked func(serial string) bool
+// Authority is one anchored admission authority: a public key together with the
+// roles that key is trusted to admit (issue #64).
+//
+// It is deliberately a different statement from the Roles field inside a
+// Credential, and both are checked. A Credential's Roles is the ISSUER's claim
+// — "this subject may act as an exit" — and whoever holds a signing key writes
+// it freely. An Authority's Roles is the ANCHOR's claim — "this issuer may mint
+// exits at all" — and no signing key can reach it. That gap is the whole point:
+// the account service mints client credentials automatically, always online, at
+// volume; anchoring it for RoleClient alone means compromising it yields client
+// credentials and nothing that can join the network as forwarding
+// infrastructure, however the roles field of what it mints is filled in.
+//
+// Roles is empty-means-nothing, not empty-means-everything: an authority no
+// caller managed to scope is one that admits no role rather than every role.
+type Authority struct {
+	Pub   ed25519.PublicKey // the ed25519 public key this authority signs credentials with
+	Roles []Role            // the roles it is trusted to admit; empty admits nothing
 }
 
-// NewVerifier builds a Verifier for the given admission public key. revoked
-// reports whether a serial has been revoked; pass nil when there is no
-// revocation list (nothing is revoked). The coordinator passes a closure over
-// its hot-reloaded RevocationList.
-func NewVerifier(pub ed25519.PublicKey, revoked func(serial string) bool) *Verifier {
-	if revoked == nil {
-		revoked = func(string) bool { return false }
+// admits reports whether this authority is anchored for want.
+func (a Authority) admits(want Role) bool {
+	for _, r := range a.Roles {
+		if r == want {
+			return true
+		}
 	}
-	return &Verifier{pub: pub, revoked: revoked}
+	return false
+}
+
+// Verifier holds the anchored admission authorities and a revocation oracle,
+// and turns an encoded credential from the wire into an accept/reject decision.
+// It is safe for concurrent use as long as the revoked func is (a
+// *RevocationList swapped via atomic.Pointer, as the coordinator does, is): the
+// authority set is fixed at construction and never written afterwards.
+type Verifier struct {
+	authorities []Authority
+	revoked     func(serial string) bool
+}
+
+// NewVerifier builds a Verifier anchoring exactly ONE authority, trusted for
+// every role (AllRoles). revoked reports whether a serial has been revoked; pass
+// nil when there is no revocation list (nothing is revoked).
+//
+// This is not a compatibility shim for the pre-#64 single key — it is the
+// single-anchor case, and it stays. A client's admission anchor is genuinely one
+// key: its only Verify call is for RoleExit, the authority that mints exits is
+// the operator, and a coldstart invite carries exactly one AdmissionKey
+// (core/coldstart). The coordinator, which must tell two issuers apart, uses
+// NewAuthoritySetVerifier instead.
+//
+// Note what "every role" does NOT mean: an all-roles authority still only
+// admits a credential whose own Roles field authorizes what the peer is asking
+// for, because accept still checks that. The anchor check added in #64 is an
+// outer gate, not a replacement for the inner one.
+//
+// It takes pub unvalidated and returns no error, exactly as it did before #64:
+// both callers check the key length themselves before they get here, and a bad
+// one still surfaces as ErrMalformed at Verify time.
+func NewVerifier(pub ed25519.PublicKey, revoked func(serial string) bool) *Verifier {
+	return &Verifier{
+		authorities: []Authority{{Pub: pub, Roles: AllRoles()}},
+		revoked:     revokedOrNothing(revoked),
+	}
+}
+
+// NewAuthoritySetVerifier builds a Verifier anchoring a role-scoped SET of
+// authorities (issue #64) — the coordinator's shape, where the operator's
+// offline key mints relay/exit credentials and the account service's own key
+// mints client credentials, and neither can mint the other's.
+//
+// Construction fails CLOSED on anything ambiguous, because every one of these is
+// an operator mistake that would otherwise present as a working coordinator
+// silently admitting or refusing the wrong thing:
+//
+//   - no authorities at all — a Verifier that verifies nothing;
+//   - a key that is not ed25519.PublicKeySize bytes — after this returns, every
+//     anchored key is well-formed, which is what lets Verify treat a parse
+//     failure as a fact about the CREDENTIAL rather than about the anchor;
+//   - an authority scoped to no roles, or to a role string this build does not
+//     know (Role.Known) — both look configured and admit nothing;
+//   - the same key anchored twice, which is either a redundant flag or a typo in
+//     the roles of one of them, and is never the shortest way to say what was
+//     meant.
+//
+// Errors name an authority by its position in the list, never by its key: these
+// go to an operator's log, and the package's rule is that nothing it emits
+// carries key material.
+func NewAuthoritySetVerifier(authorities []Authority, revoked func(serial string) bool) (*Verifier, error) {
+	if len(authorities) == 0 {
+		return nil, errors.New("admission: a verifier must anchor at least one authority")
+	}
+	anchored := make([]Authority, 0, len(authorities))
+	seen := make(map[string]int, len(authorities))
+	for i, a := range authorities {
+		if len(a.Pub) != ed25519.PublicKeySize {
+			return nil, fmt.Errorf("admission: authority %d: key must be %d bytes, got %d", i+1, ed25519.PublicKeySize, len(a.Pub))
+		}
+		if len(a.Roles) == 0 {
+			return nil, fmt.Errorf("admission: authority %d: anchored for no roles", i+1)
+		}
+		for _, r := range a.Roles {
+			if !r.Known() {
+				return nil, fmt.Errorf("admission: authority %d: unknown role %q", i+1, r)
+			}
+		}
+		if first, dup := seen[string(a.Pub)]; dup {
+			return nil, fmt.Errorf("admission: authority %d: same key already anchored as authority %d; give one authority all of its roles at once", i+1, first+1)
+		}
+		seen[string(a.Pub)] = i
+		// Copy Roles: it is a caller-owned slice retained as part of a trust
+		// anchor, and a caller that builds one set of roles and reslices it for
+		// the next authority must not be able to edit an anchor after the fact.
+		anchored = append(anchored, Authority{Pub: a.Pub, Roles: append([]Role(nil), a.Roles...)})
+	}
+	return &Verifier{authorities: anchored, revoked: revokedOrNothing(revoked)}, nil
+}
+
+// revokedOrNothing normalizes a nil revocation oracle to "nothing is revoked",
+// so Verify never has to nil-check it.
+func revokedOrNothing(revoked func(serial string) bool) func(string) bool {
+	if revoked == nil {
+		return func(string) bool { return false }
+	}
+	return revoked
 }
 
 // Verify decodes and checks an encoded wire credential and returns the
@@ -47,19 +155,68 @@ func NewVerifier(pub ed25519.PublicKey, revoked func(serial string) bool) *Verif
 // binding check, which is how a client credential (bearer, no coordinator-known
 // id) is verified. now is passed in rather than read here so tests use a fixed
 // clock and the caller controls the time source.
+//
+// The authority set is FILTERED BY ROLE FIRST and only the survivors get a
+// signature verification (issue #64). The inverse — verify against every
+// anchored key, then check whether the one that matched was allowed to admit
+// want — computes the same answer, and this order is chosen over it for two
+// reasons:
+//
+//   - The role check cannot be forgotten, reordered, or short-circuited by a
+//     later edit. A client authority's signature is never a candidate for an
+//     exit check, so there is no state in which the anchor scoping is merely
+//     "checked afterwards" and might not be.
+//   - Signature cost is bounded by the authorities anchored for that ONE role
+//     rather than by the whole set, on a path the coordinator runs for every
+//     list, connect and capacity-report.
+//
+// A parse failure that is ErrBadSignature means "not this authority" and the
+// loop moves on. Every other parse failure — a malformed envelope, an
+// unsupported CredentialVersion — is a fact about the credential itself, which
+// no other anchored key would read differently, so it is returned immediately
+// rather than masked by a later ErrBadSignature.
 func (v *Verifier) Verify(encoded string, now time.Time, want Role, subject string) (Credential, error) {
 	signed, err := Decode(encoded)
 	if err != nil {
 		return Credential{}, err
 	}
-	c, err := parse(v.pub, signed)
-	if err != nil {
-		return Credential{}, err
+	candidates := 0
+	for _, a := range v.authorities {
+		if !a.admits(want) {
+			continue
+		}
+		candidates++
+		c, err := parse(a.Pub, signed)
+		if err != nil {
+			if errors.Is(err, ErrBadSignature) {
+				continue
+			}
+			return Credential{}, err
+		}
+		if err := accept(c, now, want, subject, v.revoked); err != nil {
+			return Credential{}, err
+		}
+		return c, nil
 	}
-	if err := accept(c, now, want, subject, v.revoked); err != nil {
-		return Credential{}, err
+	// Nothing anchored can admit want at all. Reported distinctly from
+	// ErrBadSignature because it is a fact about this coordinator's
+	// configuration rather than about the credential — an operator who
+	// forgot to anchor an authority for a role needs to be told that, and
+	// telling them costs nothing an unauthorized peer could not learn by
+	// observing that the role is refused unconditionally.
+	if candidates == 0 {
+		return Credential{}, fmt.Errorf("%w: %s", ErrNoAuthorityForRole, want)
 	}
-	return c, nil
+	// Candidates existed and none of them signed this. Note what this
+	// deliberately does NOT distinguish: a forged signature and a genuine
+	// signature from an authority anchored for some OTHER role both land
+	// here as ErrBadSignature, where before #64 the latter would have
+	// reached accept and come back as ErrRoleNotAuthorized. That is the
+	// same reasoning ADR-0045 applied to its assertion failures — a
+	// verifier that reported which part was right is an oracle for finding
+	// the rest — and it is a consequence of filtering first, not a
+	// separate mechanism.
+	return Credential{}, ErrBadSignature
 }
 
 // accept applies the admission policy to an already signature-verified
@@ -77,6 +234,13 @@ func (v *Verifier) Verify(encoded string, now time.Time, want Role, subject stri
 // asymmetry). Finally the role must be authorized, and a node credential
 // (subject != "") must be bound to the id presenting it; a client credential
 // (subject == "") is bearer and skips the binding check.
+//
+// The role check here survives #64's anchor scoping and is not made redundant by
+// it. The two ask different questions of different parties: Verify's filter asks
+// whether the ANCHOR trusts this authority to admit want at all, and this asks
+// whether the ISSUER wrote want into the credential it actually signed. An
+// operator authority anchored for every role must still not have a client
+// credential it minted admitted as an exit, and only this check stops that.
 func accept(c Credential, now time.Time, want Role, subject string, revoked func(serial string) bool) error {
 	if revoked(c.Serial) {
 		return ErrRevoked

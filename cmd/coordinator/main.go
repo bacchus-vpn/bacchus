@@ -367,8 +367,10 @@ func main() {
 	turnPass := flag.String("turn-pass", "", "TURN password (required)")
 	bootstrapKeyPath := flag.String("bootstrap-key", "secrets/coordinator-bootstrap.key", "path to the snapshot-signing ed25519 key (hex seed); generated on first run if missing")
 	bootstrapSecretsPath := flag.String("bootstrap-secrets", "secrets/bootstrap-secrets.json", "path to the per-user bootstrap secrets file (see cmd/coldstart-issue); reloaded periodically")
-	admissionPubKey := flag.String("admission-pubkey", "", "admission authority public key (hex, from cmd/admission-issue). When set, every node (register) and client (list/connect) must present a credential this key signed (issue #42). Empty DISABLES admission — the network serves anyone.")
-	admissionRevocations := flag.String("admission-revocations", "secrets/admission-revocations.json", "path to the revoked-credential-serials file (hot-reloaded); a missing file means nothing is revoked")
+	admissionPubKey := flag.String("admission-pubkey", "", "admission authority public key (hex, from cmd/admission-issue), trusted for EVERY role. When set, every node (register) and client (list/connect) must present a credential this key signed (issue #42). Empty disables admission only if -admission-authority is also unset — the network then serves anyone. NOTE this flag names a different thing here than it does on bacchus-node: there it is the client's single anchor for verifying an EXIT's credential end-to-end (issue #60); here it is one member of this coordinator's anchored authority set. See ADR-0047.")
+	var admissionAuthorities authorityFlags
+	flag.Var(&admissionAuthorities, "admission-authority", "an admission authority scoped to the roles it may admit, \"role[,role...]:hexkey\" — repeatable, one occurrence per authority (issue #64, ADR-0047). Roles are client, relay, exit. Use it to keep the always-online issuer off the credentials that admit forwarding infrastructure: -admission-authority relay,exit:<operator key> -admission-authority client:<account service key>. Composes with -admission-pubkey, which is the same thing scoped to every role. A credential is admitted only if an authority anchored for the role being taken signed it, so the scoping holds even against an issuer that writes any roles it likes into what it mints.")
+	admissionRevocations := flag.String("admission-revocations", "secrets/admission-revocations.json", "path to the revoked-credential-serials file (hot-reloaded); a missing file means nothing is revoked. One list covers every anchored authority — serials are unique per credential regardless of who signed it.")
 	deviceRootPubKey := flag.String("device-root-pubkey", "", "offline ROOT public key (hex) that the account service's device-credential chain anchors to (issue #50, ADR-0045). When set, every client connect must additionally present a device credential, the issuer cert it chains through, and an assertion over a challenge this coordinator issued — all verified OFFLINE, so this coordinator never calls the account service. Empty DISABLES the gate and leaves connects gated by -admission-pubkey alone. This is a DIFFERENT credential from -admission-pubkey's: that one is the network's own membership, this one is an entitlement bound to one device, and both are checked. Direction of failure matches -admission-pubkey (unset = off) and is deliberately the opposite of -policy-root-pubkey; see ADR-0045 for why an absent anchor is not sheddable the way a stale policy is.")
 	deviceAudienceFlag := flag.String("device-audience", "", "the audience string a device must bind its connect assertion to (issue #50). Defaults to -advertise, which is what a client knows independently because it chose to dial it. Set explicitly only when clients reach this coordinator under a name it does not advertise itself as. An assertion bound to an audience the coordinator merely announced would bind nothing — a hostile pool member would announce someone else's and relay.")
 	deviceRevocations := flag.String("device-revocations", "secrets/device-revocations.json", "path to the revoked device-credential and issuer-cert serials file (hot-reloaded); a missing file means nothing is revoked. Separate from -admission-revocations because the two credentials come from different authorities and their serial namespaces are unrelated.")
@@ -410,15 +412,19 @@ func main() {
 	} else {
 		log.Printf("version fence ENABLED — nodes below %s are dropped from matchmaking (issue #36); coordinator release %s", servingFloor, coordRelease)
 	}
-	v, err := setupAdmission(context.Background(), *admissionPubKey, *admissionRevocations)
+	v, admissionAnchors, err := setupAdmission(context.Background(), *admissionPubKey, admissionAuthorities, *admissionRevocations)
 	if err != nil {
 		log.Fatal(err)
 	}
 	admissionVerifier = v
 	if v == nil {
-		log.Printf("WARNING: admission DISABLED (-admission-pubkey not set) — any client or node can join this network (issue #42)")
+		log.Printf("WARNING: admission DISABLED (neither -admission-pubkey nor -admission-authority set) — any client or node can join this network (issue #42)")
 	} else {
-		log.Printf("admission ENABLED — nodes and clients must present a credential signed by the configured authority")
+		// The anchored roles are logged, not just "enabled": under #64 an
+		// operator can scope an authority wrongly, and a coordinator whose
+		// account key is anchored for exit is indistinguishable from a
+		// correct one in every other line it prints.
+		log.Printf("admission ENABLED — nodes and clients must present a credential from an authority anchored for the role they take; anchors: %s (issue #42, #64)", describeAuthorities(admissionAnchors))
 	}
 	// Connect-time device-credential verification (issue #50, ADR-0045). Started
 	// here, next to admission, because it is the same kind of thing — a gate on the

@@ -310,6 +310,44 @@ another id); client credentials are bearer, so their safety is the out-of-band
 channel they're delivered over. See
 [node-admission.md](design/node-admission.md).
 
+### More than one authority (issue #64, ADR-0047)
+
+`-admission-pubkey` anchors **one** authority trusted for **every** role. That is
+fine while the operator mints everything by hand, but the account service mints
+client credentials automatically — always online, high volume — and under a single
+anchor it would have to hold the same private key that admits a host as a relay or
+an exit. `-admission-authority` scopes an authority to the roles it may admit:
+```
+-admission-authority role[,role...]:<hex pubkey>     # repeatable, one per authority
+```
+The two flags compose, so splitting the account service off is a flag you add:
+```bash
+# today
+bacchus-coordinator … -admission-pubkey <OPERATOR>
+
+# add the account service, scoped to client only — nothing else changes
+bacchus-coordinator … -admission-pubkey <OPERATOR> \
+                      -admission-authority client:<ACCOUNT>
+
+# then narrow the operator key to the roles it actually mints
+bacchus-coordinator … -admission-authority relay,exit:<OPERATOR> \
+                      -admission-authority client:<ACCOUNT>
+```
+Admission is off only when **both** flags are unset. A credential is admitted only
+if an authority anchored for the role being taken signed it — so the scoping holds
+even against an issuer that writes any roles it likes into what it mints. Roles are
+`client`, `relay`, `exit`. A malformed anchor is fatal at startup rather than
+skipped, and the startup line prints each authority's roles and a short key prefix,
+so a wrong scope is visible in the log. Anchors are read once: changing them needs a
+restart, unlike `-admission-revocations`, which is hot-reloaded.
+
+One list covers every authority — serials are unique per credential regardless of
+who signed it — so revocation is unchanged by any of this.
+
+> `-admission-pubkey` names a different thing on `bacchus-node`: there it is the
+> **client's** anchor for verifying an exit's credential end-to-end (issue #60),
+> not a coordinator's authority set. See ADR-0047.
+
 ## Device entitlement at connect (issue #50, ADR-0045)
 
 A **second, separate** gate from admission above, and both are checked. Admission
