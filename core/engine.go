@@ -18,6 +18,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/accounting"
 	"github.com/bacchus-vpn/bacchus/core/admission"
 	"github.com/bacchus-vpn/bacchus/core/capacity"
+	"github.com/bacchus-vpn/bacchus/core/devicestore"
 	"github.com/bacchus-vpn/bacchus/core/handshake"
 	"github.com/bacchus-vpn/bacchus/core/selection"
 	"github.com/bacchus-vpn/bacchus/core/version"
@@ -392,6 +393,47 @@ type Config struct {
 	// read RelayDirectory itself, since either can outlive its snapshot's
 	// validity window with uptime.
 	RelayDirectoryPath string
+
+	// Client device credential (issue #50/#51, ADR-0045, ADR-0046), client role.
+	// Appended after RelayDirectoryPath to keep the struct tail a stable seam.
+	//
+	// This is a DIFFERENT credential from AdmissionCred - see core/devicecred's
+	// package doc - and the engine does not obtain the first one for a device
+	// (enrollment, by claim code, is out of this feature's scope). What it does:
+	// generate and keep the on-device key that never leaves it, hold whatever
+	// credential + issuer cert something else provisioned into DeviceCredDir,
+	// present that chain on every connect (core/devicecred_connect.go), and keep
+	// it fresh by renewal when DeviceRenew is set.
+
+	// DeviceCredDir is where the on-device keypair and the device credential +
+	// issuer cert (core/devicestore) persist across restarts. Empty means both
+	// are IN-MEMORY ONLY: a fresh keypair every restart and no credential to
+	// present, ever - a client that never touches this field connects exactly as
+	// one predating #50 does. Only the client role reads it.
+	DeviceCredDir string
+
+	// DeviceRenew, when set, lets a client refresh its device credential before
+	// it expires (account-model.md §5) instead of running unrenewed until the
+	// coordinator's gate - if the operator has one configured - starts refusing
+	// connects with a legible reason. It is called with the device's own public
+	// key and a Sign closure scoped to exactly the renewal purpose and whatever
+	// audience/challenge the account service's protocol wants; the raw private
+	// key is never handed out. Nil (the default) leaves renewal off: the client
+	// runs on whatever core/devicestore already holds until it expires.
+	//
+	// This is a seam rather than a built-in HTTP client on purpose: the account
+	// service's renewal endpoint has no specified request shape anywhere yet (see
+	// ADR-0046), and the public repository committing to one would bind a
+	// contract the private service does not yet own. Only the client role reads
+	// it, and only when DeviceCredDir (or an out-of-band Put into its store) has
+	// given this device something to renew in the first place.
+	DeviceRenew func(ctx context.Context, req DeviceRenewRequest) (cred, issuerCert string, err error)
+
+	// DeviceRenewMargin is how far before its claimed expiry a stored device
+	// credential is treated as due for renewal. Zero uses a 6h default -
+	// comfortably inside the 24-72h lifetime account-model.md §5 describes.
+	// Meaningless without DeviceRenew also set.
+	DeviceRenewMargin time.Duration
 }
 
 // RelayHopsMax is the hard ceiling on Config.RelayHops (ADR-0038 §6). The client
@@ -494,6 +536,23 @@ type Engine struct {
 	// than the opaque random id an ordinary relay carries. See setupRelayChaining
 	// on why an unset ExitKeyHex is refused for that combination.
 	exitKey noise.DHKey
+
+	// deviceKey is this client's on-device keypair for the account service's
+	// entitlement chain (issue #50/#51, core/devicecred_connect.go) — a
+	// DIFFERENT identity from exitKey, which authenticates a forwarder role, not
+	// a client. Set once in newEngine for the client role (nil for a pure
+	// forwarder) and read-only thereafter. Generated fresh, or loaded from
+	// Config.DeviceCredDir, by core/devicestore.LoadOrGenerateKey — see there for
+	// why a present-but-corrupt key file is a hard construction error rather
+	// than a silent regeneration.
+	deviceKey ed25519.PrivateKey
+
+	// deviceStore holds the device credential + issuer cert core/devicestore
+	// persists across restarts, and is what deviceRenewLoop refreshes. Non-nil
+	// whenever the client role is on, even with Config.DeviceCredDir empty (an
+	// in-memory store that simply never has anything to present — see
+	// presentDeviceCredential); nil for a pure forwarder, which never connects.
+	deviceStore *devicestore.Store
 
 	// connectCountry is the country this client asks to egress in (issue #146) —
 	// Config.Geo, or the first assignable country when that is unset (resolveCountry).
@@ -725,6 +784,25 @@ type wire struct {
 	Receipt      *accounting.Receipt    `json:"receipt,omitempty"`     // capacity-report payload (issue #158): a co-signed usage receipt (ADR-0021) the CLIENT sends to the coordinator to feed the capacity estimator. Not a node self-report — the node cannot move this number (both parties co-sign the throughput, and SignReport binds the client-asserted Saturated bit), which is exactly why it can ride the wire where a self-reported capacity could not. Absent on every other message.
 	ReportSig    []byte                 `json:"reportSig,omitempty"`   // client signature over the capacity-report receipt + its saturation bit (accounting.SignReport, issue #158): proves the un-co-signed Saturated bit came from the client that co-signed the receipt.
 	IngressPort  int                    `json:"ingressPort,omitempty"` // a relay's onion-forward TCP listener port (issue #124/#142, ADR-0038): the port an upstream hop dials to hand this node a layer to peel. Self-reported on register — a coordinator cannot observe a TCP listener from a UDP register — but only the PORT is trusted: the coordinator advertises the ingress as its OWN observed source IP joined to this port (buildSnapshot), so a relay cannot assert an ingress IP and therefore cannot claim to sit in an AS it does not occupy. Contrast SpeedCap, where a self-report is safe because it only binds downward; here the self-report is exactly what an attacker would profit from, so only the unforgeable half is taken. Zero/absent => this relay advertises no ingress and is not relay-eligible.
+
+	// Connect-time device-credential verification (issue #50/#51, ADR-0045).
+	// These four carry the account service's two-tier entitlement chain
+	// (core/devicecred), a DIFFERENT credential from Cred above: Cred is the
+	// network's own membership (one tier, bearer, operator-anchored), these are
+	// an entitlement bound to one device (two tiers, challenge-bound, anchored to
+	// a root the operator does not hold). Both are checked on a connect and
+	// neither replaces the other. Byte-for-byte the same four fields as
+	// cmd/coordinator's wire (that binary does not import this one, by design —
+	// see this type's doc); TestDeviceCredWireContract pins both copies so they
+	// cannot drift, the same way TestCountryReplyWireContract pins wireCountry.
+	//
+	// All four are additive/optional: a client with nothing to present sends none
+	// of them, connecting exactly as it did before #50 existed — see
+	// core/devicecred_connect.go's presentDeviceCredential.
+	Challenge    string `json:"challenge,omitempty"`    // standard base64. Client -> coordinator on "challenge": empty (just Cred + Type). Coordinator -> client on the reply: the fresh nonce to sign. Client -> coordinator again on "connect": that same nonce, echoed back so a mismatch is a clear refusal rather than an opaque assertion failure.
+	DeviceCred   string `json:"deviceCred,omitempty"`   // this device's credential in its "bacchusd1:" envelope form (core/devicestore), signed by the account service's issuer key.
+	IssuerCert   string `json:"issuerCert,omitempty"`   // the issuer cert in its "bacchusi1:" envelope form, signed by the offline root DeviceCred chains through.
+	DeviceAssert string `json:"deviceAssert,omitempty"` // standard base64. This device's signature over purpose || audience || challenge (core/devicecred.SignAssertion), proving it holds the key inside DeviceCred for exactly this coordinator and this challenge.
 }
 
 // Declared quota dispositions (issue #143, ADR-0040) carried in wire.QuotaState on
@@ -841,6 +919,16 @@ func New(cfg Config) (*Engine, error) {
 		return nil, err
 	}
 
+	// The client's own device identity and credential store (issue #50/#51,
+	// core/devicecred_connect.go). Built before the engine for the same reason as
+	// the two calls just above: a corrupt on-device key file must fail
+	// construction, never fall through to silently minting a fresh identity that
+	// strands whatever credential this device already holds.
+	deviceKey, deviceStore, err := setupDeviceCredential(cfg, roles)
+	if err != nil {
+		return nil, err
+	}
+
 	eng, err := newEngine(cfg, roles, exitKey)
 	if err != nil {
 		return nil, err
@@ -849,6 +937,7 @@ func New(cfg Config) (*Engine, error) {
 	eng.exitVerifier = exitVerifier
 	eng.clientCRL = clientCRL
 	eng.relayDir.Store(relayDir)
+	eng.deviceKey, eng.deviceStore = deviceKey, deviceStore
 	return eng, nil
 }
 
@@ -1136,6 +1225,16 @@ func (e *Engine) Start(ctx context.Context) error {
 	if e.relayDir.Load() != nil && e.cfg.RelayDirectoryPath != "" {
 		e.wg.Add(1)
 		go e.reloadRelayDirLoop()
+	}
+
+	// Device credential renewal (issue #50/#51, core/devicecred_connect.go), the
+	// same shape as the CRL block above: only for the client role, and only when
+	// an embedder actually supplied a renewal transport. deviceStore is non-nil
+	// whenever clientOn is (see newEngine) even with DeviceCredDir empty, so the
+	// real gate here is DeviceRenew — no seam, nothing to call, nothing to loop.
+	if e.clientOn && e.deviceStore != nil && e.cfg.DeviceRenew != nil {
+		e.wg.Add(1)
+		go e.deviceRenewLoop()
 	}
 
 	// Watch ctx for cancellation. Not tracked by wg (it calls Stop, which waits
@@ -1585,9 +1684,9 @@ func (e *Engine) deliver(l *coordLink, m wire) {
 // datagrams and routes them to the per-session signalers (offer/answer/
 // candidate), the forwarder assignment path (assign — the session's signaling
 // then flows back over this same link l), the client rendezvous path
-// (session/exits/error), and the handshake reject path. One readLoop runs per
-// link; the shared msgCh is closed by Stop once every readLoop has exited, so
-// no single blocked member ends the client's rendezvous.
+// (session/countries/error/challenge), and the handshake reject path. One
+// readLoop runs per link; the shared msgCh is closed by Stop once every readLoop
+// has exited, so no single blocked member ends the client's rendezvous.
 func (e *Engine) readLoop(l *coordLink) {
 	defer e.wg.Done()
 	buf := make([]byte, 65535)
@@ -1605,7 +1704,13 @@ func (e *Engine) readLoop(l *coordLink) {
 			e.startFwdSession(m, l)
 		case sigOffer, sigAnswer, sigCandidate:
 			e.routeSignal(m)
-		case "session", "countries", "error":
+		// "challenge" answers a device-credential challenge request
+		// (core/devicecred_connect.go, issue #50/#51) and is delivered through the
+		// exact same client-rendezvous path as session/countries/error: it is a
+		// per-request reply on the same link, awaited the same way (awaitChallenge
+		// mirrors awaitSession), and a build with no client role has no business
+		// receiving one either.
+		case "session", "countries", "error", "challenge":
 			if !e.clientOn {
 				// A client rendezvous reply arriving at an engine with no client role
 				// is a real misconfiguration (or a confused coordinator), and dropping
