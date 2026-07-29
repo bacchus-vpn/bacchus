@@ -197,8 +197,10 @@ make either meaning move; it only gives the coordinator's one company.
 Renaming either would break every deployed unit file, every invite-generation
 path, and every doc, to fix an ambiguity that costs one sentence to state. The
 coordinator's flag help now states it and points here. A matching one-line note
-on `cmd/node`'s help text is proposed, not applied, across this change's
-file-ownership boundary.
+on `cmd/node`'s help text was proposed, not applied, across this change's
+file-ownership boundary — landed by issue #71 (see the amendment at the end of
+this file), once `cmd/node/main.go` was free of the concurrent change that owned
+it here.
 
 ## Consequences
 
@@ -224,6 +226,14 @@ file-ownership boundary.
 - **Roles are now a closed vocabulary in one place** (`AllRoles`). Adding a role
   means adding it there, or a single-key deployment silently stops admitting it.
   A test pins the list against the `Role` constants.
+
+## Amendment (issue #71, 2026-07-29): the node-side help-text note, applied as proposed
+
+§9 proposed a one-line note on `cmd/node/main.go`'s `-admission-pubkey` help,
+matching the disambiguating sentence `cmd/coordinator`'s already carried, and
+left it unapplied because that file was owned by a concurrent change at the
+time. It is free now: the note is in, naming the coordinator's authority-set
+meaning and pointing here. No behavior changed.
 
 ## Amendment (issue #26, 2026-07-29): a separate relay anchor, not the free `RoleRelay` reuse this ADR predicted
 
