@@ -8,6 +8,29 @@
     "DNS upstream (host:port)": "Вышестоящий DNS (хост:порт)",
     "Connect automatically when Bacchus starts": "Подключаться автоматически при запуске Bacchus",
     "Start Bacchus when you log in": "Запускать Bacchus при входе в систему",
+
+    "The settings below change how Bacchus builds a connection. Unlike the ones above, they do not depend on this device being routed, and take effect everywhere.": "Настройки ниже определяют, как Bacchus устанавливает соединение. В отличие от настроек выше, они не зависят от того, направляется ли весь трафик устройства через туннель, и действуют на всех платформах.",
+    "Automatically find the best path (recommended)": "Автоматически подбирать лучший путь (рекомендуется)",
+    "Transport try-order": "Порядок перебора транспортов",
+    "Each is tried from the top down until one carries traffic, then remembered for this network. reality rides TCP :443, webrtc rides UDP — keeping both covers networks where one is blocked.": "Транспорты перебираются сверху вниз, пока один не начнёт передавать трафик; затем он запоминается для этой сети. reality работает поверх TCP :443, webrtc — поверх UDP, поэтому наличие обоих покрывает сети, где заблокирован один из них.",
+    "Move up": "Вверх",
+    "Move down": "Вниз",
+
+    "Relay hops": "Промежуточных узлов",
+    "1 is a single relay, which sees both you and your exit. 2 or more builds a chain — and fails the connection rather than quietly using fewer hops if one cannot be built.": "1 — один ретранслятор, который видит и вас, и ваш выход. 2 и больше строит цепочку — и обрывает подключение, а не использует молча меньше узлов, если цепочку построить не удалось.",
+    "Relay directory file": "Файл каталога ретрансляторов",
+    "A signed snapshot of relays to build chains from. Required at 2 or more hops.": "Подписанный снимок списка ретрансляторов, из которых строятся цепочки. Обязателен при 2 и более узлах.",
+    "Relay directory public key (hex)": "Открытый ключ каталога ретрансляторов (hex)",
+    "Verifies the file above. Required at 2 or more hops.": "Проверяет файл выше. Обязателен при 2 и более узлах.",
+
+    "Admission authority public key (hex)": "Открытый ключ центра допуска (hex)",
+    "Verifies every exit end-to-end, independently of the coordinator. Blank does not check exits at all.": "Сквозная проверка каждого выхода, независимо от координатора. Пустое значение — выходы не проверяются вообще.",
+    "Revocation list file": "Файл списка отзыва",
+    "Optional, re-read while connected. Needs the public key above.": "Необязательно, перечитывается во время подключения. Требует открытый ключ выше.",
+
+    "2 or more relay hops needs both the relay directory file and its public key": "Для 2 и более промежуточных узлов нужны и файл каталога ретрансляторов, и его открытый ключ",
+    "revocation list path requires the admission public key": "Путь к списку отзыва требует открытый ключ центра допуска",
+
     "Save": "Сохранить",
     "Cancel": "Отмена",
     "Save failed:": "Не удалось сохранить:",

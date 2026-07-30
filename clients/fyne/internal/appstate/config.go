@@ -13,15 +13,21 @@ import (
 	"strings"
 )
 
-// Config holds this client's settings. Coordinators/STUN/TURN/admission are
-// the connection endpoints (unchanged since the #148 skeleton, hand-edited in
-// the config file - there is still no in-app editor for these). Bypass
-// through LaunchOnBoot (issue #152) are the user-facing Settings window's
-// fields, edited via settings.go and persisted the same way.
+// Config holds this client's settings. Coordinators/STUN/TURN are the
+// connection endpoints, unchanged since the #148 skeleton and still hand-edited
+// in the config file - there is no in-app editor for those. Everything from
+// AdmissionPubKey down is the user-facing Settings window's surface, edited via
+// settings.go and persisted the same way.
 //
-// The admission fields are not UI: they are a security check, and leaving
-// them out did not make this client simpler, it made it fail open. See their
-// doc.
+// The admission fields were config-file-only until issue #93: they are a
+// security check, and leaving them out did not make this client simpler, it
+// made it fail open. They stay readable from the file — an operator scripting a
+// deployment should not have to open a dialog — and are now settable in it too.
+// #93 is also where the four fields below them arrived. Its finding is worth
+// keeping next to the struct they were missing from: ADR-0039's parity bar is
+// eight items of ENFORCEMENT, so this client could meet it in full while being
+// unable to configure half of what core supports. Adding a field to core is not
+// finished until a client can reach it.
 type Config struct {
 	// Coordinators is the rendezvous pool: one or more coordinator UDP
 	// host:port endpoints (issue #6). Required - Controller.Connect has no
@@ -90,6 +96,45 @@ type Config struct {
 	// want the app available at login without it dialing out immediately, or
 	// vice versa.
 	LaunchOnBoot bool `json:"launchOnBoot"`
+
+	// TransportPool mirrors core.Config.TransportPool and clients/windows's
+	// same-named field, JSON key included: a preference-ordered ladder the
+	// client races and then converges on, per network (issue #15, ADR-0028).
+	// Empty turns the pool off and keeps the single-transport connect, which
+	// is what this client did before issue #93 — so the zero value is exactly
+	// pre-#93 behaviour.
+	//
+	// Whatever is saved here is restricted to the tunnel-safe set
+	// (SanitizePoolOrder) both on save and again in Controller.connectAsync,
+	// so a hand-edited config file cannot put an unsafe transport in the pool
+	// either. See connection.go's allowedPoolTransports for why each member
+	// qualifies — they qualify by two different mechanisms, one of which
+	// (ForceRelay) this client did not previously set at all.
+	TransportPool []string `json:"transportPool"`
+
+	// Relay chaining (ADR-0038, issue #93 here; issue #28 wired the walk
+	// client first and is the reference for all three). How many nodes a
+	// RELAYED path is routed through, so no single relay links the user to
+	// their exit — the privacy property the transport was built for, and
+	// unreachable from this client until #93.
+	//
+	//   - RelayHops mirrors core.Config.RelayHops. 0 or 1 (the default) is
+	//     today's single relay and needs neither field below. 2+ builds a
+	//     chain and REQUIRES both: chaining is fail-closed, so a chain that
+	//     cannot be built fails the connect rather than silently falling back
+	//     to fewer hops (core/relaychain.go's file doc). That failure reaches
+	//     the user as its own sentence rather than a generic connection
+	//     error — see state.go's relayChainFailedPrefix.
+	//   - RelayDirectoryPath is a file path to a coordinator-signed snapshot,
+	//     read fresh at every connect and re-read by the engine thereafter
+	//     (issue #27). Mirrors cmd/node's -relay-directory.
+	//   - RelayDirectoryKey is that snapshot's signing key, hex — mirroring
+	//     AdmissionPubKey's hex-string shape rather than core.Config's own
+	//     RelayDirectoryKey, which is raw ed25519.PublicKey bytes.
+	//     LoadRelayDirectory decodes this before it reaches core.Config.
+	RelayHops          int    `json:"relayHops"`
+	RelayDirectoryPath string `json:"relayDirectoryPath"`
+	RelayDirectoryKey  string `json:"relayDirectoryKey"`
 }
 
 // BypassModeInclude and BypassModeExclude are the two values BypassMode

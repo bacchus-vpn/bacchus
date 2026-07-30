@@ -124,12 +124,14 @@ key (64 hex chars) to turn on ADR-0026/#60's end-to-end check that the exit you 
 matched with is actually admission-authorized; add `admissionCrlPath`, pointing at a
 signed CRL file (#69, hot-reloaded), to reject exits revoked before their credential
 expires. A CRL path without a public key is a startup error, not a silent no-op.
+Since #93 both are settable in Settings too — the config file is still read, so an
+operator scripting a deployment need not open a dialog.
 
-## Settings (issue #152)
+## Settings (`old #152`, then #93)
 
-The `File` menu's `Settings…` opens one window over six fields, all persisted to the
-same config file `LoadConfig` read at startup (or, on a fresh install with no config
-file yet, to this OS's per-user config directory — see Config above):
+The `File` menu's `Settings…` opens one window over every field below, all persisted
+to the same config file `LoadConfig` read at startup (or, on a fresh install with no
+config file yet, to this OS's per-user config directory — see Config above):
 
 | Field | Config key | Live today? |
 |---|---|---|
@@ -139,6 +141,33 @@ file yet, to this OS's per-user config directory — see Config above):
 | DNS upstream (`host:port`) | `dns` | **Windows only** — see below |
 | Connect automatically when Bacchus starts | `autoConnect` | **Yes** |
 | Start Bacchus when you log in | `launchOnBoot` | **Yes** |
+| Automatically find the best path + transport try-order | `transportPool` | **Yes** |
+| Relay hops | `relayHops` | **Yes** |
+| Relay directory file and its public key | `relayDirectoryPath`, `relayDirectoryKey` | **Yes** |
+| Admission authority public key | `admissionPubKey` | **Yes** |
+| Revocation list file | `admissionCrlPath` | **Yes** |
+
+The lower five arrived with #93 and carry no platform caveat: they are `core` config,
+enforced by `core`, and so mean the same thing on every platform this client runs on.
+Before #93 they were unreachable here — the client replacing `clients/windows` could
+not configure them while the client being replaced could. See ADR-0039's
+configuration-parity bar, which that issue added precisely because the original
+eight-point bar was entirely about enforcement and so could be met in full with this
+gap wide open.
+
+**Relay hops is the one with a sharp edge.** `1` (the default) is a single relay,
+which sees both you and your exit. `2` or more builds a chain so no single node links
+you to your exit — and chaining is deliberately **fail-closed**: if a chain that deep
+cannot be built from your directory, the connection *fails* rather than quietly using
+fewer hops. When that happens the client says so specifically ("no path met your
+relay-hops setting: …") rather than reporting a generic connection error, because
+retrying into the same directory retries into the same wall. `2`+ requires both the
+relay directory file and its public key; Settings refuses to save without them rather
+than letting the failure surface at connect time.
+
+The transport try-order is only offered for transports this client can make
+tunnel-safe. A transport named in a hand-edited config that is not on that list is
+dropped rather than shown — what the window displays is what it will save.
 
 **Split-tunnel, kill-switch, and DNS are enforced on Windows and saved-but-inert
 elsewhere.** On Windows they are passed straight into `enforcement.Policy` and
@@ -203,7 +232,7 @@ launch a GUI binary, matching `clients/windows`'s own job.
   This is the biggest remaining gap between those platforms and `clients/windows`,
   and it is the one to read before trusting the banner. Windows does route the
   device (bacchus#59); Linux is `[E10]` (bacchus#37) and macOS `[E9]` (bacchus#36).
-- Settings (#152) for split-tunnel/kill-switch/DNS enforce nothing on Linux/macOS —
+- Settings (`old #152`) for split-tunnel/kill-switch/DNS enforce nothing on Linux/macOS —
   same root cause as the point above. Live on Windows. See Settings above.
 - `Blocked` makes no claim about leakage on any platform. On Windows an armed
   kill-switch is holding the machine closed; the banner still does not say so,
@@ -213,7 +242,8 @@ launch a GUI binary, matching `clients/windows`'s own job.
   the coordinator picks the exit inside it. Nothing here chooses a jurisdiction, so
   a user who needs a specific one cannot express that yet — see "What it does" above.
 - Exit admission (ADR-0026/#60) and CRL revocation (#69) are **off unless configured**
-  — set `admissionPubKey` (and optionally `admissionCrlPath`) in the config file. Left
+  — set `admissionPubKey` (and optionally `admissionCrlPath`) in Settings or the config
+  file. Left
   unset, core fails open and the client accepts any exit it can complete a handshake
   with, which is the pre-#60 behaviour and matches a coordinator with admission
   disabled. If you run an admission authority, set it: it is the client's only

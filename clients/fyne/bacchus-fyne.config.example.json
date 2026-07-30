@@ -24,5 +24,10 @@
   "bypassMode": "exclude",
   "disableKillSwitch": false,
   "autoConnect": false,
-  "launchOnBoot": false
+  "launchOnBoot": false,
+
+  "transportPool": [],
+  "relayHops": 1,
+  "relayDirectoryPath": "",
+  "relayDirectoryKey": ""
 }

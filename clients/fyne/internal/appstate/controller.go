@@ -171,6 +171,27 @@ func (c *Controller) connectAsync(gen uint64) {
 		return
 	}
 
+	// Read the relay directory before anything is built: a missing file or a
+	// non-hex key is the user's to fix, and naming it here — as its own
+	// message, from the field that caused it — is the whole reason this is not
+	// left to core's construction-time refusal. Nothing is read at all below 2
+	// hops, which is the default (see LoadRelayDirectory).
+	relayDir, relayDirKey, err := LoadRelayDirectory(c.cfg.RelayHops, c.cfg.RelayDirectoryPath, c.cfg.RelayDirectoryKey)
+	if err != nil {
+		c.abort(gen, err)
+		return
+	}
+	// Re-sanitized here and not only on save (settings.go), so a hand-edited
+	// config file cannot put a transport into the pool that this client's
+	// tunnel could not make safe. SelectionDir is meaningful only with a pool,
+	// so it stays empty without one rather than creating a directory nothing
+	// writes to.
+	pool := SanitizePoolOrder(c.cfg.TransportPool)
+	var selectionDir string
+	if len(pool) > 0 {
+		selectionDir = DefaultSelectionDir()
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	eng, err := core.New(core.Config{
 		Coordinators: c.cfg.Coordinators,
@@ -191,7 +212,45 @@ func (c *Controller) connectAsync(gen uint64) {
 		// coordinator unless these actually reach the engine. See Config's doc.
 		AdmissionPubKey:  c.cfg.AdmissionPubKey,
 		AdmissionCRLPath: c.cfg.AdmissionCRLPath,
-		OnEvent:          func(ev core.Event) { c.onEvent(gen, ev) },
+		// Transport pool (issue #93). Empty reproduces the pre-#93
+		// single-transport Connect exactly, so the default path is unchanged.
+		TransportPool: pool,
+		SelectionDir:  selectionDir,
+		// ForceRelay pins every WebRTC candidate to the configured TURN server
+		// — an address enforcement.Policy already excludes from the tunnel's
+		// own default route — instead of letting ICE pick a direct P2P
+		// candidate whose address is learned only after the fact.
+		//
+		// It is set only where this platform actually routes the whole device,
+		// and that gate is the whole point. A full-device tunnel must be able
+		// to exclude an underlay address BEFORE dialing it, or the underlay
+		// follows the split-default back into the tunnel it is carrying (a
+		// loop, and a Block once the kill-switch arms — clients/internal/
+		// enforcement/poolroutes.go's file doc). reality is handled late, on
+		// the dial path, by OnUnderlayDial below; webrtc has no such hook
+		// because it is not supposed to need one — it is supposed to be pinned
+		// here. clients/windows has set this since issue #75 for exactly that
+		// reason. This client did not, which left its webrtc underlay
+		// unexcluded on the one platform where it enforces; #93 surfaced it
+		// while wiring TransportPool, since a pool whose first member is
+		// webrtc makes the omission load-bearing rather than latent.
+		//
+		// Not unconditional, unlike clients/windows: on a platform with no
+		// Enforcer this client is proxy-only, there is no tunnel to loop into,
+		// and forcing every session through TURN would spend an operator's
+		// relay bandwidth and a round trip to fix a problem that platform does
+		// not have.
+		ForceRelay: c.enf != nil,
+		// Relay chaining (ADR-0038, issue #93). RelayHops 0/1 with a nil
+		// directory is pre-#93 behaviour exactly. RelayDirectoryPath is passed
+		// alongside the bytes so the engine keeps the directory fresh for the
+		// rest of the session rather than pinning the snapshot read above
+		// (issue #27).
+		RelayHops:          c.cfg.RelayHops,
+		RelayDirectory:     relayDir,
+		RelayDirectoryKey:  relayDirKey,
+		RelayDirectoryPath: c.cfg.RelayDirectoryPath,
+		OnEvent:            func(ev core.Event) { c.onEvent(gen, ev) },
 		// Wired to the Enforcer, not to a Session: the transport pool's first
 		// reality underlay is dialled inside Connect below, before enforcement
 		// starts, so there is no Session yet to hand it to. The Enforcer
