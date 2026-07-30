@@ -632,3 +632,66 @@ bytes are here.
   space only. The real table is exercised by a thin smoke test and by assertions that never
   pin a specific AS to a specific address, so a refresh that renumbers an allocation does
   not fail the suite for being correct.
+
+## Amendment (2026-07-30, issue #61) — the chosen source also covers country, so deriving one stops requiring a MaxMind account
+
+The 2026-07-29 amendment §3 vetted a publisher and a licence in order to ship the AS
+table: iptoasn.com, PDDL v1.0, confirmed against the licence text rather than a summary.
+That vetting turns out to cover a second dataset. The same publisher issues **IP-to-Country**
+files on the same terms, and those are now what a coordinator stages for `core/geoip`.
+
+This is recorded here, rather than only in ADR-0042, because it changes what *this* record
+committed to. §3 chose a source for one input; the consequence below is that one publisher
+is now a dependency for two independent security-relevant inputs.
+
+### 1. What changed
+
+`core/geoip` gained a loader for `range_start range_end country_code` rows beside its
+GeoLite2 CSV loader, and `-geoip` now accepts either format in the directory it is given,
+preferring the range files. `docs/RUNNING.md` documents the new staging. Nothing about the
+AS table moved.
+
+The reason for the switch is licence, not shape. GeoLite2 needs a free MaxMind account and
+a licence key to download, and its terms restrict redistribution. That is survivable while
+one operator runs every coordinator — each host fetches its own, nobody redistributes
+anything — and becomes an onboarding tax the moment coordinators federate, because a
+volunteer operator would need to register with a third party before their coordinator
+could derive a country at all. The alternative to deriving it is trusting each node's
+self-report, which is what `core/geoip` exists to stop (`old #136`). A licence
+prerequisite sitting directly upstream of a security property is worth removing before
+anyone depends on it.
+
+### 2. What this does *not* extend
+
+The first amendment's ruling — the table is **committed** and embedded in the client
+build — stays confined to the AS table. The country file is fetched per host and stays out
+of the repository, and the asymmetry is not an oversight:
+
+- The AS table is a **client** input. A client cannot be handed a file, so embedding is
+  the only way it arrives, and §6's churn numbers bound the staleness that buys.
+- The country table is a **coordinator** input, on an operator-run machine that can be
+  handed a file and refreshed without a release. Committing it would buy nothing and bake
+  in data that is wrong within weeks — with no reader able to tell, because a stale
+  country table does not fail, it mislabels.
+
+So the licence permits committing either, and only one is committed. The reason is the
+consumer, not the terms.
+
+### 3. Consequences
+
+- **A federated coordinator operator needs no third-party account** to derive node
+  country honestly. That was the point.
+- **One publisher is now a single point of dependency for two security inputs**, AS and
+  country. Stated plainly rather than left implicit: if iptoasn.com stops publishing or
+  starts publishing badly, both the client's diversity scoring and the coordinator's
+  country derivation degrade — each toward its own safe direction (§3's unknown pooling,
+  and the node-hint fallback respectively), but both at once and from one cause. The
+  mitigation is that both degradations are *reported* rather than silent, and that
+  neither dataset is on a fetch path at runtime.
+- **GeoLite2 remains loadable**, unchanged and still tested, for a deployment that already
+  staged it. Nothing about it stopped working, so nothing was deleted.
+- **Shipping the loader does not close the hole; staging the file does.** `-geoip` is
+  unset in production, which means every node's country is currently its own self-report
+  and a Sybil node can claim any country — and country is the only thing a client selects
+  on (ADR-0042). The deployment step is the fix, and it is deliberately named here so that
+  a closed issue is not read as a closed gap.
