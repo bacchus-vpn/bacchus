@@ -5,6 +5,8 @@
     "Finding the safest way to connect…": "Ищем безопасный способ подключения…",
     "Proxy ready": "Прокси готов",
     "Apps set to use the proxy at 127.0.0.1:1080 are protected. Other apps are not.": "Защищены только приложения, которым указан прокси 127.0.0.1:1080. Остальные — нет.",
+    "Protected": "Защищено",
+    "All of this device's traffic goes through Bacchus.": "Весь трафик этого устройства идёт через Bacchus.",
     "Blocked": "Заблокировано",
     "The connection dropped — trying to reconnect…": "Соединение прервано — пробуем переподключиться…",
     "Connect": "Подключиться",

@@ -3,8 +3,10 @@ package appstate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
+	"github.com/bacchus-vpn/bacchus/clients/internal/enforcement"
 	"github.com/bacchus-vpn/bacchus/core"
 )
 
@@ -29,9 +31,24 @@ type Controller struct {
 	OnState  func(ConnState)
 	OnDetail func(string)
 
+	// Logf, if set, receives this client's own diagnostics and everything the
+	// enforcement layer logs (route installs that failed, kill-switch
+	// arming). Not the detail line: that is one calm user-facing sentence,
+	// and OS-command failures are neither calm nor actionable by a user.
+	// Whatever this points at, enforcement redacts addresses before writing
+	// (issue #140).
+	Logf func(format string, args ...any)
+
+	// enf is this client's OS enforcement backend, or nil on a platform that
+	// has none yet. Set once in NewController and never written again, so it
+	// is safe to read without the lock — which matters, because the UI reads
+	// it from inside an OnState callback that runs with c.mu held.
+	enf enforcement.Enforcer
+
 	mu     sync.Mutex
 	eng    *core.Engine
 	cancel context.CancelFunc
+	sess   enforcement.Session
 	state  ConnState
 
 	// gen identifies the current connect attempt. Connect and Disconnect each bump
@@ -57,7 +74,44 @@ type Controller struct {
 }
 
 func NewController(cfg Config) *Controller {
-	return &Controller{cfg: cfg}
+	c := &Controller{cfg: cfg}
+	// A platform with no Enforcer yet returns a NotImplementedError, and that
+	// is not a failure to report — it is this client's pre-bacchus#59 posture,
+	// which is proxy-only and says so (see DeviceEnforced). Windows has one;
+	// [E9]/[E10] are what give Linux and macOS theirs.
+	if enf, err := enforcement.New(); err == nil {
+		c.enf = enf
+		// Parity item 3, at the only moment it works: a lockdown left behind by
+		// a killed prior session has the user offline before they touch
+		// anything, so this cannot wait until they press Connect.
+		enf.Recover()
+	}
+	return c
+}
+
+// DeviceEnforced reports whether a Protected session on this build routes the
+// whole device, or only what is pointed at SocksAddr.
+//
+// It is a property of the platform, not of the moment, which is what makes it
+// safe to call from an OnState callback (the caller holds c.mu; this touches
+// no locked state). The per-session question collapses into it: when an
+// Enforcer exists, connectAsync refuses to reach Protected unless enforcement
+// actually came up — a failed Start aborts rather than falling back to
+// proxy-only. That refusal is parity item 7. Silently degrading to
+// unprotected is the single failure mode the whole bar exists to rule out,
+// and "the user gets a working proxy instead" is exactly what that failure
+// would look like from the inside.
+//
+// So: false means the UI must keep saying "Proxy ready" and naming what is
+// and is not covered (ADR-0039's Scope). True means it has earned the word
+// "Protected" — the same word clients/windows has always been entitled to,
+// through the same code.
+func (c *Controller) DeviceEnforced() bool { return c.enf != nil }
+
+func (c *Controller) logf(format string, args ...any) {
+	if c.Logf != nil {
+		c.Logf(format, args...)
+	}
 }
 
 // SocksAddr is where this client's SOCKS5 proxy listens, and it is FIXED rather
@@ -138,6 +192,12 @@ func (c *Controller) connectAsync(gen uint64) {
 		AdmissionPubKey:  c.cfg.AdmissionPubKey,
 		AdmissionCRLPath: c.cfg.AdmissionCRLPath,
 		OnEvent:          func(ev core.Event) { c.onEvent(gen, ev) },
+		// Wired to the Enforcer, not to a Session: the transport pool's first
+		// reality underlay is dialled inside Connect below, before enforcement
+		// starts, so there is no Session yet to hand it to. The Enforcer
+		// records it and bring-up installs it (issue #109). nil when this
+		// platform has no Enforcer, which core treats as "no hook".
+		OnUnderlayDial: c.underlayDialHook(),
 	})
 	if err != nil {
 		cancel()
@@ -156,6 +216,28 @@ func (c *Controller) connectAsync(gen uint64) {
 		return
 	}
 
+	// Device-wide enforcement, once the SOCKS server it bridges into is
+	// actually up (core.Engine.Connect started it). This is the step that
+	// makes "Protected" mean the device rather than one proxy port.
+	//
+	// A failure here aborts the whole connect. It deliberately does NOT fall
+	// back to leaving the engine running as a working SOCKS proxy, even
+	// though that would look like the friendlier outcome and would leave the
+	// user with something that works: the user asked to be protected, the app
+	// would be unable to protect them, and a green banner over a proxy that
+	// covers nothing they configured is this ADR's own Scope-section lie in
+	// its original form. Parity item 7 names this exact failure — "silently
+	// degrading to unprotected is the one failure mode this whole bar exists
+	// to rule out" — and the overwhelmingly common cause is running
+	// unelevated, which is fixable, but only by a user who is told.
+	sess, err := c.startEnforcement()
+	if err != nil {
+		eng.Stop()
+		cancel()
+		c.abort(gen, err)
+		return
+	}
+
 	c.mu.Lock()
 	// Disconnect (or a newer Connect) may have run while the above was in flight;
 	// honor it rather than resurrecting a session nothing wants, or trampling an
@@ -163,13 +245,58 @@ func (c *Controller) connectAsync(gen uint64) {
 	// it built itself.
 	if c.gen != gen || c.state != Connecting {
 		c.mu.Unlock()
+		if sess != nil {
+			// Before eng.Stop(), mirroring the teardown order Disconnect uses
+			// and tunnel.Close documents: the kill-switch is lifted and the
+			// routes come out first, so egress is restored before the tunnel
+			// carrying it goes away rather than after.
+			sess.Close()
+		}
 		eng.Stop()
 		cancel()
 		return
 	}
-	c.eng, c.cancel, c.state = eng, cancel, Protected
+	c.eng, c.cancel, c.sess, c.state = eng, cancel, sess, Protected
 	c.publishLocked(Protected)
 	c.mu.Unlock()
+}
+
+// underlayDialHook returns the OnUnderlayDial callback, or nil when this
+// platform has no Enforcer — core reads a nil hook as "no hook", and handing
+// it a closure that dereferences a nil Enforcer would panic on the dial path.
+func (c *Controller) underlayDialHook() func(string) {
+	if c.enf == nil {
+		return nil
+	}
+	return c.enf.ReserveUnderlay
+}
+
+// startEnforcement brings up device-wide routing for the session that just
+// connected. Returns (nil, nil) — no session, no error — on a platform with
+// no Enforcer, which is this client's documented proxy-only posture rather
+// than a failure; see DeviceEnforced.
+func (c *Controller) startEnforcement() (enforcement.Session, error) {
+	if c.enf == nil {
+		return nil, nil
+	}
+	dns := c.cfg.DNS
+	if dns == "" {
+		dns = DefaultDNSUpstream
+	}
+	sess, err := c.enf.Start(enforcement.Policy{
+		Coordinators: c.cfg.Coordinators,
+		STUNURL:      c.cfg.STUN,
+		TURNURL:      c.cfg.TURN,
+		DNSUpstream:  dns,
+		Bypass:       c.cfg.Bypass,
+		BypassMode:   NormalizeBypassMode(c.cfg.BypassMode),
+		KillSwitch:   !c.cfg.DisableKillSwitch,
+		Logf:         c.logf,
+	}, SocksAddr)
+	if err != nil {
+		return nil, fmt.Errorf("could not route this device: %w", err)
+	}
+	return sess, nil
 }
 
 // Disconnect tears the active session down, entirely off the calling
@@ -178,8 +305,8 @@ func (c *Controller) connectAsync(gen uint64) {
 func (c *Controller) Disconnect() {
 	go func() {
 		c.mu.Lock()
-		eng, cancel := c.eng, c.cancel
-		c.eng, c.cancel, c.state = nil, nil, Disconnected
+		eng, cancel, sess := c.eng, c.cancel, c.sess
+		c.eng, c.cancel, c.sess, c.state = nil, nil, nil, Disconnected
 		// Any connect in flight is now stale and must not install its engine on top
 		// of this: the user asked to be disconnected, and an attempt that finishes a
 		// second later does not get to overrule them.
@@ -200,6 +327,15 @@ func (c *Controller) Disconnect() {
 		c.publishLocked(Disconnected)
 		c.mu.Unlock()
 
+		// Enforcement first, engine second (tunnel.Close's own order, and
+		// ADR-0014's): the kill-switch is lifted and the routes come out
+		// before the tunnel that was carrying traffic goes away. Reversed,
+		// the machine spends the length of an engine teardown fail-closed
+		// over a tunnel that is already gone — which is not a leak, but is
+		// the user watching their network die for no reason they can see.
+		if sess != nil {
+			sess.Close()
+		}
 		if cancel != nil {
 			cancel()
 		}
@@ -268,7 +404,11 @@ func (c *Controller) abort(gen uint64, err error) {
 	// Re-checked: gen can move while the detail is being delivered, and the check
 	// that matters is the one that guards the write.
 	if c.gen == gen {
-		c.eng, c.cancel, c.state = nil, nil, Disconnected
+		// c.sess is nil here in every reachable path — abort is never called
+		// once a session is up (see this function's doc), and enforcement is
+		// installed in the same locked step as the engine. Cleared anyway so
+		// the invariant is the code's, not a comment's.
+		c.eng, c.cancel, c.sess, c.state = nil, nil, nil, Disconnected
 		c.publishLocked(Disconnected)
 	}
 	c.mu.Unlock()

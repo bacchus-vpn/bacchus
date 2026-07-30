@@ -1,6 +1,7 @@
 {
     "Bacchus — Settings": "Bacchus — Настройки",
     "Split-tunnel, kill-switch, and DNS below are saved for later use - this client has no device-wide tunnel yet, so they do not change traffic today.": "Настройки раздельного туннелирования, аварийного отключения и DNS ниже сохраняются на будущее — у этого клиента пока нет туннеля на уровне всего устройства, поэтому сейчас они не влияют на трафик.",
+    "Split-tunnel, kill-switch, and DNS below take effect on the next connect. Bacchus routes this whole device, so these change what leaves it.": "Раздельное туннелирование, аварийное отключение и DNS вступят в силу при следующем подключении. Bacchus направляет весь трафик этого устройства, поэтому эти настройки влияют на то, что его покидает.",
     "Split-tunnel bypass list (one per line: IP, CIDR, or domain)": "Список исключений раздельного туннелирования (по одному на строку: IP, CIDR или домен)",
     "Split-tunnel mode": "Режим раздельного туннелирования",
     "Kill-switch (block traffic if the tunnel drops)": "Аварийное отключение (блокировать трафик при обрыве туннеля)",

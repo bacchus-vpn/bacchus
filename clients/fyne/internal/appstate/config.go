@@ -59,19 +59,18 @@ type Config struct {
 
 	// Bypass, BypassMode, DisableKillSwitch, and DNS mirror clients/windows's
 	// same-named Config fields (config.go) exactly - same names, same JSON
-	// keys, same semantics - but this client has no TUN device (ADR-0039's
-	// Scope): no route table changes, no DNS interception, no OS-level
-	// firewall lockdown. core.Config itself has no fields for any of these
-	// three (confirmed by reading it - they are entirely clients/windows's
-	// own TUN-side machinery, in tunnel.go/splittunnel.go/killswitch.go), so
-	// there is nothing in this client for them to reach yet. They are saved
-	// here anyway, deliberately: forward-compatible config surface for
-	// whichever later card ports tun2socks to this client, matching
-	// ADR-0039's Consequences section ("the next client cards ... build on
-	// Controller"). settings.go's window says so plainly, so a user turning
-	// "kill-switch" on here never believes it is armed - the one thing this
-	// app must never get wrong (see ui.go's stateDescription doc on the same
-	// point).
+	// keys, same semantics - and as of bacchus#59 they are live on any
+	// platform with an Enforcer, which today means Windows: Controller passes
+	// them straight into enforcement.Policy, and the same code that has
+	// always honored them for clients/windows honors them here.
+	//
+	// They were config surface only until then, which is why this comment
+	// used to say at length that nothing enforced them. On a platform with no
+	// Enforcer yet ([E9] macOS bacchus#36, [E10] Linux bacchus#37) that is
+	// still exactly true, and the UI still says so rather than letting a
+	// saved "kill-switch: on" imply an armed one - see
+	// Controller.DeviceEnforced, which is what settings.go and ui.go ask
+	// instead of assuming either answer.
 	Bypass            []string `json:"bypass"`
 	BypassMode        string   `json:"bypassMode"`
 	DisableKillSwitch bool     `json:"disableKillSwitch"`
@@ -101,6 +100,13 @@ const (
 	BypassModeInclude = "include"
 	BypassModeExclude = "exclude"
 )
+
+// DefaultDNSUpstream is used when Config.DNS is empty, and is the same value
+// clients/windows defaults to (its config.go) — one number, one sentence of
+// documentation, both clients. Queried over DNS-over-TCP through the tunnel,
+// never in the clear (see enforcement/killswitch_windows.go on why there is
+// no plaintext-DNS allowance in the lockdown either).
+const DefaultDNSUpstream = "1.1.1.1:53"
 
 // NormalizeBypassMode mirrors clients/windows/splittunnel.go's
 // parseSplitTunnelMode: only "include" (case-insensitive, whitespace
