@@ -1461,17 +1461,15 @@ func (e *Engine) handleSocksConnect(c net.Conn, buf []byte, sess Session, exitPu
 	// The transport stream carries a non-revealing label; the destination goes
 	// only inside the end-to-end Noise channel, so a relay in the path never
 	// learns it.
-	st, err := sess.OpenStream(openCtx, e2eLabel)
+	//
+	// dialChainedStream is OpenStream + clientHandshake when this path carries no
+	// chain, which is every path at the default hop count; when it does carry one it
+	// telescopes the hops first, ends in the same clientHandshake call, and — issue
+	// #24 — discards and rebuilds the chain on a fresh stream if a hop past the head
+	// turns out to be dead, which is a thing only a caller that can open a stream is
+	// able to do (core/relaychain.go).
+	nc, err := e.dialChainedStream(openCtx, sess, exitPub, target)
 	if err != nil {
-		c.Write([]byte{5, 1, 0, 1, 0, 0, 0, 0, 0, 0})
-		return
-	}
-	// dialE2E is clientHandshake when this path carries no chain, which is every
-	// path at the default hop count; when it does carry one it telescopes the hops
-	// first and ends in the same clientHandshake call (core/relaychain.go).
-	nc, err := e.dialE2E(st, planOf(sess), exitPub, target)
-	if err != nil {
-		_ = st.Close()
 		// A rejected exit credential (issue #60) lands here like any other
 		// handshake failure: the stream is dropped, SOCKS reports a general
 		// failure, and the reason is surfaced as an event for the user. A chain
