@@ -97,6 +97,44 @@ func startForwardNodeCapped(t *testing.T, key noise.DHKey, dir *relayDirectory, 
 	return ln.Addr().String(), e
 }
 
+// startForwardNodeWithCred is startForwardNode with an admission credential
+// configured (issue #26): exitTerminate presents Config.AdmissionCred in msg2
+// regardless of which role it is serving, so setting it here is what lets a
+// per-hop-verification test observe a REAL hop presenting a real credential
+// over the real wire path, rather than a hand-rolled responder standing in for
+// one.
+func startForwardNodeWithCred(t *testing.T, key noise.DHKey, dir *relayDirectory, cred []byte) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hop listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	e := &Engine{
+		roles:         map[string]bool{RoleRelay: true},
+		exitKey:       key,
+		cfg:           Config{RelayIngress: ln.Addr().String(), AdmissionCred: string(cred)},
+		forwardLimits: newForwardLimits(0, 0, 0),
+		limiterCtx:    context.Background(),
+	}
+	e.relayDir.Store(dir)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.SetDeadline(time.Now().Add(hopTestDeadline))
+			// No session cap: a hop is reached through its own ingress listener,
+			// which the coordinator assigned no session and therefore no tier
+			// (issue #58, ADR-0048 §5) — the same nil startForwardNodeCapped
+			// above passes, and what a real relay-forwarded connection gets.
+			go e.exitTerminate("", nil, c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
 // chainFixture is a whole assembled mesh for one test: a real exit, n forwarding
 // hops, a signed directory naming all of them, and the admission root the client
 // anchors to.
@@ -296,6 +334,191 @@ func TestRelayChainRejectsUnauthorizedExit(t *testing.T) {
 		t.Errorf("rejection came from %v, want the innermost (exit) layer — a hop layer rejecting instead would mean the E2E check is not what stopped it", err)
 	}
 	<-exitDone
+}
+
+// TestDialChainVerifiesHopCredential is the #26 acceptance test: once a client
+// holds a relay anchor (Config.RelayAdmissionPubKey), a hop that cannot present
+// a credential this client trusts fails the WHOLE chain — the deliberate
+// fail-closed choice recorded in dialChain's doc — attributed to the hop layer,
+// before any exit is ever dialed. Each case below is a different reason a
+// hop's credential is not admitted; the rejection shape is the same for all of
+// them, which is the point: the client does not special-case revoked vs
+// wrong-role vs missing.
+func TestDialChainVerifiesHopCredential(t *testing.T) {
+	relayRootPub, relayRootPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	_, rogueRootPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	hopKey, err := generateExitKey()
+	if err != nil {
+		t.Fatalf("generateExitKey: %v", err)
+	}
+	hopID := hex.EncodeToString(hopKey.Public)
+	// Windowed on the wall clock, not exit_admission_test.go's fixed admissionNow:
+	// hopVerifyFunc runs at time.Now() like the shipped exit check does (see
+	// newChainFixtureWithCred's own comment for why this file follows suit).
+	nbf, exp := time.Now().Add(-time.Hour), time.Now().Add(time.Hour)
+
+	revokedCred, revokedEnc, err := admission.Issue(relayRootPriv, hopID, []admission.Role{admission.RoleRelay}, nbf, exp, "")
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	revokedCRL, err := admission.SignCRL(relayRootPriv, []string{revokedCred.Serial}, time.Now(), time.Hour)
+	if err != nil {
+		t.Fatalf("SignCRL: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		cred []byte
+		crl  string
+	}{
+		{"no credential presented", nil, ""},
+		{"wrong role (exit-only)", issueExitCred(t, relayRootPriv, hopID, []admission.Role{admission.RoleExit}, nbf, exp), ""},
+		{"signed by the wrong root", issueExitCred(t, rogueRootPriv, hopID, []admission.Role{admission.RoleRelay}, nbf, exp), ""},
+		{"expired", issueExitCred(t, relayRootPriv, hopID, []admission.Role{admission.RoleRelay}, time.Now().Add(-2*time.Hour), time.Now().Add(-time.Hour)), ""},
+		{"revoked", []byte(revokedEnc), revokedCRL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hopEnd, clientEnd := net.Pipe()
+			deadline(t, hopEnd, clientEnd)
+			go func() { _, _, _ = exitHandshake(hopEnd, hopKey, tc.cred) }()
+
+			client := &Engine{cfg: Config{RelayAdmissionPubKey: hex.EncodeToString(relayRootPub)}}
+			if tc.crl != "" {
+				client.clientCRL = admission.NewClientCRL(relayRootPub)
+				if err := client.clientCRL.Set(tc.crl, time.Now()); err != nil {
+					t.Fatalf("clientCRL.Set: %v", err)
+				}
+			}
+			plan := &chainPlan{
+				hops:    []relayHop{{id: hopID, pub: hopKey.Public, dial: "unused"}},
+				exitPub: hopKey.Public, // never reached: the hop rejects before the exit layer
+				exitDia: "unused",
+			}
+			nc, err := client.dialChain(clientEnd, plan, "example.com:443")
+			_ = clientEnd.Close() // unblock the hop goroutine's target read
+			if err == nil {
+				_ = nc.Close()
+				t.Fatalf("chain succeeded through a hop whose credential should have been rejected (%s)", tc.name)
+			}
+			if !strings.Contains(err.Error(), "chain hop 1/1") {
+				t.Errorf("rejection reported as %v, want it attributed to hop 1/1", err)
+			}
+		})
+	}
+}
+
+// TestDialChainAcceptsValidHopCredential is the accept half of the #26
+// acceptance test, driven through the REAL forwarding path — exitTerminate on
+// the hop, presenting Config.AdmissionCred exactly as a real relay would —
+// rather than a hand-rolled responder, matching this file's own convention
+// (see TestRelayChainPreservesE2EAdmission's header note on why).
+func TestDialChainAcceptsValidHopCredential(t *testing.T) {
+	relayRootPub, relayRootPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	hopKey, err := generateExitKey()
+	if err != nil {
+		t.Fatalf("generateExitKey: %v", err)
+	}
+	hopID := hex.EncodeToString(hopKey.Public)
+	hopCred := issueExitCred(t, relayRootPriv, hopID, []admission.Role{admission.RoleRelay},
+		time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+
+	const target = "example.com:443"
+	const payload = "HOP_ADMISSION_ACCEPT_PAYLOAD"
+	exitKey, err := generateExitKey()
+	if err != nil {
+		t.Fatalf("generateExitKey: %v", err)
+	}
+	exitDone := make(chan error, 1)
+	exitAddr := startExitIngress(t, exitKey, nil, target, payload, exitDone)
+
+	dir, err := loadRelayDirectory(signTestSnapshot(t, testSnapPriv(t), []coldstart.Entry{
+		{Role: "exit", ID: hex.EncodeToString(exitKey.Public), Addr: exitAddr},
+	}), testSnapPub(t), "", time.Now())
+	if err != nil {
+		t.Fatalf("hop directory: %v", err)
+	}
+	hopAddr := startForwardNodeWithCred(t, hopKey, dir, hopCred)
+
+	client := &Engine{cfg: Config{RelayAdmissionPubKey: hex.EncodeToString(relayRootPub)}}
+	plan := &chainPlan{
+		hops:    []relayHop{{id: hopID, pub: hopKey.Public, dial: hopAddr}},
+		exitPub: exitKey.Public, exitDia: exitAddr,
+	}
+	conn, err := net.DialTimeout("tcp", hopAddr, hopTestDeadline)
+	if err != nil {
+		t.Fatalf("dial hop: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(hopTestDeadline))
+
+	nc, err := client.dialChain(conn, plan, target)
+	if err != nil {
+		t.Fatalf("client rejected a hop with a valid, root-signed relay credential: %v", err)
+	}
+	defer nc.Close()
+	if _, err := nc.Write([]byte(payload)); err != nil {
+		t.Fatalf("write through the chain: %v", err)
+	}
+	if err := <-exitDone; err != nil {
+		t.Fatalf("exit side: %v", err)
+	}
+}
+
+// TestExitAnchorAloneDoesNotEnableHopVerification pins the fail-open decision
+// issue #26 calls out explicitly: an exit anchor (Config.AdmissionPubKey) and a
+// relay anchor (Config.RelayAdmissionPubKey) gate two different checks, and
+// configuring the former must not silently turn on the latter. A client that
+// has only ever set an exit anchor — every deployment that predates this issue
+// — must see NO change in hop-handling: a hop that presents no credential at
+// all still completes the chain, exactly as it did before RelayAdmissionPubKey
+// existed.
+func TestExitAnchorAloneDoesNotEnableHopVerification(t *testing.T) {
+	exitRootPub, exitRootPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	const target = "example.com:443"
+	const payload = "EXIT_ANCHOR_ALONE_PAYLOAD"
+	exitDone := make(chan error, 1)
+	// One peeling hop, presenting NO credential of its own —
+	// newChainFixtureWithCred's hop fixture never sets Config.AdmissionCred,
+	// exactly the shape every pre-#26 deployment already has. The exit DOES
+	// present a valid credential signed by the same root the client anchors as
+	// its EXIT anchor, so the exit layer succeeds normally; only the hop's
+	// missing credential is under test.
+	fx := newChainFixtureWithCred(t, 1, exitRootPub, exitRootPriv, target, payload, exitDone)
+
+	// An exit anchor is configured; Config.RelayAdmissionPubKey (the relay
+	// anchor) is deliberately left at its zero value — unset.
+	client := &Engine{exitVerifier: verifierFor(t, exitRootPub)}
+	conn, err := net.DialTimeout("tcp", fx.hops[0].dial, hopTestDeadline)
+	if err != nil {
+		t.Fatalf("dial hop: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(hopTestDeadline))
+
+	nc, err := client.dialChain(conn, fx.plan, target)
+	if err != nil {
+		t.Fatalf("a client with only an EXIT anchor configured must not start verifying hops just because it gained one: %v", err)
+	}
+	defer nc.Close()
+	if _, err := nc.Write([]byte(payload)); err != nil {
+		t.Fatalf("write through the chain: %v", err)
+	}
+	if err := <-exitDone; err != nil {
+		t.Fatalf("exit side: %v", err)
+	}
 }
 
 // TestRelayChainHostileHopFailsHandshake pins the per-hop authentication of

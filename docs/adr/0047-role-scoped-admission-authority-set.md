@@ -197,8 +197,10 @@ make either meaning move; it only gives the coordinator's one company.
 Renaming either would break every deployed unit file, every invite-generation
 path, and every doc, to fix an ambiguity that costs one sentence to state. The
 coordinator's flag help now states it and points here. A matching one-line note
-on `cmd/node`'s help text is proposed, not applied, across this change's
-file-ownership boundary.
+on `cmd/node`'s help text was proposed, not applied, across this change's
+file-ownership boundary — landed by issue #71 (see the amendment at the end of
+this file), once `cmd/node/main.go` was free of the concurrent change that owned
+it here.
 
 ## Consequences
 
@@ -210,12 +212,11 @@ file-ownership boundary.
 - **Revocation is unaffected**, as #64 scoped it: one list still covers every
   authority, because a serial names a credential and not an issuer, and both
   issuers draw 8-byte serials from `crypto/rand`.
-- **Issue #26 (per-hop relay-role verification) needs no reshaping here.** It
-  adds a third consumer — `RoleRelay`, per hop, in `core/relaychain.go` — against
-  the client's verifier, which anchors one authority for every role and therefore
-  already answers a `RoleRelay` question. If a client ever needs a separate relay
-  anchor, that is a `NewAuthoritySetVerifier` call at construction and nothing
-  else on the path moves.
+- **Issue #26 (per-hop relay-role verification) shipped a separate relay anchor
+  rather than the free reuse this paragraph predicted** — see the amendment at
+  the end of this file for why the free-reuse path was set aside once it came to
+  it, and for the one respect in which the new anchor's construction-time
+  guarantee is narrower than every other field in `Config` carries.
 - **A new way to misconfigure a coordinator**: anchoring an authority for the
   wrong roles. Mitigated at both ends — construction refuses anything ambiguous,
   and the startup line prints the scoping — but a set anchoring the account key
@@ -225,3 +226,47 @@ file-ownership boundary.
 - **Roles are now a closed vocabulary in one place** (`AllRoles`). Adding a role
   means adding it there, or a single-key deployment silently stops admitting it.
   A test pins the list against the `Role` constants.
+
+## Amendment (issue #71, 2026-07-29): the node-side help-text note, applied as proposed
+
+§9 proposed a one-line note on `cmd/node/main.go`'s `-admission-pubkey` help,
+matching the disambiguating sentence `cmd/coordinator`'s already carried, and
+left it unapplied because that file was owned by a concurrent change at the
+time. It is free now: the note is in, naming the coordinator's authority-set
+meaning and pointing here. No behavior changed.
+
+## Amendment (issue #26, 2026-07-29): a separate relay anchor, not the free `RoleRelay` reuse this ADR predicted
+
+Issue #26 added per-hop relay-role admission verification to the client's chain
+dial. §7/Consequences predicted how it would be built: `NewVerifier`'s AllRoles()
+scoping means the client's existing exit anchor would already answer a
+`RoleRelay` question if a caller simply asked it one — no new anchor required.
+That remains true as a fact about `admission.Verifier`. It was not what shipped,
+because of a consequence neither this ADR nor issue #26 had reason to consider
+at the time: reusing the exit anchor would make per-hop verification's fail-open
+gate `AdmissionPubKey`'s mere presence, so every client that had configured an
+exit anchor for exit verification alone — every deployment before #26 existed —
+would silently start verifying hops too, the moment it upgraded, against relays
+that were never asked to present a `RoleRelay`-authorized credential under the
+old code. Issue #26's own text ruled exactly that out ("must neither silently
+start failing chains nor silently stop checking something it was checking"), so
+the free reuse this ADR predicted was set aside in favor of a second,
+independently-configurable anchor (`Config.RelayAdmissionPubKey`) that gates
+only on its own presence. `admission.NewAuthoritySetVerifier` is still what
+builds it, exactly as predicted — scoped to `RoleRelay` alone this time, rather
+than `AllRoles()`, since there is no reason for a relay-only anchor to answer a
+`RoleClient` or `RoleExit` question the way the client's single exit anchor
+harmlessly does.
+
+One respect in which the new anchor's guarantee is narrower than
+`AdmissionPubKey`'s, worth recording here rather than only in ADR-0038: it is
+not threaded through `New()`'s eager construction the way every other
+`Config`-level admission field is. `core/relaychain.go` reads
+`Config.RelayAdmissionPubKey` directly and builds the small per-hop verifier
+itself, once per chain dial, rather than `New()` building and caching it on an
+`Engine` field. A malformed value is still a hard failure, but it surfaces from
+the first chain dial that needs it rather than from construction — traded to
+land this change entirely within `core/relaychain.go`, `core/exit_admission.go`,
+and the `Config` struct, without touching `Engine`'s construction path or its
+field list. See the issue #26 amendment to ADR-0038 for the full account,
+including the fail-closed-whole-chain decision for a hop that fails this check.

@@ -96,6 +96,7 @@ package core
 // attempt. It is the single most important behavioural property in this file.
 
 import (
+	"container/list"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -1209,7 +1210,36 @@ func (e *Engine) dialE2E(raw io.ReadWriteCloser, plan *chainPlan, exitPub []byte
 // Layers are verified outermost-first, so a bad hop fails before the client
 // tunnels anything through it, and the exit's admission check is last and still
 // gates sending the real destination.
+//
+// Each hop layer now carries the same kind of check the exit layer already did
+// (issue #26): hopVerifyFunc verifies the hop's own admission credential
+// against Config.RelayAdmissionPubKey, bound to that hop's key exactly as the
+// exit check is bound to plan.exitPub. The verifier is built once, before the
+// loop, and reused for every hop in the chain — they share one anchor — so a
+// malformed RelayAdmissionPubKey fails here rather than partway through a
+// chain already half-dialed. An empty RelayAdmissionPubKey yields a nil
+// callback (fail-open), independent of whether an exit anchor is set; see
+// Config.RelayAdmissionPubKey's doc for why the two are deliberately separate
+// gates rather than one implying the other.
+//
+// A hop whose credential fails this check — revoked, expired, wrong role,
+// wrong subject, or simply absent — fails the WHOLE chain. Verification runs as
+// part of completing that hop's own clientHandshake, so its error propagates
+// through exactly the same path a substituted hop's failed Noise handshake
+// already takes below, with no special case added for it. De-selecting just the
+// bad hop and retrying with another was the alternative the issue named, and it
+// was set aside here: it would need candidate-exclusion state that lives in
+// hop SELECTION, above this function, whereas fail-closed needs nothing new and
+// already matches how every other verification failure in dialChain behaves.
 func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target string) (*noiseConn, error) {
+	// Built once and shared across every hop below rather than per-hop: all of
+	// them are checked against the same anchor, and building it here means a
+	// malformed anchor is reported before hop 1 is ever dialed.
+	hv, err := buildRelayVerifier(e.cfg.RelayAdmissionPubKey, e.clientCRL)
+	if err != nil {
+		return nil, fmt.Errorf("core: chain: %w", err)
+	}
+
 	cur := raw
 	for i, h := range plan.hops {
 		// Each hop is told only where to send the next layer: the hop after it, or —
@@ -1219,18 +1249,17 @@ func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target strin
 		if i+1 < len(plan.hops) {
 			next = plan.hops[i+1].dial
 		}
-		// verifyExit is nil for a relay hop: a hop is authenticated by holding the
-		// X25519 key the client selected from the SIGNED directory, which a
-		// substituted hop cannot do — its handshake simply fails here. Verifying a
-		// relay-ROLE admission credential on top of that is the deferred follow-up
-		// (ADR-0038 §4.3); the seam is already on the wire, since every responder
-		// presents its credential in msg2.
+		// A hop is authenticated by holding the X25519 key the client selected from
+		// the SIGNED directory — a substituted hop cannot do that, and its handshake
+		// simply fails below, independent of hopVerifyFunc's admission check (issue
+		// #26): the key check says "this is the hop I meant to dial", the credential
+		// check says "and it was admitted for the relay role".
 		// Sniff the stream this layer is dialed OVER, which is the previous hop's
 		// channel: a refusal found here was sealed by hop i-1 (see refusalSniffer),
 		// so it is reported against that hop and not against the one whose handshake
 		// happened to be in flight when it arrived.
 		sn := newRefusalSniffer(cur)
-		nc, err := clientHandshake(sn, h.pub, hopTargetPrefix+next, nil)
+		nc, err := clientHandshake(sn, h.pub, hopTargetPrefix+next, hopVerifyFunc(hv, h.pub))
 		if err != nil {
 			if cur != raw {
 				_ = cur.Close()
@@ -1494,17 +1523,30 @@ type forwardLimits struct {
 	saturated bool // aggregate cap reached; drives the edge-triggered log
 	refused   uint64
 	peers     map[string]*forwardPeer
+	// idle is an LRU of peer keys with circuits == 0, retained past release so a
+	// neighbour that reopens resumes its pace bucket instead of a fresh one
+	// (issue #72). Front is most-recently-idled; back is evicted first. See
+	// retirePeer.
+	idle *list.List
 }
 
-// forwardPeer is one previous hop's live occupancy. It exists only while that peer
-// has at least one circuit up, which is what keeps the map bounded by maxTotal
-// rather than by the number of source addresses an attacker can dial from — an
-// attacker-keyed map that outlived its entries would be its own memory DoS.
+// forwardPeer is one previous hop's occupancy and pace state. Before issue #72 it
+// existed only while that peer had at least one circuit up; now a peer that drops
+// to zero circuits can still be RETAINED — see idleElem — but only up to a bound,
+// which is what keeps the map from growing without limit from the number of
+// source addresses an attacker can dial from rather than from live occupancy.
 type forwardPeer struct {
 	circuits  int
 	pace      *capacity.Limiter // nil (inert) when peerRate is 0
 	saturated bool
 	refused   uint64
+
+	// idleElem is this peer's node in forwardLimits.idle while circuits == 0 —
+	// retained so its pace bucket survives a close/reopen cycle instead of being
+	// rebuilt full (issue #72) — and nil while the peer is live (circuits > 0) or
+	// not tracked at all. A peer that never held a circuit (refused at creation)
+	// never gets one: there is no pace state on it worth preserving.
+	idleElem *list.Element
 }
 
 func newForwardLimits(perPeer, total int, peerRate capacity.Rate) *forwardLimits {
@@ -1527,6 +1569,7 @@ func newForwardLimits(perPeer, total int, peerRate capacity.Rate) *forwardLimits
 		maxTotal:   total,
 		peerRate:   peerRate,
 		peers:      map[string]*forwardPeer{},
+		idle:       list.New(),
 	}
 }
 
@@ -1554,6 +1597,13 @@ func (f *forwardLimits) acquire(peer string) (pace *capacity.Limiter, release fu
 	if p == nil {
 		p = &forwardPeer{pace: capacity.NewLimiter(f.peerRate)}
 		f.peers[peer] = p
+	} else if p.idleElem != nil {
+		// Reactivated before eviction: keep the pace bucket it already had rather
+		// than rebuilding a fresh, full one (issue #72) — a returning neighbour
+		// resumes whatever allowance it had left, exactly as if it had never
+		// dropped to zero circuits.
+		f.idle.Remove(p.idleElem)
+		p.idleElem = nil
 	}
 	if p.circuits >= f.maxPerPeer {
 		first = !p.saturated
@@ -1595,10 +1645,43 @@ func (f *forwardLimits) release(peer string) (refused uint64, ended bool) {
 			p.saturated, p.refused = false, 0
 		}
 		if p.circuits <= 0 {
-			delete(f.peers, peer)
+			f.retirePeer(peer, p)
 		}
 	}
 	return refused, ended
+}
+
+// retirePeer moves peer's zero-circuit entry into the bounded idle LRU instead
+// of deleting it outright (issue #72), so a neighbour that reopens before
+// eviction resumes the pace bucket it had rather than a fresh, full one. Called
+// with f.mu already held.
+//
+// The map stays bounded by maxIdleRetained rather than by the number of
+// distinct keys an attacker can dial from: pushing this peer to the front can
+// take idle past its cap, in which case the LEAST recently idled entry —
+// necessarily some OTHER peer, since this one was just pushed — is evicted from
+// both the list and the map. A one-shot prober's entry ages out under a
+// sustained mix of returning neighbours; a returning neighbour's does not, as
+// long as it comes back before maxIdleRetained other peers have gone idle
+// ahead of it.
+func (f *forwardLimits) retirePeer(peer string, p *forwardPeer) {
+	p.idleElem = f.idle.PushFront(peer)
+	for f.idle.Len() > f.maxIdleRetained() {
+		back := f.idle.Back()
+		if back == nil {
+			break
+		}
+		f.idle.Remove(back)
+		delete(f.peers, back.Value.(string))
+	}
+}
+
+// maxIdleRetained bounds how many zero-circuit peers keep their pace bucket
+// alive at once. Tied to maxTotal — the aggregate scale the operator already
+// configured — rather than a new knob: an attacker cannot grow retained state
+// past what the node's own circuit cap already lets it hold live at once.
+func (f *forwardLimits) maxIdleRetained() int {
+	return f.maxTotal
 }
 
 // counts reports live occupancy for peer and in aggregate. Tests read it; nothing

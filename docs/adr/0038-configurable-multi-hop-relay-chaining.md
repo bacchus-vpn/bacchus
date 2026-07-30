@@ -58,7 +58,8 @@ Adopt **client-assembled, onion-layered relay chains**, engaged only at hop coun
    the same transparency argument ADR-0033 proved for one hop, extended to any depth.
    Additionally each *relay* hop is authenticated by the client to its directory key
    (stronger than the single-hop blind splice); per-hop relay-role admission
-   credentials are an optional follow-up.
+   credentials are an optional follow-up (shipped — see the issue #26 amendment at
+   the end of this file).
 
 4. **Hop count is one knob, default 1 == today (strict superset).** `Config.RelayHops`
    / `-relay-hops` (and the ADR-0036 "route through N nodes" GUI control), default `1`,
@@ -737,3 +738,71 @@ is already declining work.
 per-hop relay admission credentials; NAT-traversed intermediate hops;
 coordinator-independent relay identity (#190). This change is **Part of #76** and does
 not close it.
+
+## Amendment (issue #26, 2026-07-29): per-hop relay-role admission credential verification
+
+Decision 3's "per-hop relay-role admission credentials are an optional follow-up" —
+repeated as still-deferred in every amendment above — now ships. `dialChain` no
+longer passes `nil` as the verify func for a hop layer; each hop's admission
+credential is checked exactly as an exit's already was, extending hostile-node
+rejection (#60/#69) from the exit to every intermediate hop. The ordering property
+this ADR already relies on — layers verified outermost-first, so a bad hop fails
+before the client tunnels anything through it — holds unchanged: the check runs as
+part of completing that hop's own `clientHandshake`, the same call that already
+authenticates its key, so it inherits the ordering for free rather than needing new
+sequencing.
+
+**A second, independent anchor — not the exit anchor reused.** `Config.RelayAdmissionPubKey`
+is a new client-side field, separate from `AdmissionPubKey`. ADR-0047 §7/§9's
+Consequences section noted that the client's existing exit anchor, built via
+`admission.NewVerifier` (which scopes one key to *every* role), would already answer a
+`RoleRelay` question for free if simply pointed at it — "if a client ever needs a
+separate relay anchor, that is a `NewAuthoritySetVerifier` call and nothing else on
+the path moves." This shipped the separate anchor rather than the free reuse, and the
+reason is the fail-open decision below: reusing the exit anchor would mean every
+existing client that had only ever configured `AdmissionPubKey` for exit verification
+starts verifying hops too, the moment it upgrades — against relays that, before this
+issue, were never asked to present a `RoleRelay`-authorized credential at all. That is
+exactly the silent, retroactive tightening the two named sub-decisions below rule out.
+
+**Fail-open posture: the relay anchor is its own gate, independent of the exit
+anchor.** No `RelayAdmissionPubKey` configured means hops are not verified
+(fail-open), matching the #42/#60 posture — but the gate is `RelayAdmissionPubKey`
+specifically, never `AdmissionPubKey`'s mere presence. A client with an exit anchor
+and no relay anchor therefore sees no change at all: it neither starts failing
+chains against hops that predate this feature, nor stops checking anything it was
+checking (the exit check is a completely separate code path, untouched). Per-hop
+verification only turns on when an operator opts into the new anchor deliberately.
+
+**A hop whose credential fails verification fails the WHOLE chain — fail-closed, not
+de-selection.** The issue named both options. De-selecting just the bad hop and
+retrying with another was set aside: it needs candidate-exclusion state that lives in
+hop *selection*, above `dialChain`, which this change does not touch or extend.
+Fail-closed needs nothing new — the verify callback's error surfaces through the
+exact path a substituted hop's failed Noise handshake already takes, since both are
+just `clientHandshake` returning a non-nil error — and it matches this ADR's own
+"Fail closed — the rule that governs every failure in the feature" section above.
+Revocation is checked against the same oracle the exit anchor's CRL builds
+(`Config.AdmissionCRL`/`AdmissionCRLPath`) rather than a second `RelayAdmissionCRL`:
+ADR-0047 already established that one revocation list covers every authority because
+a serial names a credential, not an issuer, and nothing about a second anchor changes
+that.
+
+**One behavioral asymmetry from its sibling anchor, worth stating plainly.**
+`AdmissionPubKey` is validated once, eagerly, in `New()`, before the engine exists —
+a malformed value is a construction error. `RelayAdmissionPubKey` is validated
+lazily: `dialChain` reads it directly off `Config` and builds the (small, cheap)
+per-hop verifier itself, once per chain dial, rather than `New()` building it once
+and caching it on an `Engine` field the way it does for the exit anchor. A malformed
+value is still a hard failure — the chain fails rather than silently trusting every
+hop — but it surfaces from the first chain dial that needs it, not from `New()`.
+This is a narrower construction-time guarantee than every other admission-related
+field in `Config` carries, traded to keep this change entirely inside
+`core/relaychain.go`, `core/exit_admission.go`, and the `Config` struct itself,
+touching nothing in `Engine`'s construction path. Revisiting it — eager construction
+and validation alongside the exit anchor's — is a reasonable follow-up and does not
+require reopening any decision recorded above.
+
+Still deferred: chain liveness + rebuild (§9 item 6); IP-derived AS diversity;
+NAT-traversed intermediate hops; coordinator-independent relay identity (#190). This
+change is **Part of #76** and does not close it.
