@@ -12,15 +12,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bacchus-vpn/bacchus/core/delegation"
 	"github.com/bacchus-vpn/bacchus/core/devicecred"
 )
 
 // ---------------------------------------------------------------------------
 // Test fixtures: a throwaway root -> issuer cert -> device credential chain,
-// minted using only devicecred's exported API (types, tag constants, envelope
-// encoders) plus stdlib crypto. Self-contained on purpose: these tests must not
-// depend on core/devicecred's own frozen testdata clock, and must not need any
-// change to that package to construct a chain its real Verifier accepts.
+// minted using only devicecred's exported API (types, envelope encoders) plus
+// core/delegation's tag registry and stdlib crypto. Self-contained on purpose:
+// these tests must not depend on core/devicecred's own frozen testdata clock, and
+// must not need any change to that package to construct a chain its real Verifier
+// accepts.
 // ---------------------------------------------------------------------------
 
 // signBody reproduces core/delegation's "tag || 0x00 || body" signing frame
@@ -69,7 +71,7 @@ func mintTestChain(t *testing.T, now time.Time, credTTL time.Duration) (rootPub 
 	if err != nil {
 		t.Fatalf("marshal issuer cert: %v", err)
 	}
-	issuerCertEnc = devicecred.EncodeIssuerCert(signBody(rootPriv, devicecred.TagIssuerCert, certBody))
+	issuerCertEnc = devicecred.EncodeIssuerCert(signBody(rootPriv, delegation.TagIssuerCert, certBody))
 
 	cred := devicecred.DeviceCredential{
 		Version:   devicecred.Version,
@@ -83,7 +85,7 @@ func mintTestChain(t *testing.T, now time.Time, credTTL time.Duration) (rootPub 
 	if err != nil {
 		t.Fatalf("marshal device credential: %v", err)
 	}
-	credEnc = devicecred.EncodeDeviceCredential(signBody(issuerPriv, devicecred.TagDeviceCred, credBody))
+	credEnc = devicecred.EncodeDeviceCredential(signBody(issuerPriv, delegation.TagDeviceCred, credBody))
 
 	return rootPub, issuerCertEnc, credEnc, devicePriv
 }

@@ -34,7 +34,8 @@
 // another. The tag registry is in this one file deliberately: domain separation is
 // a property of the SET of tags, and it is only auditable while every tag this
 // repository verifies is visible together. A signed object whose SCHEMA lives in
-// another package still registers its tag here — core/policy's document does.
+// another package still registers its tag here — core/policy's document does, and
+// so do both tiers of core/devicecred's device chain.
 //
 // The body travels verbatim and is verified as received. Nothing here ever
 // re-marshals a body to check it, so JSON field order, whitespace and escaping are
@@ -66,13 +67,25 @@ const Version = 1
 // they are network objects this repository verifies, and the minting service
 // merely happens to produce them.
 //
-// TagPolicyDoc is registered here while core/policy owns the document's schema.
-// The split is deliberate — this package signs and opens the BYTES, core/policy
-// decides what the bytes mean — and it keeps a second implementation of
-// tag || 0x00 || body from existing.
+// A tag is registered here even when another package owns the SCHEMA of the object
+// it names. The split is deliberate — this package signs and opens the BYTES, the
+// owning package decides what the bytes mean — and it keeps a second implementation
+// of tag || 0x00 || body from existing:
+//
+//   - TagPolicyDoc: core/policy owns the document.
+//   - TagIssuerCert and TagDeviceCred: core/devicecred owns both tiers of the
+//     account service's device chain (ADR-0045). They were declared in that package
+//     when it landed and moved here by #54, which is the precedent worth naming —
+//     a new verifier registers its tag here rather than beside its own schema, or
+//     this file stops being the one place the whole set can be read.
+//
+// The values are wire contract, not naming preference: each matches its signer's
+// byte for byte, and the frozen conformance vectors fail loudly if any drifts.
 const (
 	TagDelegationCert = "bacchus/delegation/v1"
 	TagPolicyDoc      = "bacchus/policy/v1"
+	TagIssuerCert     = "bacchus/issuer-cert/v1"
+	TagDeviceCred     = "bacchus/device-cred/v1"
 )
 
 // ClockSkew is the tolerance applied to a NotBefore so a verifier whose clock

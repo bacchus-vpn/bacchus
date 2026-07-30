@@ -81,26 +81,15 @@ import (
 // never silently misreads a newer credential.
 const Version = 1
 
-// Domain-separation tags for the two signed objects in this chain. Every
-// signature covers tag || 0x00 || body and each verifier accepts exactly one tag.
+// The domain-separation tags for this chain's two signed objects are
+// delegation.TagIssuerCert and delegation.TagDeviceCred, registered in
+// core/delegation with every other tag this repository verifies (#54). They are not
+// re-exported here: a second name for one tag is a second place to change it, and
+// domain separation is a property of the whole SET, only auditable while the set is
+// readable in one file.
 //
-// They are namespaced "bacchus/", not after the service that mints them: these
-// are network objects a coordinator verifies, and the account service merely
-// happens to produce them. The values match the signer's byte for byte — they are
-// wire contract, not naming preference, and the conformance vectors fail loudly if
-// either drifts.
-//
-// NOTE: core/delegation's package doc asks that every tag this repository verifies
-// be registered in its own file, because domain separation is a property of the
-// SET of tags and is only auditable while they are visible together. These two
-// belong in that registry. They are declared here for now because that package is
-// outside this change's boundary; moving them is a two-line edit that changes no
-// behaviour, since what separates two domains is the tag STRING, not where the
-// constant is declared.
-const (
-	TagIssuerCert = "bacchus/issuer-cert/v1"
-	TagDeviceCred = "bacchus/device-cred/v1"
-)
+// This package still owns what the objects MEAN — the structs below, the descent in
+// verify.go, the errors. core/delegation owns the framing and the tag values.
 
 // IssuerCert is tier one: the offline root delegating "may issue device
 // credentials" to the account service's issuer key, for a window, with a cap on

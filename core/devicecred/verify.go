@@ -44,7 +44,7 @@ func checkWindow(notBefore, notAfter, now time.Time) error {
 // The signature is checked before the body is unmarshaled, so untrusted bytes
 // never reach the decoder.
 func ParseIssuerCert(rootPub ed25519.PublicKey, signed []byte) (IssuerCert, error) {
-	body, err := openSigned(rootPub, TagIssuerCert, signed)
+	body, err := openSigned(rootPub, delegation.TagIssuerCert, signed)
 	if err != nil {
 		return IssuerCert{}, err
 	}
@@ -213,7 +213,7 @@ func (v *Verifier) Verify(p Presentation, now time.Time, audience string, challe
 
 	// Tier 2: was this credential signed by the key that cert delegates to? Only
 	// now is cert.IssuerPub trustworthy.
-	body, err := openSigned(cert.IssuerPub, TagDeviceCred, p.Credential)
+	body, err := openSigned(cert.IssuerPub, delegation.TagDeviceCred, p.Credential)
 	if err != nil {
 		return DeviceCredential{}, err
 	}

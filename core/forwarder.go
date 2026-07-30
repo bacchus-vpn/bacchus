@@ -61,15 +61,18 @@ func (e *Engine) startFwdSession(m wire, l *coordLink) {
 // accounting state by there — the relay-side accounting gap #17/ADR-0033 defers
 // to a follow-up. See core/accounting.go.
 //
-// The tier's per-session speed cap (issue #58, ADR-0048) is built here, once per
-// assignment, for the same reason and along the same seam: it belongs to the
-// session the coordinator assigned, so it exists only where a session id does.
-// sessionPace returns nil when the assignment carries no cap, and a nil *Limiter
-// is inert, so "no cap" needs no branch anywhere downstream.
+// The tier's per-session speed cap (issue #58/#74, ADR-0048) is built here, once
+// per assignment, for BOTH egresses: whichever party moves the bytes is the party
+// that paces them. The exit shapes a direct session; the relay shapes a
+// peer-relayed one, terminating nothing but forwarding every byte (issue #74's
+// ruling — see relayPipe). sessionPace returns nil when the assignment carries no
+// cap, and a nil *Limiter is inert, so "no cap" needs no branch anywhere
+// downstream — which is what keeps the relay branch shapeless for a chained
+// connect, where the coordinator deliberately sends none (ADR-0042 §9).
 func (e *Engine) handlerFor(m wire) func(Stream) {
 	if m.ExitAddr != "" {
-		ea := m.ExitAddr
-		return func(st Stream) { e.relayPipe(st, ea) }
+		ea, pace := m.ExitAddr, sessionPace(m)
+		return func(st Stream) { e.relayPipe(st, pace, ea) }
 	}
 	sid, pace := m.Session, sessionPace(m)
 	return func(st Stream) { e.exitDirect(sid, pace, st) }
@@ -137,8 +140,10 @@ func (e *Engine) exitDirect(sid string, pace *capacity.Limiter, st Stream) {
 // uncapped. It travels with sid and is nil in exactly the same places sid is
 // empty, because both name the coordinator-assigned session: a relay-forwarded
 // connection arrives through serveExit's bare TCP listener, which the coordinator
-// never assigned a session, so there is no tier to shape it to. See ADR-0048 §5
-// and the follow-up it names.
+// never assigned a session, so there is no tier to shape it to HERE. Such a
+// session is shaped at the relay instead, which does hold the assign (relayPipe,
+// issue #74) — deliberately leaving this exit knowing nothing about it. See
+// ADR-0048 §5.
 func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWriteCloser) {
 	defer raw.Close()
 	// The exit presents its admission credential (issue #60) in the handshake so
@@ -183,13 +188,11 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 		return
 	}
 	if prefix == udpTargetPrefix {
-		// NOT shaped to the tier cap: the UDP relay hand-rolls its own datagram loop
-		// and paces through meterN/WaitN rather than through an io.Reader, so pace
-		// has nothing to wrap here (core/udprelay.go). The operator's own aggregate
-		// cap and quota still apply to every datagram; what does not is the
-		// per-session tier limit. ADR-0048 §5 records it as a known gap with a
-		// follow-up rather than leaving it to be discovered.
-		e.exitTerminateUDP(sid, nc, addr)
+		// Shaped to the same tier cap as the TCP path below (issue #74, ADR-0048 §5).
+		// The UDP relay hand-rolls its own datagram loop rather than copying a stream,
+		// so it applies pace per datagram through WaitN instead of wrapping an
+		// io.Reader — same limiter, same composition inside the operator's own cap.
+		e.exitTerminateUDP(sid, pace, nc, addr)
 		return
 	}
 	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
@@ -329,7 +332,20 @@ func (e *Engine) meterN(n int) error {
 // and admission-verifies the *exit*, not this relay — proven end-to-end by
 // TestPeerRelaySplicePreservesE2E. The only engine state it touches is emit, to
 // surface a dial-to-exit failure (issue #97).
-func (e *Engine) relayPipe(st Stream, exitAddr string) {
+//
+// pace is the tier's per-session speed cap (issue #74, ADR-0048 §5), nil for
+// uncapped. This is where a peer-relayed session is shaped, and the relay is the
+// right party for it precisely BECAUSE it terminates nothing: it moves every byte,
+// so it can pace them, while the exit on the far side is told nothing at all — no
+// session identity, no token, no credential — which is what leaves ADR-0048 §4's
+// linkability property untouched rather than trading it away.
+//
+// Pacing does not cost the transparency above. The limiter wraps the copies, so
+// the relay learns only how fast to move bytes it still cannot read: no
+// destination, no plaintext, no preamble. What it does learn — a coarse cap — it
+// could already derive by measuring the throughput it forwards, which is why the
+// disclosure is materially smaller than the credential-to-exit design §4 rejected.
+func (e *Engine) relayPipe(st Stream, pace *capacity.Limiter, exitAddr string) {
 	defer st.Close()
 	up, err := net.DialTimeout("tcp", exitAddr, 10*time.Second)
 	if err != nil {
@@ -345,8 +361,18 @@ func (e *Engine) relayPipe(st Stream, exitAddr string) {
 		return
 	}
 	defer up.Close()
-	go func() { _, _ = io.Copy(up, e.meter(st)); _ = up.Close() }()
-	_, _ = io.Copy(st, e.meter(up))
+	// Two limiters, two questions, innermost first — the same composition the exit's
+	// TCP path uses (ADR-0048 §4): pace says what this session's TIER is entitled to,
+	// e.meter says what this OPERATOR is willing to carry (#143, ADR-0040). The tier
+	// cap sits inside the operator's, so a coordinator stamping a large SessionCapBps
+	// widens only the inner bound and this relay's own aggregate limiter still paces
+	// the result. There is no accounting counter here: a relayed session has no
+	// session id to attribute bytes to (ADR-0021, and see handlerFor).
+	go func() {
+		_, _ = io.Copy(up, e.meter(pace.LimitReads(e.limiterCtx, st)))
+		_ = up.Close()
+	}()
+	_, _ = io.Copy(st, e.meter(pace.LimitReads(e.limiterCtx, up)))
 }
 
 // serveExit is the exit's TCP ingress that relays connect to. The listener is
@@ -366,13 +392,17 @@ func (e *Engine) serveExit(ln net.Listener) {
 				continue
 			}
 		}
-		// Relay-forwarded: no session id and, for the same reason, no tier cap. The
-		// coordinator assigned this exit nothing — a peer-relay assign goes to the
-		// RELAY — so there is no (trust, plan) resolution attached to this
-		// connection to shape it by (issue #58, ADR-0048 §5). Closing that needs the
-		// exit to be given an identity for a relayed session, which is a separate
-		// decision: the splice is transparent by design
-		// (TestPeerRelaySplicePreservesE2E) and is the whole point of ADR-0033.
+		// Relay-forwarded: no session id and, for the same reason, no tier cap HERE.
+		// The coordinator assigned this exit nothing — a peer-relay assign goes to the
+		// RELAY — so there is no (trust, plan) resolution attached to this connection
+		// to shape it by.
+		//
+		// That is no longer a gap: issue #74 shapes a peer-relayed session at the
+		// relay, which holds the assign and moves every byte (see relayPipe). This exit
+		// is deliberately left knowing nothing about it — giving it an identity for a
+		// relayed session is the option ADR-0048 §5 rejected, because it is what would
+		// reopen §4's linkability question. The splice stays transparent by design
+		// (TestPeerRelaySplicePreservesE2E, ADR-0033).
 		go e.exitTerminate("", nil, c) // see exitTerminate's doc
 	}
 }

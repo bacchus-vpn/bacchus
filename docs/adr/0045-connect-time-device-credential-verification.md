@@ -240,6 +240,11 @@ exactly the linkage the credential format works to avoid handing a coordinator.
   `core/delegation/delegation.go`, deferred here only because that file is outside
   this change's boundary.
 
+  > **Resolved by #54 — see the amendment below.** Both tags are now registered in
+  > `core/delegation` and `core/devicecred` no longer declares or re-exports them.
+  > The prediction that it was a two-line additive edit was very nearly right, and
+  > the way it was wrong is the part worth reading.
+
 ## Testing
 
 The frozen conformance fixtures are copied verbatim from the repository that owns
@@ -268,3 +273,49 @@ expected to stay green and are recorded as such: the device-key and issuer-key
 length checks are each redundant with a guard in the framing layer, and the
 device-key pair is *jointly* load-bearing — removing either alone changes nothing,
 removing both crashes every coordinator that verifies a forged credential.
+
+---
+
+## Amendment (issue #54, 2026-07-30): the device-chain tags are in the registry
+
+The consequence above is discharged. `bacchus/issuer-cert/v1` and
+`bacchus/device-cred/v1` are now declared in `core/delegation` alongside
+`bacchus/delegation/v1` and `bacchus/policy/v1`, `core/devicecred` references them
+as `delegation.TagIssuerCert` / `delegation.TagDeviceCred`, and the "NOTE" paragraph
+explaining why they were local is gone.
+
+**Nothing about verification changed, and that is the point.** What separates two
+domains is the tag *string*, and both strings are byte-identical to what they were —
+the frozen conformance vectors are the proof, and all 23 `core/devicecred` tests
+including the positive and negative vector sets stay green. This was an
+**auditability** change: `core/delegation`'s package doc claims you can read one file
+and see every tag this repository verifies, and until now that claim was false.
+
+The tags are **not re-exported** from `core/devicecred`. A second name for one tag is
+a second place to change it, which is the same drift the single-registry rule exists
+to prevent.
+
+### The part the issue got wrong, recorded because it is the reusable lesson
+
+Issue #54 stated that "nothing outside that package uses them today", and concluded
+the change was not a compatibility concern. The first half was false:
+`core/devicecred_connect_test.go` — in package **`core`**, not `core/devicecred` —
+minted its throwaway chain with `devicecred.TagIssuerCert` and
+`devicecred.TagDeviceCred`. Deleting the constants without retargeting those two
+lines stops package `core` compiling.
+
+What makes this worth writing down is *why* the issue's author could look and not
+see it: **the caller is a `_test.go` file, so `go build ./...` reports success.**
+That was confirmed rather than assumed here — with the test file left unretargeted,
+`go build ./...` exits clean while `go vet ./core/` reports
+`undefined: devicecred.TagIssuerCert`. A change that moves or deletes an exported
+identifier is only verified by `go vet ./...` or `go test ./...`; a green
+`go build ./...` says nothing about it.
+
+### Not covered, deliberately
+
+`devicecred.PurposeConnect` (`bacchus/assert-connect/v1`) stays in `core/devicecred`.
+It is the first field of an assertion message, not a `tag || 0x00 || body` framing
+tag, and its set (renew/approve/enroll) is mostly not verified in this repository.
+Widening the registry to cover purposes would change what "the tag registry" means
+and is a separate decision, which #54 explicitly declined to take by implication.

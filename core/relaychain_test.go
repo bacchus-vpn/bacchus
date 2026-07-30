@@ -200,7 +200,7 @@ func TestRelayChainPreservesE2EAdmission(t *testing.T) {
 	clientConn, relayEnd := net.Pipe()
 	deadline(t, clientConn, relayEnd)
 	var assigned Engine
-	go assigned.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, fx.hops[0].dial)
+	go assigned.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, nil, fx.hops[0].dial)
 
 	client := &Engine{exitVerifier: verifierFor(t, rootPub)}
 	nc, err := client.dialChain(clientConn, fx.plan, target)
@@ -321,7 +321,7 @@ func TestRelayChainRejectsUnauthorizedExit(t *testing.T) {
 	clientConn, relayEnd := net.Pipe()
 	deadline(t, clientConn, relayEnd)
 	var assigned Engine
-	go assigned.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, fx.hops[0].dial)
+	go assigned.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, nil, fx.hops[0].dial)
 
 	client := &Engine{exitVerifier: verifierFor(t, rootPub)}
 	nc, err := client.dialChain(clientConn, fx.plan, "example.com:443")
@@ -548,7 +548,7 @@ func TestRelayChainHostileHopFailsHandshake(t *testing.T) {
 	clientConn, relayEnd := net.Pipe()
 	deadline(t, clientConn, relayEnd)
 	var assigned Engine
-	go assigned.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, fx.hops[0].dial)
+	go assigned.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, nil, fx.hops[0].dial)
 
 	client := &Engine{exitVerifier: verifierFor(t, rootPub)}
 	nc, err := client.dialChain(clientConn, plan, "example.com:443")

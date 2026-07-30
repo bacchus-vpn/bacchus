@@ -341,7 +341,7 @@ func (s *chainTestSession) OpenStream(_ context.Context, label string) (Stream, 
 	s.mu.Unlock()
 	clientEnd, relayEnd := net.Pipe()
 	var assigned Engine // relayPipe uses no engine state (see its doc)
-	go assigned.relayPipe(pipeStream{Conn: relayEnd, label: label}, s.head())
+	go assigned.relayPipe(pipeStream{Conn: relayEnd, label: label}, nil, s.head())
 	return pipeStream{Conn: clientEnd, label: label}, nil
 }
 
@@ -470,7 +470,7 @@ func TestWedgedChainHopIsBoundedAndAttributedUnlikeAnUnchainedPeer(t *testing.T)
 	t.Run("chained: bounded and attributed", func(t *testing.T) {
 		clientEnd, relayEnd := net.Pipe()
 		var assigned Engine
-		go assigned.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, m.head.addr)
+		go assigned.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, nil, m.head.addr)
 
 		type result struct {
 			err error

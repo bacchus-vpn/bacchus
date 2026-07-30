@@ -324,30 +324,77 @@ func TestSpeedCapIsThePolicysNumberNotTheCredentialsClaim(t *testing.T) {
 	}
 }
 
-// TestPeerRelayAssignCarriesNoSessionCap pins ADR-0048 §5's split. A peer-relay
-// assign goes to the RELAY, which splices ciphertext and terminates nothing, and
-// the exit on the far side is reached through its bare TCP listener with no session
-// id. There is nothing there to shape, so nothing is sent — a cap on that assign
-// would hand a forwarder a tier signal about a client it is only splicing, in
-// exchange for no enforcement at all.
-func TestPeerRelayAssignCarriesNoSessionCap(t *testing.T) {
+// TestPeerRelayAssignCarriesTheSessionCap pins issue #74's ruling: a peer-relayed
+// session IS shaped, at the relay. The assign goes to a node that terminates
+// nothing — but it moves every byte, so it is the one party on that path able to
+// pace them, and shaping there tells the exit nothing whatsoever, which is what
+// leaves ADR-0048 §4's linkability property untouched rather than traded away.
+//
+// This replaces a test asserting the exact opposite: that a peer-relay assign
+// carried no cap, because a splicing forwarder "could not shape the session even if
+// it wanted to". That was ADR-0048 §5's original reading and it was wrong about what
+// a forwarder can do; #74 superseded it. The inversion is deliberate and is the
+// record of the change.
+//
+// MUTATION: drop SessionCapBps from the peer-relay assign in main.go and this goes
+// red — a relay-mode client silently gets the node's aggregate cap, not its tier's.
+func TestPeerRelayAssignCarriesTheSessionCap(t *testing.T) {
+	f := tieredClient(t, "stable", "pro")
+	relay := fakePeer(t)
+	f.registerRelay(t, "r1", relay)
+	p := tierPolicy(t)
+
+	want, err := p.Limits(policy.TrustStable, "pro")
+	if err != nil {
+		t.Fatalf("fixture has no stable/pro row: %v", err)
+	}
+	if want.SpeedCapBps == 0 {
+		t.Fatal("the fixture's stable/pro row is uncapped, so this test cannot distinguish enforcement from its absence")
+	}
+
+	if reply := f.connect(t, "", "relay"); reply.Type != "session" {
+		t.Fatalf("relay-mode connect replied %q (%s)", reply.Type, reply.Reason)
+	}
+	assign := wantAssign(t, relay)
+	if assign.ExitAddr == "" {
+		t.Fatal("premise broken: this is not the peer-relay path (no exitAddr), so the test proves nothing")
+	}
+	if assign.SessionCapBps != want.SpeedCapBps {
+		t.Errorf("peer-relay assign carried %d bps; want the tier's %d bps — the relay cannot shape what it was not told",
+			assign.SessionCapBps, want.SpeedCapBps)
+	}
+}
+
+// TestChainedPeerRelayAssignCarriesNoSessionCap is the gap #74 did NOT close, kept
+// deliberately distinct from the one it did.
+//
+// A chained connect reaches the same peer-relay branch and the same relay, so
+// without this test the previous one's mutation guard would say nothing about it and
+// a build that capped every relay assign uniformly would look correct. The reason it
+// stays uncapped is its own: the client assembled the path and this coordinator does
+// not know where it terminates (ADR-0042 §9), so there is no session it can account
+// for. That is a different question from whether a forwarder can pace bytes — which
+// #74 answered yes — and ADR-0048 §5 records the two separately.
+//
+// MUTATION: drop the `if chained { sessionCap = 0 }` guard and this goes red.
+func TestChainedPeerRelayAssignCarriesNoSessionCap(t *testing.T) {
 	f := tieredClient(t, "stable", "pro")
 	relay := fakePeer(t)
 	f.registerRelay(t, "r1", relay)
 	tierPolicy(t)
 
-	if reply := f.connect(t, "", "relay"); reply.Type != "session" {
-		t.Fatalf("relay-mode connect replied %q (%s)", reply.Type, reply.Reason)
+	// A chaining client names its own first hop and no country at all (ADR-0042 §9).
+	// "e1" is the exit tieredClient registered; here it is a peeling hop instead.
+	dialConnect(wire{FirstHop: "e1", Mode: "relay", Cred: f.cred}, f.client.LocalAddr().(*net.UDPAddr))
+	if reply := recvWire(t, f.client, time.Second); reply.Type != "session" {
+		t.Fatalf("chained connect replied %q (%s)", reply.Type, reply.Reason)
 	}
-	assign := recvWire(t, relay, time.Second)
-	if assign.Type != "assign" {
-		t.Fatalf("relay received %q, want an assign", assign.Type)
-	}
+	assign := wantAssign(t, relay)
 	if assign.ExitAddr == "" {
 		t.Fatal("premise broken: this is not the peer-relay path (no exitAddr), so the test proves nothing")
 	}
 	if assign.SessionCapBps != 0 {
-		t.Errorf("peer-relay assign carried a %d bps cap to a node that cannot apply it", assign.SessionCapBps)
+		t.Errorf("chained assign carried a %d bps cap; the coordinator does not know where a chained path terminates, so it stamps none (ADR-0042 §9)", assign.SessionCapBps)
 	}
 }
 

@@ -302,7 +302,7 @@ func TestRelayPipeEmitsErrorOnFailedDial(t *testing.T) {
 
 	client, relayEnd := net.Pipe()
 	deadline(t, client, relayEnd)
-	e.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, dead)
+	e.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, nil, dead)
 
 	if !hasEventContaining(snap(), EventError, "dial exit") {
 		t.Fatalf("relayPipe must emit an error on a failed dial-to-exit (issue #97); got %+v", snap())
