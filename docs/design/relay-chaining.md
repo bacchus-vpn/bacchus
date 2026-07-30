@@ -638,7 +638,14 @@ end-to-end correlation). Defences, all reusing planned/existing machinery:
   contradicts it. **Against a coordinator actively colluding with a node in your
   path, this design's unlinkability property does not hold, at any depth.** Closing
   it needs a relay identity the client can verify independently of the coordinator's
-  say-so — filed as §9 item 10 / issue #190.
+  say-so — filed as §9 item 10 / issue #31 (`old #190`).
+
+  **Ruled a tracked non-goal for 1.0** on 2026-07-30, on the same footing as item 9: no
+  design for that identity exists, the attack needs a coordinator operator willing to
+  attack the network's own users, and one party runs the coordinator and the fleet today.
+  It reopens on federation or on `[G2]` closed beta, whichever comes first, together with
+  the deployment-level break in issue #60. The reasoning is in ADR-0038's issue #31
+  amendment; read that before treating this bullet as merely a known limit.
 - **n=1 is unchanged, including its exposure.** At the default depth a single relay
   sees both endpoints — that is today's accepted behaviour, not a regression. Users
   who need the stronger property opt into `n ≥ 2`.
@@ -711,7 +718,7 @@ lane met a one-row edit in a file it did not own and correctly left it alone, tw
 | 7 | Relay-side DoS controls for onion forwarding | #25 | **Shipped** (ADR-0038 §6 + its `#25` amendment). A hop caps concurrent forwarded circuits per previous hop and in aggregate, refusing rather than queueing, with an optional per-previous-hop byte pace on top of ADR-0040's aggregate meter. A ring of nodes pointed at each other terminates because every revisit arrives from the same predecessor and so shares one per-peer budget — **no hop counter was added**; the amendment records why an enforceable one would have to be readable by every hop, and what that would cost. Refusals are edge-logged for the operator and sealed back to the client on the hop's own channel, so a full hop is distinguishable from a dead one. |
 | 8 | Per-hop relay admission-cred verification | #26 | **Shipped** (ADR-0038's `#26` amendment). The client verifies each hop's relay-role credential against `Config.RelayAdmissionPubKey`, bound to that hop's key exactly as the exit check is bound to the exit's, with one verifier built before the loop and shared by every hop so a malformed anchor fails before hop 1 is dialed. A hop that fails it fails the **whole** chain rather than being de-selected. An empty anchor yields a nil callback — fail-open, and independent of whether an exit anchor is set. |
 | 9 | NAT-traversed intermediate hops | #30 | **Open, and still a non-goal** to revisit only if reachable intermediate capacity proves insufficient. |
-| 10 | Coordinator-independent relay identity | #31 (`old #190`) | **Open.** The client cannot verify which node was assigned as `R₁`, so a hostile coordinator can collapse the chain undetectably (§7). `old #142` closed the *accidental* case — `verifyChainDisjoint` recomputes the published `relayTag` for every hop the client selected and fails the path on a match — which leaves the *deliberate* one: a coordinator that reports a tag not matching the relay it actually wired. Needs an `R₁` identity the client can check without the coordinator's say-so; §7 records three directions and picks none. |
+| 10 | Coordinator-independent relay identity | #31 (`old #190`) | **Open.** The client cannot verify which node was assigned as `R₁`, so a hostile coordinator can collapse the chain undetectably (§7). `old #142` closed the *accidental* case — `verifyChainDisjoint` recomputes the published `relayTag` for every hop the client selected and fails the path on a match — which leaves the *deliberate* one: a coordinator that reports a tag not matching the relay it actually wired. Needs an `R₁` identity the client can check without the coordinator's say-so, and **no design for one exists** — not in §7, not anywhere in this repository. **Ruled a tracked non-goal for 1.0** (ADR-0038's #31 amendment), reopening on federation or `[G2]` closed beta together with #60. |
 
 Two constraints #142 added that this section did not anticipate:
 

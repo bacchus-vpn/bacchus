@@ -1073,3 +1073,67 @@ nobody, so the test cannot be satisfied by a path that rebuilds unconditionally.
 the shipped SOCKS5 entry point over the real forwarding mesh
 (`TestUDPAssociateRebuildsAroundADeadChainHop`,
 `TestUDPAssociateOverAHealthyChainDialsOnceAndRebuildsNothing`).
+
+## Amendment (issue #31, 2026-07-30): coordinator-independent relay identity is a tracked non-goal for 1.0
+
+§9 item 10 has been open since the spike. This records a decision about it rather than a
+solution, because there is no solution to record and pretending otherwise is worse than
+saying so.
+
+### What is wrong
+
+`R₁` is chosen by the coordinator and the client is never told which node it is. A
+coordinator that wants to can assign an `R₁` that is also one of the client's own peeling
+hops. That single node then sees the client's address — it is the transport peer — and its
+hop's successor; when the collision is with the last hop, that successor is the exit. One
+node, both ends of the correlation the rest of this design spends its whole budget denying.
+
+The client closes the **accidental** case. `wire.RelayTag` is a published function of a
+node's id, so `verifyChainDisjoint` recomputes it for every hop the client selected and
+fails the path on a match. This is not theoretical tidiness: `pickRelay` excludes only the
+node it paired and cannot see the client's later hops, so an honest coordinator really can
+collide by chance.
+
+It cannot close the **deliberate** case. The coordinator is the party reporting the tag. A
+coordinator that wants the collision reports a tag that does not match the relay it
+actually wired, and no client-side signal contradicts it. Against a coordinator actively
+colluding with a node in the path, this design's unlinkability property does not hold, at
+any depth.
+
+### Why it is not fixed here
+
+Closing it needs an `R₁` identity the client can verify **without the coordinator's
+say-so** — and everything the client knows about the network reaches it through the
+coordinator. There is no independent directory to check against, so the fix is not an
+implementation of a known design; it is the design itself, and none exists.
+
+**A correction to the record goes with this.** §9 item 10 previously said "§7 records three
+directions and picks none". It does not, and neither does anything else in this repository.
+There was no shortlist to choose from, which is a materially different position to be in
+than having one and deferring the choice — and it is the reason this is a non-goal rather
+than a scheduling decision.
+
+### Why deferring is acceptable now
+
+The attack requires a coordinator operator willing to attack the network's own users. Today
+one party runs the coordinator, the nodes and the network, and has no user to attack. There
+is nothing the collision would reveal that is not already visible to the same party by
+reading its own logs.
+
+### What makes it unacceptable
+
+Either of these, whichever comes first, reopens this as work rather than a non-goal:
+
+1. **A coordinator operated by someone other than the operator of the nodes** — federation,
+   or a third party running a pool. The trust assumption above evaporates the moment the
+   coordinator and the fleet are different parties.
+2. **Users other than the operator**, whose privacy is meant to hold against the operator.
+   That is `[G2]` closed beta (`bacchus-payment#24`), which is before 1.0.
+
+Issue #60 — an exit co-located with the coordinator — has the **same** trigger and the same
+shape: a deployment-level break of the untrusted-coordinator assumption that no protocol
+control detects, and that no code change causes or repairs. The two are reviewed together
+at that gate, not separately. `docs/RUNNING.md` carries #60's operator-facing half.
+
+Until then this is a **tracked non-goal**, held by issue #31, on the same footing as §9
+item 9. It is not closed, it is not forgotten, and it is not claimed away.
