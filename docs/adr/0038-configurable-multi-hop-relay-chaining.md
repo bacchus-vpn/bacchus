@@ -979,18 +979,90 @@ Concurrent streams that fail together produce **one** rebuild, not one each:
 already uses) and the install is a compare-and-swap, so the first dial to finish installs
 its chain and the rest dial over that one instead of discarding their own work.
 
-### Honest limit: one client data path does not retry
+### Honest limit: one client data path does not retry — **closed by the #82 amendment below**
 
 `core/udprelay.go`'s UDP ASSOCIATE path calls `dialE2E` directly, so it gets the per-layer
-stall bound, the attribution and the cooling — all of which live inside `dialChain` — and
-it picks up a chain rebuilt by any other path, since it reads `planOf(sess)` per
-associate. It does not itself open a second stream and retry. That is a file another lane
-owned in the wave this shipped in, not a design position; moving it onto
-`dialChainedStream` is a one-line change and the natural follow-up. Until then a UDP
-association is the one path where a hop dying is observed and remembered but costs that
-one association.
+stall bound and the attribution — both of which live inside `dialChain` — and it picks up
+a chain rebuilt by any other path, since it reads `planOf(sess)` per associate. It does
+not itself open a second stream and retry. That is a file another lane owned in the wave
+this shipped in, not a design position; moving it onto `dialChainedStream` is a one-line
+change and the natural follow-up. Until then a UDP association is the one path where a hop
+dying is observed but costs that one association.
+
+> This paragraph as first written also credited the path with **the cooling**, which was
+> not true: cooling is applied by `dialChainedStream`, never by `dialChain`. Corrected in
+> place rather than left standing, since it understated the gap it exists to disclose; the
+> #82 amendment records what the check found.
 
 **Still deferred:** IP-derived AS diversity; NAT-traversed intermediate hops (§9 item 9, a
 tracked non-goal — #30); coordinator-independent relay identity (#190). §9's
 implementation list is otherwise complete. This change is **Part of #76**; it closes #24
 and does not close #76 itself.
+
+## Amendment (issue #82, 2026-07-30): the UDP data path retries too, and the gap was one behaviour wider than disclosed
+
+The limit the #24 amendment disclosed above is closed. `core/udprelay.go`'s
+`serveSOCKSUDPAssociate` now opens its end-to-end channel through `dialChainedStream`
+instead of calling `OpenStream` + `dialE2E` itself, so all three client data paths — SOCKS
+CONNECT, UDP ASSOCIATE, and the pool's sustained-flow probe — reach the exit through the
+seam that can rebuild. No new decision: decision 5 and §9 item 6 already settled both the
+policy and the shape, and this is the last call site moved onto them.
+
+### What the old call site actually inherited, which is less than was written down
+
+The #24 amendment credited the direct-`dialE2E` path with the stall bound, the attribution
+**and the cooling**. Checking the call sites rather than the prose: `markHopCooling` has
+exactly one production caller, `dialChainedStream` (`core/relaychain.go`), and `dialChain`
+neither calls it nor calls `recoveryFor`. So the split ran:
+
+| Behaviour | Lives in | The old UDP path had it |
+|---|---|---|
+| Per-layer stall bound (`stallGuard`) | `dialChain` | yes |
+| Fault attribution (`chainDialError.suspect`) | `dialChain` | yes — as a value in the returned error |
+| Cooling the suspect (`markHopCooling`) | `dialChainedStream` | **no** |
+| Dead-head escalation (`chainRepath`) | `dialChainedStream` | **no** |
+| Rebuild + retry on a fresh stream | `dialChainedStream` | **no** |
+| Picking up another path's rebuilt chain | `planOf(sess)`, read per associate | yes |
+
+The correction matters in one direction only, and it is the unflattering one: the path was
+computing an attribution and discarding it. A UDP association that met a dead hop named the
+right node in an event message and cooled nothing, so the *next* association was free to
+select that same node — the failure did not merely cost one association, it failed to teach
+the client anything. "Observed and remembered" was half right; only the observing happened.
+
+Recorded rather than quietly fixed because the same sentence had been carried into the
+issue text, and the ADR is where a reader would check it.
+
+### Why the retry could not have lived at the old call site
+
+Unchanged from decision 5, and restated because it is what makes this a move rather than a
+copy. A broken circuit is discarded, not spliced, so the outermost handshake is spent and
+the stream it was spent on is spent with it. A caller that is *handed* a stream cannot make
+another; `dialChainedStream` owns the session and can. That is the whole reason the retry
+is a property of the caller rather than of `dialE2E` — and the whole reason moving one call
+site is enough to get it.
+
+One consequence carried over with the move: the association's existing 15s budget now
+bounds the handshake and any rebuild attempts under it, not merely `OpenStream`. That is
+the same widening `handleSocksConnect` took in #24 — the caller's own deadline applied to
+the work it was always meant to cover, not a new number.
+
+### On the Consequences list's "one seam"
+
+The Consequences list above says chaining covers every client data path "through one seam
+(`dialE2E`)". Since #24 that seam is two-part and the sentence names the inner half:
+`dialChainedStream` owns the stream and the recovery, `dialE2E` owns the telescoping, and
+what a data path must reach for is the outer one. Left as written — it was true when
+written and the distinction is what these two amendments are for.
+
+### Verification
+
+A UDP associate over a depth-3 chain whose middle hop is killed **before** the association
+is opened now comes up, carries datagrams, and leaves the dead hop cooled and out of the
+rebuilt chain — the ordering matters, since it makes the flow the first thing to meet the
+dead hop rather than an inheritor of somebody else's rebuild. Its negative half is asserted
+too: a healthy chain opens exactly one stream, keeps the plan it started with, and cools
+nobody, so the test cannot be satisfied by a path that rebuilds unconditionally. Both drive
+the shipped SOCKS5 entry point over the real forwarding mesh
+(`TestUDPAssociateRebuildsAroundADeadChainHop`,
+`TestUDPAssociateOverAHealthyChainDialsOnceAndRebuildsNothing`).
