@@ -935,20 +935,35 @@ func handle(m wire, src *net.UDPAddr) {
 			exitID = ""
 		}
 		// The tier's speed cap rides the assignment to whichever party moves the bytes
-		// (issue #58/#74, ADR-0048): the exit shapes a direct session and the relay
+		// (issue #58/#74/#84, ADR-0048): the exit shapes a direct session and the relay
 		// shapes a peer-relayed one, so the coordinator stays out of the data path
 		// (ADR-0009/0033) and never sees a byte of it either way.
 		//
-		// Zero on a CHAINED connect, for the same reason exitID is empty above: the
-		// client assembled its own onion and this coordinator does not know the
-		// terminating exit (ADR-0042 §9), so it does not stamp a cap for a path it
-		// cannot account for. That leaves a chained connect unshaped by tier — a
-		// SEPARATE gap from the peer-relay one #74 closed, with a separate reason, and
-		// recorded as such in ADR-0048 §5 rather than folded into it.
+		// EVERY path, including a CHAINED connect. This used to be zeroed for a chained
+		// connect, on the same ground that leaves exitID empty above — the client
+		// assembled its own onion and this coordinator does not know the terminating
+		// exit (ADR-0042 §9). That reasoning conflated ACCOUNTING for a path with
+		// PACING its entry, and only the first needs to know where the path ends
+		// (issue #84).
+		//
+		// The chain's head is the right party for #74's reason exactly: it terminates
+		// nothing, but every byte of the session passes through it, so it can pace
+		// them. Pacing needs custody of the bytes, not comprehension of them.
+		//
+		// Stamped ONCE, at the entry, not per hop. The tier cap is a property of the
+		// session and the head is where the session enters the chain; each hop's own
+		// declared cap (ADR-0040) goes on applying independently and inside it.
+		//
+		// ADR-0042 §9 is untouched: this coordinator still does not learn the
+		// terminating exit, and enforcement never needed it. What the head learns is a
+		// coarse rate for a session it is already forwarding and already knows to be
+		// chained — the same disclosure #74 accepted, to the same class of party.
+		//
+		// The bypass this closes was not cosmetic: a chained connect goes through the
+		// same peer-relay assign as any other relayed session, so zeroing here meant a
+		// capped user who switched relay chaining on got a session with no tier ceiling
+		// at all, making the cap opt-out via a client setting.
 		sessionCap := limits.SpeedCapBps
-		if chained {
-			sessionCap = 0
-		}
 		sid := randID()
 		if m.Mode == "direct" {
 			if e.udp == nil {
@@ -982,10 +997,12 @@ func handle(m wire, src *net.UDPAddr) {
 			// verifyChainDisjoint). pickRelay already excludes the node it paired — the
 			// chain's head — but not the client's later hops, which it cannot see.
 			//
-			// SessionCapBps rides this assign too (issue #74, ADR-0048 §5): the RELAY
-			// shapes a peer-relayed session. It terminates nothing, but it moves every
-			// byte, so it can pace them — which is what makes this enforceable at a
-			// party that never learns the destination or the plaintext.
+			// SessionCapBps rides this assign too (issue #74/#84, ADR-0048 §5): the
+			// RELAY shapes a peer-relayed session. It terminates nothing, but it moves
+			// every byte, so it can pace them — which is what makes this enforceable at
+			// a party that never learns the destination or the plaintext. That holds
+			// whether or not the client is chaining: on a chained connect this relay is
+			// the chain's HEAD, and the head has the same custody of the same bytes.
 			//
 			// The EXIT is not involved and learns nothing new: no session identity, no
 			// token, no credential reaches it, so ADR-0048 §4's linkability property is
@@ -994,9 +1011,6 @@ func handle(m wire, src *net.UDPAddr) {
 			// materially smaller disclosure than the credential-to-exit design §4
 			// rejected. The splice stays transparent either way — the limiter wraps the
 			// copies, never the bytes' meaning (TestPeerRelaySplicePreservesE2E).
-			//
-			// Zero for a chained connect, via sessionCap above: that gap is separate and
-			// stays open.
 			pairAndReply(src, m.Nonce, r.addr,
 				wire{Type: "assign", Session: sid, ExitAddr: e.tcpAddr, SessionCapBps: sessionCap},
 				wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayPeer, RelayTag: relayTag(r.id), Release: coordRelease}, now)
@@ -1005,9 +1019,13 @@ func handle(m wire, src *net.UDPAddr) {
 				// name, and printing e.id under an "exit" heading would record a hop as a
 				// terminator in the operator's log — the same misattribution §9 keeps out
 				// of the session table, arriving by the back door.
-				// No capNote: sessionCap is zero here by construction (see above), so a
-				// chained line carries no cap to report.
-				log.Printf("session %s PEER-RELAY (chained): client %s <-> relay %s -> first hop %s(%s); terminating exit not known to this coordinator", sid, src, r.addr, e.id, e.country)
+				//
+				// It DOES carry the capNote (issue #84). It used to omit it by an
+				// explicit note that sessionCap was zero here by construction; it no
+				// longer is, and a chained line silently missing the cap the session was
+				// actually stamped with would be the one place an operator could not see
+				// tier shaping working.
+				log.Printf("session %s PEER-RELAY (chained): client %s <-> relay %s -> first hop %s(%s); terminating exit not known to this coordinator%s", sid, src, r.addr, e.id, e.country, capNote(sessionCap))
 			} else {
 				log.Printf("session %s PEER-RELAY: client %s <-> relay %s -> exit %s(%s)%s", sid, src, r.addr, e.id, e.country, capNote(sessionCap))
 			}
