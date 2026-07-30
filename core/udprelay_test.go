@@ -698,3 +698,206 @@ func TestServeSOCKSUDPAssociateDropsWhenTunnelUnreachable(t *testing.T) {
 		// No leak: correct, fail-closed behavior.
 	}
 }
+
+// ---------- the UDP path over a relay chain that loses a hop (issue #82) ----------
+//
+// These two run on core/relaychain_liveness_test.go's mesh — real forwarding nodes on
+// loopback, the production relayPipe standing in for the assigned blind splice, and a
+// client engine from the real New() with RelayHops actually set — so what they drive is
+// the shipped chaining path, reached through the shipped SOCKS5 UDP ASSOCIATE entry
+// point rather than by calling the dial seam directly.
+
+// The destination every association below is fixed to. It is RFC 5737 documentation
+// space and nothing ever dials it: these tests terminate on the mesh's ECHOING exit,
+// which answers the innermost handshake and then echoes the E2E stream instead of
+// resolving a destination and dialing it. Exit-side UDP termination is
+// TestExitTerminateUDPRoundTrip's subject; the subject here is which PATH the
+// association came up over, and an unreachable destination keeps the two apart.
+var udpChainTarget = net.IPv4(192, 0, 2, 10)
+
+const udpChainTargetPort = 5353
+
+// socksUDPAssociateOver drives the client side of one SOCKS5 UDP ASSOCIATE against
+// e.handleSocksUDPAssociate over sess — method negotiation, the ASSOCIATE request, and
+// the reply naming the relay socket — and returns a UDP conn dialed to that socket:
+// the thing a SOCKS client sends datagrams into.
+//
+// Note what has NOT happened when this returns. handleSocksUDPAssociate binds and
+// answers before it opens anything, so no E2E channel exists yet and no chain has been
+// dialed; the association's destination is not even known until its first datagram
+// arrives. Sending that datagram is what triggers the dial, which is why every
+// assertion about streams, chains and cooling below is made after the round trip and
+// not after this call.
+func socksUDPAssociateOver(t *testing.T, e *Engine, sess Session, exitPub []byte) *net.UDPConn {
+	t.Helper()
+	ctrlA, ctrlB := net.Pipe()
+	deadline(t, ctrlA, ctrlB)
+	// Closing the control connection is RFC 1928's teardown signal for the
+	// association, and the only thing that ends the relay loop short of its idle
+	// timeout — so the goroutine started below exits with the test rather than
+	// outliving it by udpIdleTimeout.
+	t.Cleanup(func() { _ = ctrlA.Close() })
+	go func() {
+		buf := make([]byte, 262)
+		if _, err := io.ReadFull(ctrlB, buf[:2]); err != nil {
+			return
+		}
+		if _, err := io.ReadFull(ctrlB, buf[:int(buf[1])]); err != nil {
+			return
+		}
+		if _, err := ctrlB.Write([]byte{5, 0}); err != nil {
+			return
+		}
+		if _, err := io.ReadFull(ctrlB, buf[:4]); err != nil {
+			return
+		}
+		e.handleSocksUDPAssociate(ctrlB, buf, sess, exitPub, nil)
+	}()
+
+	if _, err := ctrlA.Write([]byte{5, 1, 0}); err != nil {
+		t.Fatalf("write method negotiation: %v", err)
+	}
+	var method [2]byte
+	if _, err := io.ReadFull(ctrlA, method[:]); err != nil || method[1] != 0 {
+		t.Fatalf("method negotiation reply: %v %v", method, err)
+	}
+	if _, err := ctrlA.Write([]byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
+		t.Fatalf("write UDP ASSOCIATE request: %v", err)
+	}
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(ctrlA, reply); err != nil || reply[1] != 0 {
+		t.Fatalf("UDP ASSOCIATE reply: %v %v", reply, err)
+	}
+	bnd := &net.UDPAddr{IP: net.IP(reply[4:8]), Port: int(reply[8])<<8 | int(reply[9])}
+	data, err := net.DialUDP("udp", nil, bnd)
+	if err != nil {
+		t.Fatalf("dial relay socket: %v", err)
+	}
+	t.Cleanup(func() { _ = data.Close() })
+	return data
+}
+
+// udpAssociateCarries sends payload into the association and requires it back, which
+// is what makes this a test of a working path rather than of a dial that returned no
+// error: the first datagram is what opens the E2E channel, and the reply can only have
+// come back down the chain that channel was built over.
+func udpAssociateCarries(t *testing.T, data *net.UDPConn, payload string) {
+	t.Helper()
+	frame := encodeSOCKSUDPFrame(udpChainTarget.To4(), udpChainTargetPort, []byte(payload))
+	if _, err := data.Write(frame); err != nil {
+		t.Fatalf("write datagram into the association: %v", err)
+	}
+	_ = data.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 2048)
+	n, err := data.Read(buf)
+	if err != nil {
+		t.Fatalf("nothing came back through the association: %v", err)
+	}
+	got, ip, port, err := decodeSOCKSUDPFrame(buf[:n])
+	if err != nil {
+		t.Fatalf("malformed reply frame: %v (%v)", buf[:n], err)
+	}
+	if string(got) != payload {
+		t.Fatalf("payload came back as %q, want %q", got, payload)
+	}
+	if !ip.Equal(udpChainTarget.To4()) || port != udpChainTargetPort {
+		t.Fatalf("reply addressed as %s:%d, want the association's fixed destination %s:%d", ip, port, udpChainTarget, udpChainTargetPort)
+	}
+}
+
+// TestUDPAssociateRebuildsAroundADeadChainHop is issue #82, and is
+// TestChainRebuildDoesNotReuseTheHopThatDied (core/relaychain_liveness_test.go) put to
+// the UDP path.
+//
+// The gap it closes is worth naming precisely. The old call site reached dialChain
+// through dialE2E, so it did inherit the per-layer stall bound and the fault
+// attribution, which live in there — a wedged hop was bounded and the error named the
+// hop to blame. What it inherited none of is the machinery that ACTS on that: cooling,
+// the dead-head escalation and the rebuild are all in dialChainedStream. So the old
+// path named a suspect and then discarded it, and the rebuild it could not do at all,
+// because a rebuild needs a fresh stream (ADR-0038 §5) and this caller had already
+// spent the one it was handed.
+//
+// So midA is killed BEFORE the association is opened: this flow is the first thing to
+// meet the dead hop and has nobody else's rebuild to inherit. That ordering is the
+// whole test — it is the case where the UDP path failed and the equivalent TCP path
+// succeeded. (Inheriting another path's rebuild was never broken, since planOf is read
+// per associate; that is why it is not what this drives.)
+//
+// Mutation: put this call site back on OpenStream + dialE2E and the association never
+// carries a byte, which is precisely what #82 reported.
+func TestUDPAssociateRebuildsAroundADeadChainHop(t *testing.T) {
+	m := newLivenessMesh(t, 2, nil)
+	client := newLivenessClient(t, m, 3, nil)
+	midA, midB := m.mids[0], m.mids[1]
+
+	sess := withChain(newChainTestSession(func() string { return m.head.addr }), planVia(m, midA))
+	ts := sess.(*chainedSession).Session.(*chainTestSession)
+
+	midA.kill()
+
+	data := socksUDPAssociateOver(t, client, sess, m.exitKey.Public)
+	udpAssociateCarries(t, data, "REBUILT_CHAIN_CARRIES_DATAGRAMS_0123456789")
+
+	got := planOf(sess)
+	if got == nil {
+		t.Fatal("the session carries no chain after a rebuild")
+	}
+	for i, h := range got.hops {
+		if h.id == midA.id {
+			t.Fatalf("the rebuilt chain reuses the hop that died, at position %d/%d — a UDP flow that rebuilds onto the dead node has not recovered, it has retried", i+1, len(got.hops))
+		}
+	}
+	if len(got.hops) != 2 {
+		t.Errorf("rebuilt chain has %d peeling hops, want 2 — an association must not quietly take a shorter path than the one the user configured", len(got.hops))
+	}
+	if got.hops[0].id != m.head.id {
+		t.Errorf("rebuilt chain is headed by %s, want the head the session terminates at (%s)", shortID(got.hops[0].id), shortID(m.head.id))
+	}
+	if got.hops[1].id != midB.id {
+		t.Errorf("rebuilt middle hop = %s, want the only live alternative %s", shortID(got.hops[1].id), shortID(midB.id))
+	}
+	if !client.hopCooling(midA.id) {
+		t.Error("the dead hop was not sunk into the cooling memory, so the next chain this client builds is free to select it again")
+	}
+	if client.hopCooling(midB.id) || client.hopCooling(m.head.id) {
+		t.Error("a working hop was cooled — cooling the wrong node shrinks the usable directory for every later chain")
+	}
+	if n := ts.streamsOpened(); n != 2 {
+		t.Errorf("opened %d streams, want 2 (the failed circuit, then the rebuilt one) — ADR-0038 §5 discards a broken circuit rather than splicing onto it, so a rebuild costs exactly one fresh stream", n)
+	}
+	if ts.isClosed() {
+		t.Error("the session was dropped even though only a MIDDLE hop died — every other UDP association and TCP stream on it died with it, for nothing")
+	}
+}
+
+// TestUDPAssociateOverAHealthyChainDialsOnceAndRebuildsNothing is the negative half,
+// and it is the reason the test above says anything at all: without it every assertion
+// up there would hold just as well if the UDP path rebuilt on EVERY associate — which
+// would re-select the whole circuit per captured flow, and a browser opens a great many
+// UDP flows.
+//
+// Same mesh, same depth, same associate. Nothing killed. Exactly one stream, the chain
+// the session started with, and an empty cooling memory.
+func TestUDPAssociateOverAHealthyChainDialsOnceAndRebuildsNothing(t *testing.T) {
+	m := newLivenessMesh(t, 2, nil)
+	client := newLivenessClient(t, m, 3, nil)
+	midA := m.mids[0]
+
+	before := planVia(m, midA)
+	sess := withChain(newChainTestSession(func() string { return m.head.addr }), before)
+	ts := sess.(*chainedSession).Session.(*chainTestSession)
+
+	data := socksUDPAssociateOver(t, client, sess, m.exitKey.Public)
+	udpAssociateCarries(t, data, "HEALTHY_CHAIN_CARRIES_DATAGRAMS_0123456789")
+
+	if n := ts.streamsOpened(); n != 1 {
+		t.Errorf("opened %d streams for one associate over a healthy chain, want 1 — an associate that rebuilds when nothing failed re-selects the whole path per captured flow", n)
+	}
+	if planOf(sess) != before {
+		t.Error("the session's chain was replaced although nothing failed — every TCP stream on this session pays for that too, since they all read the same plan")
+	}
+	if client.hopCooling(midA.id) || client.hopCooling(m.head.id) || client.hopCooling(m.exitID) {
+		t.Error("a node was cooled on a successful associate, which would drain the usable directory one healthy flow at a time")
+	}
+}

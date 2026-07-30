@@ -140,10 +140,11 @@ these properties. "Enforced" means code fails the path when it is violated.
 | Failure never silently shortens the chain | **Enforced** — every failure fails the path; a depth above the cap is refused at construction |
 | A relay is never an open proxy | **Enforced** — forwards only to an address in the signed directory, and never to itself |
 | `R₁` is not also one of the chain's hops | **Enforced against an HONEST coordinator only** — see §7 |
-| Two hops are not run by the same operator | **NOT enforced today** at depth 2 (one peeling hop, nothing to differ from), and **inert on any deployment without a curated operators file** — see §6 |
-| Two hops are not in the same AS | **NOT enforced today** — no implementation; §9 item 4 |
-| An intermediate hop is rate-limited | **NOT enforced today** — traffic is metered but uncapped; §9 item 7 |
-| A hop presents a relay-role admission credential | **NOT enforced today** — the wire seam exists, the client passes `nil`; §9 item 8 |
+| A chain whose hop dies is discarded and rebuilt | **Enforced** — a fresh chain over a fresh stream, never a splice onto the standing layers; bounded, and the dead hop is cooled (#24, §9 item 6) |
+| Two hops are not run by the same operator | **Preferred, not enforced** — the advisory rung of the selection ladder. Nothing at depth 2 (one peeling hop, nothing to differ from), and **inert on any deployment without a curated operators file** — see §6 |
+| Two hops are not in the same AS | **Preferred, not enforced** — this is the load-bearing half of that ladder, derived from each hop's observed address (#23, ADR-0044), but selection *degrades* rather than failing the path: a chain that could not get AS diversity is built and **reported as degraded**. An unresolved AS counts as no diversity rather than as diverse-from-everything. §9 item 4 |
+| An intermediate hop is rate-limited | **Enforced** — a hop caps concurrent forwarded circuits per previous hop and in aggregate and *refuses* rather than queueing, with an optional per-previous-hop byte pace (#25, §6); §9 item 7 |
+| A hop presents a relay-role admission credential | **Enforced when an anchor is configured** — the client checks each hop's credential against `Config.RelayAdmissionPubKey`, bound to that hop's key, and a hop that fails it fails the whole chain (#26, §9 item 8). An empty anchor verifies nothing and is fail-open, independently of whether an exit anchor is set |
 
 ### 0.6 Where the code is
 
@@ -155,6 +156,7 @@ these properties. "Enforced" means code fails the path when it is violated.
 | Honouring `firstHop` | `cmd/coordinator/assign.go` — `resolveFirstHop`; `cmd/coordinator/main.go` — the `connect` handler |
 | The acceptance test, through the real `New()` | `core/relaychain_acceptance_test.go` |
 | The reload tests, mutation-checked | `core/relaychain_reload_test.go` |
+| Liveness, cooling and rebuild, over a killable mesh (issues #24, #82) | `core/relaychain_liveness_test.go`; the UDP associate's half in `core/udprelay_test.go` |
 | The coordinator's half | `cmd/coordinator/firsthop_test.go` |
 | The Windows client's hop-count control (issue #28) | `clients/windows/settings.go` — the "Relay hops" group; `clients/windows/main.go` — `connect()`'s directory load, `eventStatus`'s fail-closed message |
 | A dependency-free demonstration of the crypto alone | [`cmd/relaychain-probe`](../../cmd/relaychain-probe/README.md) |
@@ -681,22 +683,34 @@ real nodes) — it validates the cryptographic construction only.
 This spike decides the shape; the build is deliberately split into file-disjoint,
 independently-reviewable issues (as the cold-start spike split into #29/#30/#31/#32).
 
-**Status after issue #142 (2026-07-25).** Items 1, 2 and 5 **landed**, item 3 landed
-earlier with #124/#126, and item 4 landed **only in its operator-tag half**. Items 6,
-7, 8 and 9 remain open and are filed as child issues of #76. What #142 shipped:
+**Status at `main`, 2026-07-30.** Eight of the ten items have landed. Items 1, 2 and 5
+landed with `old #142`, item 3 earlier with `old #124`/`old #126`, and items 4, 6, 7 and
+8 have landed since as the child issues named below — item 4 by a route this section did
+not anticipate (ADR-0044), and item 5 with a surface that has since re-opened under it.
+Items 9 and 10 remain open: one a tracked non-goal, one unbuilt.
 
-| § | Item | Status |
-|---|------|--------|
-| 1 | Relay onion-forward handler + ingress | **Shipped** — the `hop:` branch of `exitTerminate`, `relayForward`, and the `RelayIngress` listener. Forwarding is admitted only to an address in the node's signed directory, and a relay-only node refuses to egress at all. |
-| 2 | Client-side chain construction | **Shipped** — `core/relaychain.go`'s `buildChain` + `dialChain`, reached through the single `dialE2E` seam so SOCKS CONNECT, UDP ASSOCIATE, and the pool probe all chain alike. |
-| 3 | Directory: relay ingress + operator metadata | **Shipped earlier** (#124/#126, the ADR-0038 #124 amendment). |
-| 4 | AS/operator-diverse hop selection | **Barely shipped, and weaker than this document originally claimed.** Operator diversity is applied where a tag exists, but it constrains a *pair* of hops, so it does nothing at depth 2 — the depth most clients will run — and `operators[id]` is empty for every node absent from the coordinator's curated operators file, so on an uncurated deployment it is **inert, not merely weak**. The IP-derived AS diversity the #124 amendment calls the load-bearing anchor is **not implemented**. Stays a child issue. |
-| 5 | Hop-count knob + config surface | **Shipped** for core, `cmd/node`, and — issue #28 — the Windows client's ADR-0036 "Relay hops" control (`Config.RelayHops` / `-relay-hops`, default 1, refused above `RelayHopsMax`). The control also owns the directory file + key fields (issue #28 needs a directory on the client to offer it at all) and surfaces `[relay] chain not built:` distinctly from a generic connection error. |
-| 6 | Chain liveness + rebuild | **Open.** A dead hop currently surfaces as an end-to-end stall and rebuilds through the existing ADR-0028/ADR-0030 machinery — correct, but not chain-aware. |
-| 7 | Relay-side DoS controls for onion forwarding | **Shipped** (#25, ADR-0038 §6 + its issue #25 amendment). A hop caps concurrent forwarded circuits per previous hop and in aggregate, refusing rather than queueing, with an optional per-previous-hop byte pace on top of ADR-0040's aggregate meter. A ring of nodes pointed at each other terminates because every revisit arrives from the same predecessor and so shares one per-peer budget — **no hop counter was added**; the amendment records why an enforceable one would have to be readable by every hop, and what that would cost. Refusals are edge-logged for the operator and sealed back to the client on the hop's own channel, so a full hop is distinguishable from a dead one. |
-| 8 | Per-hop relay admission-cred verification | **Open.** The wire seam exists (every responder presents its credential in msg2); the client passes `nil` for hop layers today. |
-| 9 | NAT-traversed intermediate hops | **Open, and still a non-goal** to revisit only if reachable intermediate capacity proves insufficient. |
-| 10 | Coordinator-independent relay identity (#190) | **Open, new.** The client cannot verify which node was assigned as `R₁`, so a hostile coordinator can collapse the chain undetectably (§7). Needs an `R₁` identity the client can check without the coordinator's say-so. |
+**How this table is kept current**, because it has not been. Every row names the issue
+that owns it, so the whole table can be *checked* against the tracker in one pass rather
+than trusted — and so a lane can find its own row without reading the other nine. The PR
+that closes a row's issue updates that row in the same PR (ADR-0007: docs are part of
+Done). Where a row's issue is closed but the item is not finished, the row says what
+remains and what tracks it — or says that nothing does, which is the honest answer often
+enough to be worth a slot. The drift this replaces was structural rather than anyone's
+oversight: the table lives in a design document while the work lands per-issue, so each
+lane met a one-row edit in a file it did not own and correctly left it alone, twice over.
+
+| § | Item | Issue | Status |
+|---|------|-------|--------|
+| 1 | Relay onion-forward handler + ingress | `old #142` | **Shipped** — the `hop:` branch of `exitTerminate`, `relayForward`, and the `RelayIngress` listener. Forwarding is admitted only to an address in the node's signed directory, and a relay-only node refuses to egress at all. |
+| 2 | Client-side chain construction | `old #142` | **Shipped** — `core/relaychain.go`'s `buildChain` + `dialChain`. The seam is **two-part** since #24 and this row used to name only the inner half: `dialChainedStream` owns the stream and the recovery, `dialE2E` owns the telescoping, and what a data path reaches for is the outer one. SOCKS CONNECT, UDP ASSOCIATE and the pool probe are all on it — the UDP path as of #82. |
+| 3 | Directory: relay ingress + operator metadata | `old #124`/`old #126` | **Shipped earlier** (the ADR-0038 `old #124` amendment). Extended by #27: the directory reloads in place on an interval, through the identical `loadRelayDirectory` call construction uses, so a reload can never produce a looser directory than a fresh start would. |
+| 4 | AS/operator-diverse hop selection | #23 | **Shipped**, and no longer the operator-tag half only. The IP-derived AS diversity the `old #124` amendment called the load-bearing anchor — recorded here as *not implemented* — landed with ADR-0044: derived from each hop's **observed** address behind `core/asn.Lookup`, never from a signed tag, with the table embedded in the client build (#55) and wired in at `loadRelayDirectory`. Selection degrades down a four-rung ladder (AS+operator, AS only, operator only, neither) rather than refusing, and an unresolved AS counts as **no** diversity and is reported, never silently read as diverse-from-everything. Operator diversity is unchanged and still advisory: `operators[id]` is empty for every node absent from the coordinator's curated file and an empty tag is never a collision, so it stays inert on an uncurated deployment. Neither control does anything at depth 2, which has one peeling hop and so no pair to constrain. |
+| 5 | Hop-count knob + config surface | #28 | **Shipped, and re-opened by a client change.** Landed for core, `cmd/node`, and the walk client's ADR-0036 "Relay hops" control (`Config.RelayHops` / `-relay-hops`, default 1, refused above `RelayHopsMax`), which also owns the directory file + key fields and surfaces `[relay] chain not built:` distinctly from a generic connection error. But #35 then made Fyne the desktop client of record, and `clients/fyne` has **no** `RelayHops`/`RelayDirectory` settings surface — so the knob is absent from the client that is replacing the one that has it, and ADR-0039's eight-point parity bar does not list it. **Nothing on the board tracks that remainder.** |
+| 6 | Chain liveness + rebuild | #24 | **Shipped** (ADR-0038's #24 amendment). Detection is per layer inside `dialChain`, bounded by `chainLayerTimeout` and attributed to the hop whose own layer did not complete; the rebuild lives in `dialChainedStream`, which cools the suspect, builds a fresh chain behind the same head, installs it on the session and retries over a **new** stream, bounded by `chainRebuildMax`. A dead *head* escalates to dropping the session instead, since no rebuild can move off it. An admission rejection is deliberately not routed around. Completed across every client data path by #82, which moved the UDP associate onto the seam. |
+| 7 | Relay-side DoS controls for onion forwarding | #25 | **Shipped** (ADR-0038 §6 + its `#25` amendment). A hop caps concurrent forwarded circuits per previous hop and in aggregate, refusing rather than queueing, with an optional per-previous-hop byte pace on top of ADR-0040's aggregate meter. A ring of nodes pointed at each other terminates because every revisit arrives from the same predecessor and so shares one per-peer budget — **no hop counter was added**; the amendment records why an enforceable one would have to be readable by every hop, and what that would cost. Refusals are edge-logged for the operator and sealed back to the client on the hop's own channel, so a full hop is distinguishable from a dead one. |
+| 8 | Per-hop relay admission-cred verification | #26 | **Shipped** (ADR-0038's `#26` amendment). The client verifies each hop's relay-role credential against `Config.RelayAdmissionPubKey`, bound to that hop's key exactly as the exit check is bound to the exit's, with one verifier built before the loop and shared by every hop so a malformed anchor fails before hop 1 is dialed. A hop that fails it fails the **whole** chain rather than being de-selected. An empty anchor yields a nil callback — fail-open, and independent of whether an exit anchor is set. |
+| 9 | NAT-traversed intermediate hops | #30 | **Open, and still a non-goal** to revisit only if reachable intermediate capacity proves insufficient. |
+| 10 | Coordinator-independent relay identity | #31 (`old #190`) | **Open.** The client cannot verify which node was assigned as `R₁`, so a hostile coordinator can collapse the chain undetectably (§7). `old #142` closed the *accidental* case — `verifyChainDisjoint` recomputes the published `relayTag` for every hop the client selected and fails the path on a match — which leaves the *deliberate* one: a coordinator that reports a tag not matching the relay it actually wired. Needs an `R₁` identity the client can check without the coordinator's say-so; §7 records three directions and picks none. |
 
 Two constraints #142 added that this section did not anticipate:
 

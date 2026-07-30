@@ -301,16 +301,30 @@ func (e *Engine) serveSOCKSUDPAssociate(relay *net.UDPConn, ctrlDone <-chan stru
 
 	openCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	st, err := sess.OpenStream(openCtx, e2eLabel)
-	if err != nil {
-		return
-	}
 	// Chained exactly like the TCP path (issue #142). A UDP association that took a
 	// shorter path than the user's configured chain would be a silent hole in the
 	// property they asked for — and UDP is most of what a browser moves.
-	nc, err := e.dialE2E(st, planOf(sess), exitPub, udpTargetPrefix+target)
+	//
+	// Through dialChainedStream, rather than opening the stream here and handshaking
+	// over it, so a dead hop is rebuilt around instead of failing the flow (issue #82).
+	//
+	// Dialing dialE2E directly still ran dialChain, and the per-layer stall bound and
+	// the fault attribution both live in there: a wedged hop was already bounded, and
+	// the error already named which hop to hold responsible. What this path did not
+	// have was anything that ACTS on that attribution. markHopCooling, the dead-head
+	// escalation and the rebuild all live in dialChainedStream, so the suspect was
+	// named into an error, emitted, and then dropped — nothing cooled the node, and the
+	// next associate was free to select it again. Only the rebuild is hard to move:
+	// ADR-0038 §5 discards a broken circuit rather than splicing a fresh tail onto it,
+	// so the outermost handshake is spent and the stream it was spent on with it, which
+	// makes stream ownership the requirement and this seam the only caller that has it.
+	// A UDP flow that was the FIRST thing to meet a dead hop therefore failed where the
+	// equivalent TCP flow rebuilt and succeeded.
+	//
+	// What was never missing is picking up a chain some OTHER path rebuilt, since
+	// planOf(sess) is read per associate — that much came from reading the session.
+	nc, err := e.dialChainedStream(openCtx, sess, exitPub, udpTargetPrefix+target)
 	if err != nil {
-		_ = st.Close()
 		e.emit(EventError, "", "exit rejected: %v", err)
 		return
 	}
