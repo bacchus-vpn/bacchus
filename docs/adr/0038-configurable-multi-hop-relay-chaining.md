@@ -994,10 +994,17 @@ dying is observed but costs that one association.
 > place rather than left standing, since it understated the gap it exists to disclose; the
 > #82 amendment records what the check found.
 
-**Still deferred:** IP-derived AS diversity; NAT-traversed intermediate hops (§9 item 9, a
-tracked non-goal — #30); coordinator-independent relay identity (#190). §9's
-implementation list is otherwise complete. This change is **Part of #76**; it closes #24
-and does not close #76 itself.
+**Still deferred:** NAT-traversed intermediate hops (§9 item 9, a tracked non-goal — #30);
+coordinator-independent relay identity (#31). §9's implementation list is otherwise
+complete. This change is **Part of #76**; it closes #24 and does not close #76 itself.
+
+> Corrected under issue #83's pass over §9. As first written this sentence also deferred
+> **IP-derived AS diversity**, which had landed the previous day (#23 / ADR-0044, `main`
+> at `13f39e4`, 2026-07-29) — the same drift #83 found in the design document's own
+> status table, in a second place. And it cited `#190` for coordinator-independent relay
+> identity: a retired-tracker number in a passage written after the move, pointing at live
+> open work, which is the one case the issue-numbering convention renumbers rather than
+> marks (see `docs/adr/README.md`). It is #31 on the current tracker.
 
 ## Amendment (issue #82, 2026-07-30): the UDP data path retries too, and the gap was one behaviour wider than disclosed
 
