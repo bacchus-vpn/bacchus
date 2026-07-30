@@ -10,11 +10,41 @@ exit → internet, all on our own Go stack.
 | Role | Where | Binary / how |
 |---|---|---|
 | **coordinator** (UDP signaling + STUN/TURN + cold-start bootstrap, one shared port) | VPS, UDP-reachable from the censored region | `bacchus-coordinator -turn-public-ip <IP> -turn-user <user> -turn-pass <TURN_PASS>` (systemd `bacchus-coordinator`) |
-| **exit** (egress) | same/another VPS | `bacchus-node -role exit -listen :20000 …` (systemd `bacchus-exit`) |
+| **exit** (egress) | a VPS that does **not** run the coordinator — see below | `bacchus-node -role exit -listen :20000 …` (systemd `bacchus-exit`) |
 | **relay** (forward only, never egresses) | residential PC | `bacchus-node -role relay -advertise <EXIT_HOST>:20000 …` |
 | **client** | user device | `bacchus-node -role client …` → local SOCKS5 `127.0.0.1:1080` |
 
-A single node can hold several roles at once (e.g. `-role exit,relay`).
+A single node can hold several roles at once (e.g. `-role exit,relay`). One combination is
+excluded, and it is not a node-role question at all:
+
+### One host does not run both a coordinator and an exit (issue #60)
+
+ADR-0020 treats the coordinator as **untrusted by standing assumption**. That is not
+decoration — it is what justifies country-only exit assignment (ADR-0042), the
+client-assembled relay chain (ADR-0038), and the deliberate absence of exact-exit pinning.
+The whole matchmaking design is built so that a hostile coordinator cannot deanonymize a
+user.
+
+Co-locating an exit defeats that locally. For any session assigned to that exit, one
+operator-controlled machine observes both halves of the correlation everything else is
+arranged to keep apart: who was assigned, and what left the network. **No protocol change
+causes this and no protocol control detects it** — it is purely a property of where the
+services are installed, which is why it has to be a rule somebody reads rather than a check
+something runs.
+
+It is harmless while the operator is also the only user: there is nothing to learn that is
+not already in that operator's own logs. It stops being harmless the moment anyone else
+uses the network, which is earlier than 1.0 — roughly `[G2]` closed beta.
+
+**If a coordinator host must contribute capacity, give it the relay role, not the exit
+role.** A relay forwards other people's traffic blind: it never learns the destination and
+never sees plaintext, so what a co-located relay could correlate is far weaker than what a
+co-located exit can. `-role relay` on the coordinator box, `-role exit` anywhere else.
+
+Issue #31 is the same assumption broken a different way — a coordinator that assigns a
+first hop which is also one of the client's own chain hops, which the client cannot detect.
+That one is a tracked non-goal for 1.0 (ADR-0038's #31 amendment). Both reopen at the same
+gate, and are reviewed together rather than separately.
 
 ## Build (dev machine)
 ```powershell

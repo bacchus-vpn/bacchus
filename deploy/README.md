@@ -28,17 +28,26 @@ Secrets and host-specific values live in **env files** under `/etc/bacchus/`
    ```bash
    ufw allow 8080/udp; ufw allow 3478/udp; ufw allow 49152:65535/udp; ufw allow 20000/tcp
    ```
-5. Enable + start:
+5. Enable + start — **the coordinator only.** An exit does not belong on this box; see
+   step 7.
    ```bash
    systemctl daemon-reload
-   systemctl enable --now bacchus-coordinator bacchus-exit
-   systemctl status bacchus-coordinator bacchus-exit
+   systemctl enable --now bacchus-coordinator
+   systemctl status bacchus-coordinator
    ```
 6. On a **coordinator** host only, install the country-database refresh script and its
    timer as well (`bacchus-geoip-refresh.{sh,service,timer}`) — see
    [Keeping it fresh](../docs/RUNNING.md#keeping-it-fresh-issue-85). It is a separate
    step because it is what makes each node's country *derived* rather than
    *self-reported*, and until it runs the coordinator has no database to derive from.
+7. **Do not run an exit on a coordinator host** (issue #60). One machine running both
+   sees the signaling for an assignment *and* the egress traffic for it — both ends of
+   the correlation the rest of this design spends its budget denying. Put the exit on a
+   different box: [Adding another exit](#adding-another-exit-issue-5) below is the
+   procedure. If a coordinator host must contribute capacity anyway, give
+   it the **relay** role rather than the exit role — a relay learns neither the
+   destination nor the plaintext, so the correlation it can offer is far weaker. Full
+   reasoning: [One host does not run both a coordinator and an exit](../docs/RUNNING.md#one-host-does-not-run-both-a-coordinator-and-an-exit-issue-60).
 
 ## Manage
 ```bash
