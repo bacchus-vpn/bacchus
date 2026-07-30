@@ -120,6 +120,77 @@ func (e *Engine) candidateCooling(c selection.Candidate) bool {
 	return bad && time.Since(t) < candCooldown
 }
 
+// ---------- hop health memory (issue #24) ----------
+
+// hopCooldown is how long a chain node — a peeling hop or a terminating exit —
+// that failed to carry a layer is avoided by later hop selection.
+//
+// It is longer than candCooldown because it is waiting out a different thing.
+// candCooldown waits out a BLOCK: a transport+country that a censor is currently
+// interfering with, where the interference is time-varying on the order of seconds
+// to minutes and the cost of retrying too early is one more failed dial on a path
+// the ladder was going to try anyway. This waits out a NODE: a volunteer machine
+// that has gone away, is restarting, is saturated, or has drifted off the
+// directory everyone else is holding — conditions that resolve on the order of a
+// node's restart, not a censor's mood. Five minutes is comfortably longer than a
+// process restart and comfortably shorter than the directory reload interval that
+// would drop a genuinely departed node from selection altogether.
+//
+// It expires, which is the whole design. A hop that saturated (ADR-0038 §6) is a
+// perfectly good hop the client should come back to, and this file's own
+// candidate memory established the principle: a cooldown SINKS, it never removes.
+const hopCooldown = 5 * time.Minute
+
+// markHopCooling records that a chain node just failed to carry a layer, so the
+// next chain built prefers somebody else (issue #24, requirement 2).
+//
+// # Why this is its own map and not the candidate memory generalized
+//
+// The issue asks for failed hops to be sunk into "the existing cooling/health
+// memory," and the existing memory is candCooling above. It cannot hold a hop, and
+// generalizing it to would be the wrong move for three independent reasons — so
+// this is a parallel map in the same style rather than one widened key space.
+//
+//  1. They are keyed on different things, and a hop is not one of them.
+//     candCooling is keyed by selection.Candidate — a transport, a country and a
+//     mode — which is what the ladder ranks. A hop is a node id. Widening the key
+//     to hold both would mean a map[any]time.Time, which accepts anything and
+//     silently loses the compile-time guarantee that only candidates reach the
+//     candidate memory.
+//
+//  2. They mean different things to their consumers. A cooling CANDIDATE is sunk
+//     to the back of its tier and still raced (selection.Ladder's Cooling
+//     predicate); a cooling HOP is skipped when the directory can spare it,
+//     because a chain either contains a node or it does not — there is no "back of
+//     the tier" for a hop. Same word, two mechanisms.
+//
+//  3. They have different lifetimes for reasons specific to each — see
+//     hopCooldown. One memory would have to pick one number and be wrong about
+//     one of the two things it was remembering.
+//
+// What the two DO share is the shape, and that is worth keeping: an expiring
+// mark, held under its own small lock, read through a predicate the selector
+// calls, never a removal. This is that shape applied to hops.
+func (e *Engine) markHopCooling(id string) {
+	if id == "" {
+		return
+	}
+	e.hopCoolMu.Lock()
+	defer e.hopCoolMu.Unlock()
+	e.hopCool[id] = time.Now()
+}
+
+// hopCooling reports whether node id failed within hopCooldown. It is the
+// predicate hop and exit selection consult (selectChain), and it is nil-safe on an
+// Engine literal that never built the map — which is every hand-built test engine,
+// and which therefore selects exactly as it did before this memory existed.
+func (e *Engine) hopCooling(id string) bool {
+	e.hopCoolMu.Lock()
+	defer e.hopCoolMu.Unlock()
+	t, bad := e.hopCool[id]
+	return bad && time.Since(t) < hopCooldown
+}
+
 // ---------- selection: fetch exits, build the ladder, race it ----------
 
 // dialedPath is one validated candidate: the live session, the exit the coordinator
@@ -500,32 +571,27 @@ func (e *Engine) pairInCountry(ctx context.Context, c selection.Candidate, tr Tr
 func (e *Engine) validateSession(ctx context.Context, sess Session, exitPub []byte, timeout time.Duration) (time.Duration, error) {
 	openCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	st, err := sess.OpenStream(openCtx, e2eLabel)
-	if err != nil {
-		return 0, err
-	}
-	// noiseConn/Stream carry no deadline of their own, so bound the probe by
-	// closing the stream when openCtx fires; that unblocks runProbe's read.
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-openCtx.Done():
-			_ = st.Close()
-		case <-done:
-		}
-	}()
-
 	// Probe over the SAME chain the real traffic will use (issue #142), not over a
 	// shortcut to the exit: the point of sustained-flow validation is that the path
 	// the pool is about to commit to actually carries bytes, and on a chained path
 	// that includes every hop. A probe that skipped the hops could pass while the
 	// chain itself was dead.
-	nc, err := e.dialE2E(st, planOf(sess), exitPub, probeSentinel)
+	//
+	// Through dialChainedStream (issue #24) rather than OpenStream + dialE2E, so a
+	// candidate is not condemned for one dead hop when the directory can supply a
+	// live chain: validation is exactly where that matters most, because failing here
+	// costs the whole candidate — every exit in that country on that transport — and
+	// the pool has no way to tell the difference between "this transport is blocked"
+	// and "one volunteer machine went away". It also carries the openCtx bound the
+	// hand-rolled watchdog here used to provide.
+	nc, err := e.dialChainedStream(openCtx, sess, exitPub, probeSentinel)
 	if err != nil {
-		_ = st.Close()
 		return 0, err
 	}
+	// noiseConn/Stream carry no deadline of their own, so bound the probe by closing
+	// the channel when openCtx fires; that unblocks runProbe's read.
+	stopWatch := closeOnDone(openCtx, nc)
+	defer stopWatch()
 	rtt, err := runProbe(nc)
 	_ = nc.Close() // closes only the probe stream, not the session
 	if err != nil {
