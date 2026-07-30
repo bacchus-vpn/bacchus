@@ -40,7 +40,7 @@ func TestProbeEchoIsMetered(t *testing.T) {
 		t.Fatalf("NewQuota: %v", err)
 	}
 	e := &Engine{exitKey: key, quota: q, limiterCtx: context.Background()}
-	go e.exitTerminate("", sConn)
+	go e.exitTerminate("", nil, sConn)
 
 	nc, err := clientHandshake(cConn, key.Public, probeSentinel, nil)
 	if err != nil {

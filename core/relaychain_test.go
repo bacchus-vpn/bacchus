@@ -91,7 +91,7 @@ func startForwardNodeCapped(t *testing.T, key noise.DHKey, dir *relayDirectory, 
 			// Bounded, so a broken topology fails the test instead of hanging it to Go's
 			// package timeout — see hopTestDeadline.
 			_ = c.SetDeadline(time.Now().Add(hopTestDeadline))
-			go e.exitTerminate("", c)
+			go e.exitTerminate("", nil, c)
 		}
 	}()
 	return ln.Addr().String(), e

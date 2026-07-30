@@ -182,9 +182,32 @@ type wire struct {
 	RelayTag        string                 `json:"relayTag,omitempty"`    // stable opaque tag identifying the assigned peer relay (issue #56, ADR-0035), so a client rotating the coordinator pool can skip a second member that assigns the SAME relay it just failed on. Set only on the peer-relay path; empty for direct/TURN-fallback (no distinct relay to dedupe). Additive/optional — a client predating #56 ignores it.
 	IngressPort     int                    `json:"ingressPort,omitempty"` // a relay's onion-forward TCP listener port (issue #124, ADR-0038): the port a client's onion layer dials to use this node as an intermediate hop. Self-reported on register — the coordinator cannot observe a TCP listener from a UDP register — but only the PORT is trusted: buildSnapshot advertises the ingress as the coordinator-OBSERVED source IP joined to this port, so a relay cannot assert an ingress IP (see Entry.Ingress). Zero/absent => this relay advertises no ingress and is not relay-eligible. Additive/optional; a relay predating #124 omits it.
 	SpeedCap        uint64                 `json:"speedCap,omitempty"`    // a forwarder's DECLARED aggregate speed cap in bits/s (issue #143, ADR-0040): what its operator is WILLING to carry, which is not what it CAN carry. Self-reported, and trusted, because this claim can only ever bind downward: under-declaring merely reduces what the node is given (its operator's uplink, their ISP bill, their call), and over-declaring is inert because usable = min(declared, measured) and the measured term is NOT a self-report. Contrast Operator/Ingress, where the self-report is exactly the thing an attacker profits from and is therefore not trusted. Zero/absent = no declared cap; additive/optional, so a node predating #143 is treated exactly as it is today.
-	QuotaState      string                 `json:"quotaState,omitempty"`  // quotaOK | quotaExhausted (issue #143, ADR-0040): whether this forwarder's declared monthly quota — its operator's own ISP data cap — is spent for the current billing cycle. Re-sent on EVERY register (core/engine.go registerLoop) because the handler below replaces the registry entry wholesale, so a state carried once would be forgotten 10s later. One BIT rather than the byte counts, deliberately: matchmaking needs only "may I assign to you", and a per-node monthly usage curve would hand this coordinator — untrusted by standing assumption (ADR-0020, #60) — a linkability signal about a residential operator's household in exchange for nothing. Empty = no declared quota; additive/optional.
-	Receipt         *accounting.Receipt    `json:"receipt,omitempty"`     // capacity-report payload (issue #158, ADR-0041): a co-signed usage receipt (ADR-0021) the CLIENT sends to feed the coordinator-side capacity estimator. Carries the client-asserted Saturated bit; bound to the co-signing client by ReportSig. Absent on every other message. A leaf import (core/accounting), like admission — not the transport stack this binary avoids.
-	ReportSig       []byte                 `json:"reportSig,omitempty"`   // client signature over the capacity-report receipt + its saturation bit (accounting.SignReport, issue #158): proves the un-co-signed Saturated bit came from the client that co-signed the receipt, so a node that merely holds the receipt cannot forge or flip it.
+	// SessionCapBps is the RESOLVED per-session speed cap in bits/s that this
+	// coordinator stamps on an "assign" for the exit to shape the session to (issue
+	// #58, ADR-0048). It is the speed_cap_bps of the signed policy's tier row for the
+	// connecting account's (trust, plan) pair — read out of a document verified
+	// against the policy root, never authored here and never asserted by a peer.
+	//
+	// Coordinator -> exit only, and only on an assign the EXIT receives: a peer-relay
+	// assign carries ExitAddr and goes to the relay, which terminates nothing. Zero
+	// or absent means unshaped, which is what an unpoliced coordinator sends and what
+	// every coordinator predating #58 sends; a node reading it builds
+	// capacity.NewLimiter(0), which is nil and inert, so no branch is needed either
+	// side. Additive/optional throughout.
+	//
+	// Distinct from SpeedCap above: that is a NODE's declared AGGREGATE cap on
+	// register, this is one USER's per-session entitlement. They compose rather than
+	// override — the node's own limiter still paces every byte, so this cannot raise
+	// what an operator already refuses to exceed (ADR-0040).
+	//
+	// Byte-for-byte the same field as core/engine.go's wire (that binary does not
+	// import this one, by design — see this type's doc); TestSessionCapWireContract
+	// pins both copies so they cannot drift, the same way TestQuotaStateWireContract
+	// pins the quota literals.
+	SessionCapBps uint64              `json:"sessionCapBps,omitempty"`
+	QuotaState    string              `json:"quotaState,omitempty"` // quotaOK | quotaExhausted (issue #143, ADR-0040): whether this forwarder's declared monthly quota — its operator's own ISP data cap — is spent for the current billing cycle. Re-sent on EVERY register (core/engine.go registerLoop) because the handler below replaces the registry entry wholesale, so a state carried once would be forgotten 10s later. One BIT rather than the byte counts, deliberately: matchmaking needs only "may I assign to you", and a per-node monthly usage curve would hand this coordinator — untrusted by standing assumption (ADR-0020, #60) — a linkability signal about a residential operator's household in exchange for nothing. Empty = no declared quota; additive/optional.
+	Receipt       *accounting.Receipt `json:"receipt,omitempty"`    // capacity-report payload (issue #158, ADR-0041): a co-signed usage receipt (ADR-0021) the CLIENT sends to feed the coordinator-side capacity estimator. Carries the client-asserted Saturated bit; bound to the co-signing client by ReportSig. Absent on every other message. A leaf import (core/accounting), like admission — not the transport stack this binary avoids.
+	ReportSig     []byte              `json:"reportSig,omitempty"`  // client signature over the capacity-report receipt + its saturation bit (accounting.SignReport, issue #158): proves the un-co-signed Saturated bit came from the client that co-signed the receipt, so a node that merely holds the receipt cannot forge or flip it.
 
 	// Connect-time device-credential verification (issue #50, ADR-0045). These four
 	// carry the account service's two-tier entitlement chain, which is a DIFFERENT
@@ -451,6 +474,13 @@ func main() {
 	if err := startPolicy(context.Background(), *policyRootPubKey, *policySource, *policyStatePath); err != nil {
 		log.Fatal(err)
 	}
+	// Announce the one configuration in which the signed policy's tier limits are
+	// present but unenforceable — policy on, admission off, so no connect carries the
+	// (trust, plan) pair they are keyed by (issue #58, ADR-0048). It sits after
+	// startPolicy because it reads both flags' resolved state, and it is a warning
+	// rather than a fatal because that configuration is legal and worked before this
+	// change; what it must not be is silent.
+	warnTierEnforcementIsOff()
 	// Load the operator/vouch-subtree assignments once, before any goroutine that reads
 	// the map (the snapshot refresh loop) starts. Failing hard on a malformed file keeps
 	// a typo from silently blanking the operator-diversity signal (issue #124).
@@ -549,7 +579,11 @@ func handle(m wire, src *net.UDPAddr) {
 		// bound to the id it is registering, or it is not advertised to clients.
 		// The subject binding (m.ID) is what stops a valid-but-leaked exit
 		// credential from being replayed under a different node id.
-		if !admit(m, src, admission.Role(m.Role), m.ID) {
+		// The credential is discarded here: a node's standing is not a tier. Tier
+		// limits are what a CLIENT's account is entitled to consume (issue #58); what
+		// a node may offer is ADR-0040's declared limits and ADR-0041's measured
+		// rating, neither of which rides a credential.
+		if _, ok := admit(m, src, admission.Role(m.Role), m.ID); !ok {
 			return
 		}
 		// Version fence (issue #36, ADR-0015): a node too old to carry the
@@ -663,7 +697,24 @@ func handle(m wire, src *net.UDPAddr) {
 		// exits, closing the "pose as an ordinary user to enumerate the network"
 		// capability in the threat model. No subject binding — a client has no
 		// coordinator-known id on this channel, so its credential is bearer.
-		if !admit(m, src, admission.RoleClient, "") {
+		cred, ok := admit(m, src, admission.RoleClient, "")
+		if !ok {
+			return
+		}
+		// The country aggregate is computed under THIS client's tier limits (issue
+		// #58, ADR-0048), because two of them — the endpoint-quality floor and the
+		// priority-scaled fullness floor — are part of what "assignable" means. A
+		// snapshot built under different limits than the connect will enforce would
+		// break exitAssignable's whole reason for existing: Available would promise
+		// what connect then refuses.
+		//
+		// An unresolvable pair refuses the list too. A coordinator that cannot resolve
+		// a tier cannot honestly say what is available to it, and answering with an
+		// error rather than a number leaves the client to rotate to another pool
+		// member (ADR-0020) instead of acting on a figure that will not hold.
+		limits, refusal := resolveTier(cred)
+		if refusal != refuseNone {
+			send(src, wire{Type: "error", Reason: string(refusal)})
 			return
 		}
 		// The client picks a COUNTRY, so what it gets is the per-country capacity map,
@@ -676,7 +727,7 @@ func handle(m wire, src *net.UDPAddr) {
 		//
 		// Advertise this coordinator's release too, so the client can apply the
 		// force-major / skip-minor rule (issue #36, ADR-0015).
-		send(src, wire{Type: "countries", Countries: countrySnapshot(now), Release: coordRelease})
+		send(src, wire{Type: "countries", Countries: countrySnapshot(now, limits), Release: coordRelease})
 	case "challenge":
 		// Device-credential challenge (issue #50, ADR-0045). A device cannot prove
 		// possession of its credential's key without a nonce THIS coordinator chose,
@@ -685,7 +736,13 @@ func handle(m wire, src *net.UDPAddr) {
 		// Gated by admission like every other client message, so an uncredentialed
 		// party cannot spin the challenge store. The nonce is single use and
 		// short-lived; see admitDevice.
-		if !admit(m, src, admission.RoleClient, "") {
+		//
+		// No tier resolution here, deliberately: issuing a nonce is not an assignment
+		// and consults no policy, so refusing it for an unresolvable tier would spend
+		// this coordinator's answer to a misconfiguration on the step BEFORE the one
+		// that can explain it. The connect that follows resolves the tier and refuses
+		// there, where the reason names the pair.
+		if _, ok := admit(m, src, admission.RoleClient, ""); !ok {
 			return
 		}
 		c := issueDeviceChallenge(src)
@@ -701,7 +758,8 @@ func handle(m wire, src *net.UDPAddr) {
 	case "connect":
 		// Client admission (issue #42): matchmaking is gated too, so a leaked
 		// exit list can't be turned into a live session without a credential.
-		if !admit(m, src, admission.RoleClient, "") {
+		cred, ok := admit(m, src, admission.RoleClient, "")
+		if !ok {
 			return
 		}
 		// Fail-closed drain (issue #39, ADR-0043): with signed policy configured but
@@ -757,6 +815,21 @@ func handle(m wire, src *net.UDPAddr) {
 		if !admitDevice(m, src) {
 			return
 		}
+		// Resolve what this account's tier is entitled to, out of the signed policy
+		// this coordinator already fetches and verifies (issue #58, ADR-0048). The
+		// credential carries only the (trust, plan) pair; the numbers come from the
+		// document, so this coordinator enforces limits it could not author.
+		//
+		// Here rather than earlier for the same reason admitDevice sits where it does:
+		// a retransmitted copy is answered by replayMintedConnect above and must not
+		// be resolved a second time, and a connect refused here mints nothing at all.
+		// Before the exit choice because the tier is an INPUT to it — endpoint quality
+		// decides which exits are candidates and priority how full one may be.
+		limits, tierRefusal := resolveTier(cred)
+		if tierRefusal != refuseNone {
+			send(src, wire{Type: "error", Reason: string(tierRefusal), Country: geoip.Canonical(m.Country)})
+			return
+		}
 		// The client names a COUNTRY; this coordinator picks the exit inside it
 		// (issue #146, ADR-0042). There is no exact-exit pinning for anyone, so a
 		// client cannot ask for a node — only for a place, and, for retries, for "not
@@ -798,7 +871,7 @@ func handle(m wire, src *net.UDPAddr) {
 		case chained:
 			e, refusal = resolveFirstHop(m.FirstHop)
 		default:
-			e, refusal = chooseExit(m.Country, excludedExits(src, m.ExcludeSessions), now)
+			e, refusal = chooseExit(m.Country, excludedExits(src, m.ExcludeSessions), now, limits)
 		}
 		if refusal != refuseNone {
 			// Country-granularity admission control (issue #147): "this country is
@@ -827,6 +900,20 @@ func handle(m wire, src *net.UDPAddr) {
 		if chained {
 			exitID = ""
 		}
+		// The tier's speed cap rides the assignment to the party that can enforce it
+		// (issue #58, ADR-0048): the exit shapes the session, so the coordinator stays
+		// out of the data path (ADR-0009/0033) and never sees a byte of it.
+		//
+		// Zero on a CHAINED connect, for the same reason exitID is empty above: the
+		// client assembled its own onion and this coordinator does not know the
+		// terminating exit (ADR-0042 §9). The node it pairs is a peeling hop, which
+		// forwards ciphertext and terminates nothing, so there is no session for it to
+		// shape — stamping a cap there would be a number sent to a party that cannot
+		// apply it and should not learn it.
+		sessionCap := limits.SpeedCapBps
+		if chained {
+			sessionCap = 0
+		}
 		sid := randID()
 		if m.Mode == "direct" {
 			if e.udp == nil {
@@ -838,9 +925,9 @@ func handle(m wire, src *net.UDPAddr) {
 			// informational: an exit's id is its Noise static public key (ADR-0009),
 			// so without it the client cannot bring up the end-to-end channel at all.
 			pairAndReply(src, m.Nonce, e.udp,
-				wire{Type: "assign", Session: sid}, // no exitAddr => egress directly
+				wire{Type: "assign", Session: sid, SessionCapBps: sessionCap}, // no exitAddr => egress directly
 				wire{Type: "session", Session: sid, ExitID: exitID, Release: coordRelease}, now)
-			log.Printf("session %s DIRECT: client %s <-> exit %s(%s)", sid, src, e.id, e.country)
+			log.Printf("session %s DIRECT: client %s <-> exit %s(%s)%s", sid, src, e.id, e.country, capNote(sessionCap))
 		} else if r := pickRelay(e.id); r != nil {
 			// Peer relay (issue #17, ADR-0033): a Bacchus relay node blind-splices
 			// client<->exit — the preferred data-plane path. The exit still
@@ -859,6 +946,15 @@ func handle(m wire, src *net.UDPAddr) {
 			// that is also a hop holds both ends of the chain (core/relaychain.go
 			// verifyChainDisjoint). pickRelay already excludes the node it paired — the
 			// chain's head — but not the client's later hops, which it cannot see.
+			//
+			// No SessionCapBps here (issue #58, ADR-0048 §5): this assign goes to the
+			// RELAY, which splices ciphertext and terminates nothing, so it could not
+			// shape the session even if it wanted to — and the exit on the far side is
+			// reached through its bare TCP listener with no session id, so it has
+			// nothing to key a per-session limiter by. A peer-relayed session is
+			// therefore unshaped by tier; the node's own declared cap still paces it
+			// (ADR-0040). This is the gap ADR-0048 §5 names and files a follow-up for,
+			// not one to close by handing a forwarder a tier signal it cannot act on.
 			pairAndReply(src, m.Nonce, r.addr,
 				wire{Type: "assign", Session: sid, ExitAddr: e.tcpAddr},
 				wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayPeer, RelayTag: relayTag(r.id), Release: coordRelease}, now)
@@ -878,10 +974,14 @@ func handle(m wire, src *net.UDPAddr) {
 			// TURN relay candidate only if a direct hole-punch fails — TURN is the
 			// last resort, not the default. E2E again terminates at the exit.
 			sessions[sid] = &session{client: src, peer: e.udp, exitID: exitID, lastSeen: now}
+			// Shaped like the direct path, because it IS the direct path as far as the
+			// data plane is concerned: the client reaches the exit itself and the exit
+			// terminates the session, so the exit can apply the cap. core's handlerFor
+			// deliberately cannot tell the two apart (issue #97) and does not need to.
 			pairAndReply(src, m.Nonce, e.udp,
-				wire{Type: "assign", Session: sid}, // no exitAddr => exit egresses directly
+				wire{Type: "assign", Session: sid, SessionCapBps: sessionCap}, // no exitAddr => exit egresses directly
 				wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayTURN, Release: coordRelease}, now)
-			log.Printf("session %s TURN-FALLBACK: client %s <-> exit %s(%s) (no peer relay available)", sid, src, e.id, e.country)
+			log.Printf("session %s TURN-FALLBACK: client %s <-> exit %s(%s) (no peer relay available)%s", sid, src, e.id, e.country, capNote(sessionCap))
 		} else {
 			// Neither a peer relay nor a directly-reachable exit — nothing to pair.
 			send(src, wire{Type: "error"})
