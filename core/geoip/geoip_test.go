@@ -315,6 +315,51 @@ func TestStaleFlag(t *testing.T) {
 	}
 }
 
+// TestPrefixRangeCoversExactlyThePrefix pins the conversion the MaxMind loader depends
+// on. Every row of a GeoLite2 staging passes through it, so an off-by-one at either end
+// would shift every country boundary in the table by one address — and it would do it
+// silently, because the result is still disjoint, still sorted, and still resolves.
+func TestPrefixRangeCoversExactlyThePrefix(t *testing.T) {
+	for _, tc := range []struct{ cidr, lo, hi string }{
+		{"192.0.2.0/24", "192.0.2.0", "192.0.2.255"},
+		{"192.0.2.0/26", "192.0.2.0", "192.0.2.63"},
+		{"192.0.2.64/26", "192.0.2.64", "192.0.2.127"},
+		{"192.0.2.0/31", "192.0.2.0", "192.0.2.1"},
+		{"192.0.2.7/32", "192.0.2.7", "192.0.2.7"}, // a single address
+		{"0.0.0.0/0", "0.0.0.0", "255.255.255.255"},
+		{"2001:db8::/32", "2001:db8::", "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff"},
+		{"2001:db8::/48", "2001:db8::", "2001:db8:0:ffff:ffff:ffff:ffff:ffff"},
+		{"2001:db8::1/128", "2001:db8::1", "2001:db8::1"},
+		{"::/0", "::", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"},
+	} {
+		lo, hi := prefixRange(netip.MustParsePrefix(tc.cidr))
+		if lo != netip.MustParseAddr(tc.lo) || hi != netip.MustParseAddr(tc.hi) {
+			t.Errorf("prefixRange(%s) = %s–%s; want %s–%s", tc.cidr, lo, hi, tc.lo, tc.hi)
+		}
+	}
+
+	// The property behind the table, checked at every prefix length rather than at the
+	// handful above: hi is the LARGEST address the prefix contains. A host-bit mask that
+	// is one bit short or one bit long fails here at some length even when it happens to
+	// be right at /24 and /26.
+	for _, base := range []string{"192.0.2.137", "2001:db8:1234:5678:9abc:def0:1234:5678"} {
+		a := netip.MustParseAddr(base)
+		for bits := 0; bits <= a.BitLen(); bits++ {
+			p := netip.PrefixFrom(a, bits).Masked()
+			lo, hi := prefixRange(p)
+			if lo != p.Addr() {
+				t.Errorf("prefixRange(%s) low = %s; want the network address %s", p, lo, p.Addr())
+			}
+			if !p.Contains(hi) {
+				t.Errorf("prefixRange(%s) high = %s, which the prefix does not contain", p, hi)
+			}
+			if next := hi.Next(); next.IsValid() && p.Contains(next) {
+				t.Errorf("prefixRange(%s) high = %s, but %s is also inside it", p, hi, next)
+			}
+		}
+	}
+}
+
 // TestCanonical pins the normalization every country tag passes through — the
 // GeoIP-derived one and the node's fallback hint alike. The rejections are the point:
 // a malformed hint becomes "unknown" rather than a country no filter will ever match.

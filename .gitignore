@@ -32,11 +32,22 @@ bacchus-fyne
 /clients/windows/wintun/
 
 # --- third-party datasets (fetched, NOT vendored) ---
-# The GeoLite2 Country database the coordinator derives node countries from
-# (issue #136, ADR-0042). It is a licensed MaxMind dataset under its own terms,
-# not ours to redistribute, and it is bulk data besides — so it is staged out of
-# band and refreshed on MaxMind's cadence, never committed. See docs/RUNNING.md
-# ("GeoIP country database").
+# The country database the coordinator derives node countries from (issue #136,
+# ADR-0042). Bulk data, fetched per host and refreshed out of band, never
+# committed. See docs/RUNNING.md ("GeoIP country database").
+#
+# iptoasn.com's IP-to-Country files are what a coordinator stages (#61). Their
+# licence (PDDL) would permit committing them, unlike core/asn/table.tsv.gz which
+# is committed for exactly that reason — these are excluded on SIZE and on
+# staleness, not on terms: a country table baked into a commit would be wrong
+# within weeks and no reader could tell.
+ip2country-v4.tsv
+ip2country-v6.tsv
+ip2country-v*.tsv.gz
+#
+# GeoLite2 remains loadable for a deployment that already staged it. That one is
+# a licensed MaxMind dataset under its own terms, which are not ours to
+# redistribute under.
 /geoip/
 GeoLite2-Country-*.csv
 GeoLite2-Country-*.mmdb

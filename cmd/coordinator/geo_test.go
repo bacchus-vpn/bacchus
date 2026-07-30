@@ -27,27 +27,30 @@ const (
 
 // stageGeoIP loads a small country database and installs it for the duration of the
 // test, restoring the previous state afterwards.
+//
+// The fixture is in the RANGE format (issue #61) rather than MaxMind's CSV, because that
+// is what an operator stages and so what this binary's derivation path should be exercised
+// against end to end. Both formats are covered where the choice between them lives, in
+// core/geoip's own tests; here the format is incidental and the derivation is the subject.
 func stageGeoIP(t *testing.T, require bool) {
 	t.Helper()
 	dir := t.TempDir()
-	files := map[string]string{
-		geoip.FileLocations: "geoname_id,locale_code,country_iso_code,country_name\n" +
-			"1,en,NL,Netherlands\n2,en,DE,Germany\n3,en,RU,Russia\n",
-		// Sub-/24 blocks, so ipUnmapped can sit inside a reserved documentation range
-		// and still resolve to nothing. Whole /24s leave no unmapped address inside
-		// RFC 5737 to probe with, which is why the previous fixture stepped one
-		// address outside it, into globally allocated space.
-		geoip.FileBlocksV4: "network,geoname_id,registered_country_geoname_id\n" +
-			"192.0.2.0/25,1,1\n198.51.100.0/25,2,2\n203.0.113.0/25,3,3\n",
-	}
-	for name, body := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
-			t.Fatalf("stage %s: %v", name, err)
-		}
+	// Each range stops half way through its /24, so ipUnmapped can sit inside a reserved
+	// documentation range and still resolve to nothing. Covering whole /24s would leave no
+	// unmapped address inside RFC 5737 to probe with, which is why an earlier fixture
+	// stepped one address outside it, into globally allocated space.
+	body := "192.0.2.0\t192.0.2.127\tNL\n" +
+		"198.51.100.0\t198.51.100.127\tDE\n" +
+		"203.0.113.0\t203.0.113.127\tRU\n"
+	if err := os.WriteFile(filepath.Join(dir, geoip.FileRangesV4), []byte(body), 0o600); err != nil {
+		t.Fatalf("stage %s: %v", geoip.FileRangesV4, err)
 	}
 	db, err := geoip.LoadDir(dir)
 	if err != nil {
 		t.Fatalf("LoadDir: %v", err)
+	}
+	if db.Source != geoip.SourceRanges {
+		t.Fatalf("staged the range format but LoadDir read %q", db.Source)
 	}
 	prevDB, prevReq := geoDB, requireGeoIP
 	geoDB, requireGeoIP = db, require
