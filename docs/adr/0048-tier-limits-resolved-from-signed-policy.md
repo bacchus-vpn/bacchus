@@ -226,8 +226,13 @@ paths; what is missing is the per-tier limit.
 > byte, so it can pace them. A peer-relayed session is now shaped **at the relay**,
 > and the exit is told nothing — which is why §4's linkability property is untouched
 > rather than traded away. The third bullet was mechanical: the UDP relay paces per
-> datagram with `WaitN`, which needs no reader. **The second bullet — a chained
-> connect — is the one that stays open**, for the different reason it gives.
+> datagram with `WaitN`, which needs no reader.
+>
+> **The second bullet — a chained connect — was closed in turn by the amendment
+> (issue #84), and its reasoning above is superseded too.** "This coordinator does not
+> know the terminating exit" is true and stays true; it was simply never what
+> enforcement depended on. **Every bullet in this list is now shaped**, and §5's title
+> no longer describes the code.
 
 ## Consequences
 
@@ -376,6 +381,12 @@ change that caps every relay assign uniformly fails rather than silently decidin
 So §5's list goes from three unshaped paths to one, and that one is named rather than
 implied. A reader should not come away thinking every path is now shaped.
 
+> **Superseded by the amendment (issue #84) below.** This section is left as written
+> because it is the record of a decision that was made and then reversed. The
+> separate reason it insists on did not survive contact: the distinction it draws is
+> real, but it is a distinction between *accounting* and *pacing*, and an assign only
+> ever needed the second. The pinning test was inverted, not deleted.
+
 ### Testing
 
 Mutation-checked, the bar #58 set:
@@ -383,7 +394,7 @@ Mutation-checked, the bar #58 set:
 | Mutation | Test that fails |
 | --- | --- |
 | drop `SessionCapBps` from the peer-relay assign | `TestPeerRelayAssignCarriesTheSessionCap` (`cmd/coordinator`) |
-| drop the `if chained { sessionCap = 0 }` guard | `TestChainedPeerRelayAssignCarriesNoSessionCap` |
+| drop the `if chained { sessionCap = 0 }` guard | `TestChainedPeerRelayAssignCarriesNoSessionCap` (inverted by #84 — see below) |
 | drop `sessionPace` from `handlerFor`'s `ExitAddr` branch | `TestPeerRelaySpliceShapesToTheTierCap` (`core`) |
 | drop `pace.LimitReads` from `relayPipe`'s copies | `TestPeerRelaySpliceShapesToTheTierCap` |
 | drop either `pace.WaitN` from `exitTerminateUDP` | `TestUDPSessionCapShapesTheExitEgress` |
@@ -400,3 +411,94 @@ are the same pair for the datagram path, driven through `exitTerminate`'s
 **One test was inverted rather than added**, and that is the honest record of this
 change: `TestPeerRelayAssignCarriesNoSessionCap` asserted §5's original decision and is
 now `TestPeerRelayAssignCarriesTheSessionCap`, asserting the opposite.
+
+## Amendment (issue #84, 2026-07-30): a chained connect is shaped at the chain's HEAD
+
+The amendment above closed two of §5's three unshaped paths and was careful to say the
+third was different. It was filed as its own issue precisely so it would not be folded
+in by momentum. Having been looked at on its own terms, it goes the same way.
+
+### The separate reason did not survive contact
+
+§5, and the amendment above restating it, held that a chained connect carries no cap
+because **this coordinator does not know the terminating exit** (ADR-0042 §9). That
+sentence is true. It stays true after this change. It was simply never what enforcement
+depended on.
+
+The reasoning conflated two things a session cap might be for:
+
+- **Accounting for a path** — attributing load, ranking, billing. That genuinely needs
+  to know where the path ends, and this coordinator genuinely cannot.
+- **Pacing its entry** — refusing to move bytes faster than a number. That needs
+  **custody of the bytes**, not comprehension of them.
+
+An assign only ever asked for the second. The same substitution the amendment above made
+for the relay — a forwarder that terminates nothing can still pace what it forwards —
+applies unchanged to the chain's head, which is a peer relay reached through the same
+branch. Having drawn that distinction once, §5's remaining bullet was the same mistake
+in a different costume.
+
+### It was a bypass, not a gap
+
+The card was filed as "one path shape is not yet shaped". That undersells it, and the
+reframing is what decides the ruling.
+
+A chained connect goes through the **same peer-relay assign** as any other relayed
+session. The only difference was `sessionCap = 0`. So from the moment the amendment
+above shaped peer-relayed sessions, a user on a capped tier could turn relay chaining
+on in their own client and get a session with **no tier ceiling at all** — the cap was
+opt-out via a client setting, and the setting was one the client already had a good
+reason to want. That is a materially different thing from a path awaiting work.
+
+### The decision
+
+Delete the special case. `sessionCap` is `limits.SpeedCapBps` on every path.
+
+- **The coordinator learns nothing new.** The tier came from the credential it verified
+  moments earlier and is already in hand for every other path. Nothing is computed,
+  fetched or requested.
+- **Applied ONCE, at the entry — not per hop.** The tier cap is a property of the
+  session, and the head is where the session enters the chain. Each hop's own declared
+  cap (ADR-0040) goes on applying independently and inside it, exactly as before.
+- **ADR-0042 §9 is untouched.** The coordinator still does not know the terminating
+  exit, still sends no `exitID` on a chained reply, and still keeps a hop out of the
+  session table as a terminator. `TestChainedPeerRelayAssignCarriesTheSessionCap`
+  asserts the empty `exitID` alongside the cap, so the claim that §9 survives is pinned
+  by the same test that pins the change.
+- **The log line now carries the cap.** It omitted `capNote` by an explicit comment
+  saying the cap was zero by construction. It no longer is, and a chained line silently
+  missing it would be the one place an operator could not see tier shaping working.
+
+### What the head learns, and why that is the same trade already accepted
+
+A coarse rate, for a session it is already forwarding and already knows to be chained,
+and which it could characterise anyway by measuring its own throughput. That is the
+same disclosure the amendment above accepted, to the same class of party, for the same
+reason. The **terminating exit** learns nothing — no identity, no token, no credential —
+so §4's linkability property is as untouched here as it was there.
+
+### Testing
+
+| Mutation | Test that fails |
+| --- | --- |
+| restore `if chained { sessionCap = 0 }` | `TestChainedPeerRelayAssignCarriesTheSessionCap` (`cmd/coordinator`) |
+| stamp `exitID` on a chained reply | same test (it pins ADR-0042 §9 alongside the cap) |
+
+**One test was inverted rather than added**, the same way the amendment above did it,
+and for the same reason: `TestChainedPeerRelayAssignCarriesNoSessionCap` pinned the
+previous decision, so inverting it into
+`TestChainedPeerRelayAssignCarriesTheSessionCap` is the record that the decision was
+made and then remade. Deleting it would have left nothing behind saying it was ever
+taken. `core`'s `TestUncappedPeerRelaySpliceIsNotShaped` no longer guards a chained
+case — it guards the unpoliced-coordinator one, and its comment says so.
+
+### Consequence
+
+§5's list is now empty: **every assigned path is shaped to the tier**, direct,
+peer-relayed, UDP-relayed and chained. A reader arriving at §5 should treat its title
+as history and this list as the state of the code.
+
+The one thing that remains true from §5's original framing: shaping is only ever as
+good as the party holding the bytes. Every one of these caps is applied by a forwarder,
+and a hostile forwarder can decline to apply it — which the node's own declared cap and
+the client's transport-pool demotion (ADR-0028) already assume.

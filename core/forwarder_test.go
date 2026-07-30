@@ -247,11 +247,12 @@ func TestPeerRelaySpliceShapesToTheTierCap(t *testing.T) {
 
 // TestUncappedPeerRelaySpliceIsNotShaped is the control for the test above, and the
 // regression guard for every relay assign that carries no cap — an unpoliced
-// coordinator's, and a CHAINED connect's, which the coordinator deliberately leaves
-// uncapped (ADR-0042 §9, cmd/coordinator's
-// TestChainedPeerRelayAssignCarriesNoSessionCap). Without it the timing assertion
-// above could be satisfied by any accidental stall and would keep passing while
-// proving nothing about the cap.
+// coordinator's, and any coordinator predating #58. A CHAINED connect is no longer
+// one of them: issue #84 stamps the tier's cap at the chain's head like any other
+// relayed session (cmd/coordinator's
+// TestChainedPeerRelayAssignCarriesTheSessionCap). Without this control the timing
+// assertion above could be satisfied by any accidental stall and would keep passing
+// while proving nothing about the cap.
 func TestUncappedPeerRelaySpliceIsNotShaped(t *testing.T) {
 	const payload = 128 * 1024
 

@@ -365,36 +365,62 @@ func TestPeerRelayAssignCarriesTheSessionCap(t *testing.T) {
 	}
 }
 
-// TestChainedPeerRelayAssignCarriesNoSessionCap is the gap #74 did NOT close, kept
-// deliberately distinct from the one it did.
+// TestChainedPeerRelayAssignCarriesTheSessionCap is the INVERSE of the test that
+// stood here, and the inversion is the record of issue #84.
 //
-// A chained connect reaches the same peer-relay branch and the same relay, so
-// without this test the previous one's mutation guard would say nothing about it and
-// a build that capped every relay assign uniformly would look correct. The reason it
-// stays uncapped is its own: the client assembled the path and this coordinator does
-// not know where it terminates (ADR-0042 §9), so there is no session it can account
-// for. That is a different question from whether a forwarder can pace bytes — which
-// #74 answered yes — and ADR-0048 §5 records the two separately.
+// What stood here pinned the opposite: a chained assign carried no cap, on the ground
+// that the client assembled the path and this coordinator does not know where it
+// terminates (ADR-0042 §9), so there was no session it could account for. The name and
+// the assertion were both flipped rather than deleted, exactly as #74 flipped
+// TestPeerRelayAssignCarriesNoSessionCap, because a decision reversed silently leaves
+// nothing behind saying it was ever made.
 //
-// MUTATION: drop the `if chained { sessionCap = 0 }` guard and this goes red.
-func TestChainedPeerRelayAssignCarriesNoSessionCap(t *testing.T) {
+// What did not survive contact: that argument was about ACCOUNTING for a path, and
+// what an assign does is PACE its entry. Only the first needs the exit. The chain's
+// head terminates nothing but carries every byte, which is #74's own reason for
+// shaping at the relay, and ADR-0042 §9 is untouched — the coordinator still does not
+// learn the terminating exit.
+//
+// What made it urgent rather than tidy: a chained connect reaches the SAME peer-relay
+// branch as any other relayed session, so the zeroing meant a capped user who turned
+// relay chaining on in their client got a session with no tier ceiling at all. The cap
+// was opt-out via a client setting.
+//
+// MUTATION: restore `if chained { sessionCap = 0 }` and this goes red.
+func TestChainedPeerRelayAssignCarriesTheSessionCap(t *testing.T) {
 	f := tieredClient(t, "stable", "pro")
 	relay := fakePeer(t)
 	f.registerRelay(t, "r1", relay)
-	tierPolicy(t)
+	p := tierPolicy(t)
+
+	want, err := p.Limits(policy.TrustStable, "pro")
+	if err != nil {
+		t.Fatalf("fixture has no stable/pro row: %v", err)
+	}
+	if want.SpeedCapBps == 0 {
+		t.Fatal("the fixture's stable/pro row is uncapped, so this test cannot distinguish enforcement from its absence")
+	}
 
 	// A chaining client names its own first hop and no country at all (ADR-0042 §9).
 	// "e1" is the exit tieredClient registered; here it is a peeling hop instead.
 	dialConnect(wire{FirstHop: "e1", Mode: "relay", Cred: f.cred}, f.client.LocalAddr().(*net.UDPAddr))
-	if reply := recvWire(t, f.client, time.Second); reply.Type != "session" {
+	reply := recvWire(t, f.client, time.Second)
+	if reply.Type != "session" {
 		t.Fatalf("chained connect replied %q (%s)", reply.Type, reply.Reason)
 	}
 	assign := wantAssign(t, relay)
 	if assign.ExitAddr == "" {
 		t.Fatal("premise broken: this is not the peer-relay path (no exitAddr), so the test proves nothing")
 	}
-	if assign.SessionCapBps != 0 {
-		t.Errorf("chained assign carried a %d bps cap; the coordinator does not know where a chained path terminates, so it stamps none (ADR-0042 §9)", assign.SessionCapBps)
+	if assign.SessionCapBps != want.SpeedCapBps {
+		t.Errorf("chained assign carried %d bps; want the tier's %d bps — chaining is a client setting and must not be a way out of the tier's ceiling",
+			assign.SessionCapBps, want.SpeedCapBps)
+	}
+	// The reply the CLIENT gets is unchanged by #84: still no exit named, because this
+	// coordinator still does not know where the chain terminates. Capping the entry
+	// did not teach it, which is the whole claim that ADR-0042 §9 survives.
+	if reply.ExitID != "" {
+		t.Errorf("chained session reply named exit %q; the coordinator must not assert an exit for a path whose exit it does not know (ADR-0042 §9)", reply.ExitID)
 	}
 }
 
