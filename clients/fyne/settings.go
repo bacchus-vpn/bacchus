@@ -1,7 +1,9 @@
 // Settings window (issue #152): split-tunnel bypass list, kill-switch, DNS,
 // auto-connect, launch-on-boot — and, since issue #93, the connection-strategy
 // half the walk client had and this one did not: the transport ladder, relay
-// hop count and its directory pair, and the exit-admission anchor. One screen,
+// hop count and its directory pair, and the exit-admission anchor. Issue #12
+// adds the one section that points the other way, at what this client GIVES
+// rather than what it consumes: the relay and exit opt-ins. One screen,
 // reached from the main window's menu rather than competing with the single
 // Connect/Disconnect button for attention - see ui.go's doc on the state
 // indicator being the one thing a stressed user needs to read at a glance.
@@ -164,6 +166,73 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 	strategyNotice := widget.NewLabel(lang.L("The settings below change how Bacchus builds a connection. Unlike the ones above, they do not depend on this device being routed, and take effect everywhere."))
 	strategyNotice.Wrapping = fyne.TextWrapWord
 
+	// Volunteering (issue #12). Two checkboxes rather than one, and the exit's
+	// cost written next to the exit's own box rather than in a help page — both
+	// of those are the ruling on the card, not layout preference. See
+	// internal/appstate/volunteer.go's file doc for why the two costs cannot be
+	// bundled behind one control, and why every message below is a fixed
+	// sentence rather than a formatted one.
+	volunteerNotice := widget.NewLabel(lang.L("Bacchus can also carry traffic for other people. These are two separate choices, both off unless you turn them on, and neither one turns on the other."))
+	volunteerNotice.Wrapping = fyne.TextWrapWord
+
+	volunteerRelayCheck := widget.NewCheck(lang.L("Carry other people's traffic as a relay"), nil)
+	volunteerRelayCheck.SetChecked(cfg.VolunteerRelay)
+	relayCost := widget.NewLabel(lang.L("Their traffic passes through you encrypted and blind-forwarded: a relay never learns where it is going and never sees anything in the clear. What this costs you is bandwidth. It does not make you an exit."))
+	relayCost.Wrapping = fyne.TextWrapWord
+
+	volunteerExitCheck := widget.NewCheck(lang.L("Let other people's traffic reach the internet through your connection"), nil)
+	volunteerExitCheck.SetChecked(cfg.VolunteerExit)
+	// THE DISCLOSURE. Bold and full-width rather than a form hint, because this
+	// is the sentence that carries the legal exposure and it is the one thing in
+	// this window a user must not be able to skim past on the way to a
+	// checkbox. It sits directly under the control it describes: "at the point
+	// of choosing" is the requirement, and a hint rendered small and grey
+	// alongside four other hints is not that.
+	exitDisclosure := widget.NewLabel(lang.L("Their traffic reaches the internet under YOUR OWN ADDRESS, IN YOUR OWN JURISDICTION. Your address is what every site they visit records in its logs, and abuse complaints, provider notices and legal demands arrive at you. What this costs you is legal exposure, not bandwidth — which is why this is a separate choice from the relay above."))
+	exitDisclosure.Wrapping = fyne.TextWrapWord
+	exitDisclosure.TextStyle = fyne.TextStyle{Bold: true}
+
+	volunteerAdvertiseEntry := widget.NewEntry()
+	volunteerAdvertiseEntry.SetText(cfg.VolunteerAdvertise)
+	volunteerAdvertiseEntry.PlaceHolder = "203.0.113.4:20000"
+
+	volunteerExitKeyEntry := widget.NewEntry()
+	volunteerExitKeyEntry.SetText(cfg.VolunteerExitKey)
+	// Generated here rather than documented as `openssl rand -hex 32`, which is
+	// what cmd/node has to tell its operator. #12 is a discoverability card: a
+	// donation gated behind a terminal is only nominally reachable, which is the
+	// same complaint the card makes about `-role client,relay,exit`.
+	generateExitKey := widget.NewButton(lang.L("Generate"), func() {
+		k, err := appstate.NewExitKeyHex()
+		if err != nil {
+			status.SetText(lang.L("Could not generate an identity key:") + " " + err.Error())
+			return
+		}
+		volunteerExitKeyEntry.SetText(k)
+	})
+
+	// A build that routes the whole device cannot serve, and says so on the
+	// controls themselves rather than accepting the choice and failing at
+	// connect. Disabled-with-a-reason is the honest state here: the refusal is
+	// not about anything the user typed, so there is nothing for them to fix,
+	// and an enabled checkbox that always errors on save would imply otherwise.
+	// PlanVolunteer refuses the same combination anyway — this is the UI half of
+	// one rule, not the rule itself, which is why a hand-edited config file is
+	// still caught (Controller.connectAsync).
+	if enforced {
+		// TextStyle before SetText: SetText is what triggers the Label's
+		// Refresh, so assigning the style after it would leave the style out of
+		// that refresh and rely on Show() rendering the widget fresh instead.
+		volunteerNotice.TextStyle = fyne.TextStyle{Bold: true}
+		volunteerNotice.SetText(lang.L(appstate.ErrVolunteerWhileRouted.Error()))
+		for _, d := range []fyne.Disableable{
+			volunteerRelayCheck, volunteerExitCheck,
+			volunteerAdvertiseEntry, volunteerExitKeyEntry, generateExitKey,
+		} {
+			d.Disable()
+		}
+	}
+
 	relayHopsItem := widget.NewFormItem(lang.L("Relay hops"), relayHopsSelect)
 	// Fail-closed is the part a user cannot guess and would otherwise learn
 	// from a connect that simply stops working, so it is on the control itself
@@ -181,6 +250,17 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 
 	admissionCRLItem := widget.NewFormItem(lang.L("Revocation list file"), admissionCRLPathEntry)
 	admissionCRLItem.HintText = lang.L("Optional, re-read while connected. Needs the public key above.")
+
+	// Both of these belong to the EXIT choice alone. The relay choice needs
+	// nothing beyond its own checkbox — behind a home NAT a relay serves as a
+	// client's first hop, reached the way the client itself is, so it needs no
+	// forwarded port and no fixed identity. Asking a bandwidth-only donor for an
+	// exit's setup would put the exit's cost back on somebody who declined it.
+	volunteerAdvertiseItem := widget.NewFormItem(lang.L("Your address for exiting (host:port)"), volunteerAdvertiseEntry)
+	volunteerAdvertiseItem.HintText = lang.L("Only for exiting. The address the internet reaches you at, and a port you have forwarded to this computer — this is what relays dial to hand you traffic.")
+
+	volunteerExitKeyItem := widget.NewFormItem(lang.L("Your exit identity key (hex)"), volunteerExitKeyEntry)
+	volunteerExitKeyItem.HintText = lang.L("Only for exiting. Keep it: your exit is known by this key, and a new one makes you a new node other people cannot reach until the directory catches up.")
 
 	ladderItem := widget.NewFormItem(lang.L("Transport try-order"), ladderBox)
 	ladderItem.HintText = lang.L("Each is tried from the top down until one carries traffic, then remembered for this network. reality rides TCP :443, webrtc rides UDP — keeping both covers networks where one is blocked.")
@@ -202,6 +282,15 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 		relayDirKeyItem,
 		admissionPubKeyItem,
 		admissionCRLItem,
+		widget.NewFormItem("", widget.NewSeparator()),
+		widget.NewFormItem("", volunteerNotice),
+		widget.NewFormItem("", volunteerRelayCheck),
+		widget.NewFormItem("", relayCost),
+		widget.NewFormItem("", volunteerExitCheck),
+		widget.NewFormItem("", exitDisclosure),
+		volunteerAdvertiseItem,
+		volunteerExitKeyItem,
+		widget.NewFormItem("", generateExitKey),
 	)
 	form.SubmitText = lang.L("Save")
 	form.CancelText = lang.L("Cancel")
@@ -232,6 +321,28 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 			status.SetText(lang.L(err.Error()))
 			return
 		}
+		// The volunteer choice is validated against the config being saved
+		// rather than against the widgets, so the one function that decides
+		// this is the same one Controller.connectAsync runs — see PlanVolunteer.
+		//
+		// What is PERSISTED, though, is the trimmed widget text and not the
+		// plan's values, which is the opposite of what unchecking the transport
+		// pool does below. The pool has no choice: core reads a non-empty
+		// TransportPool as "the pool is on". These two fields are read only for
+		// the exit role, so keeping them costs nothing — and the identity key
+		// especially must survive unticking the box, or a volunteer who turns
+		// exiting off for a week comes back as a different node that nobody's
+		// cached directory can reach.
+		next.VolunteerRelay = volunteerRelayCheck.Checked
+		next.VolunteerExit = volunteerExitCheck.Checked
+		next.VolunteerAdvertise = strings.TrimSpace(volunteerAdvertiseEntry.Text)
+		next.VolunteerExitKey = strings.TrimSpace(volunteerExitKeyEntry.Text)
+		volunteer, err := appstate.PlanVolunteer(next, enforced)
+		if err != nil {
+			status.SetText(lang.L(err.Error()))
+			return
+		}
+
 		next.RelayHops = hops
 		next.RelayDirectoryPath = dirPath
 		next.RelayDirectoryKey = dirKey
@@ -261,6 +372,20 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 		// discover it at the next login.
 		if err := appstate.SetLaunchOnBoot(next.LaunchOnBoot); err != nil {
 			status.SetText(lang.L("Saved, but launch-on-boot could not be set:") + " " + err.Error())
+			onSaved(next, path)
+			return
+		}
+		// A warn-and-serve finding keeps this window OPEN with the warning on
+		// screen, on exactly the reasoning the launch-on-boot failure above
+		// uses: the save succeeded and onSaved has run, but the user has been
+		// told something they would otherwise only discover as an exit nobody
+		// ever dials. Closing on a warning would put it on screen for one frame.
+		if len(volunteer.Warnings) > 0 {
+			warned := make([]string, 0, len(volunteer.Warnings))
+			for _, wn := range volunteer.Warnings {
+				warned = append(warned, lang.L(wn))
+			}
+			status.SetText(lang.L("Saved.") + " " + strings.Join(warned, "\n\n"))
 			onSaved(next, path)
 			return
 		}

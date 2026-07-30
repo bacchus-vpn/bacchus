@@ -434,6 +434,22 @@ failure is logged and retried against the running engine (15s, doubling to a
 10-minute ceiling) while the serve roles keep serving throughout. It no longer ends
 the process. A node that only clients still exits on a failed connect, as before.
 
+### The same choice on the desktop client
+The desktop client has the same two opt-ins, as two checkboxes in `File → Settings…`,
+with the exit's cost printed next to the exit's own checkbox — see
+[clients/fyne/README.md](../clients/fyne/README.md#volunteering-your-connection-12).
+Relay-only needs nothing beyond ticking it; exiting asks for the address relays dial
+and a permanent identity key, which the window can generate.
+
+One difference worth knowing before you plan a deployment: the desktop client
+**refuses to serve on a build that routes the whole device** (Windows today), and is
+available where it runs proxy-only (Linux, macOS). A relay or exit sharing a process
+with a full-device tunnel has its forwarding caught by that tunnel's own default
+route, so other people's traffic would egress at *your* upstream exit rather than
+under your address, and an advertised exit would be unreachable. To donate from a
+Windows machine, run `bacchus-node` with the flags above — it installs no routes and
+has no such conflict.
+
 ## Declared node limits (running a node from home)
 Off by default: a node with no declared limits is uncapped and unmetered, exactly
 as before. This exists so a **residential volunteer** can participate without
