@@ -419,3 +419,98 @@ actually a claim. Design note §7.6 records them rather than quietly correcting 
 - The **earn/payout plane** (private repo) is the eventual consumer, and the reason the
   over-promising and Sybil adversaries have a profit motive at all. Measurement must be
   settled before payout, or the payout pays for claims.
+
+## Amendment (2026-07-30, issue #49) — declared configuration is disclosed; observed usage is not
+
+§2 closes by saying the wire carries `speedCap` and **one bit** of quota state, "not the
+byte counts". That sentence was written to refuse one specific thing and was read as
+refusing a broader class, so it is worth stating the rule it was reaching for, with the
+reason, rather than leaving the next person to infer it from a single example.
+
+**The rule.** A node's DECLARED CONFIGURATION may ride the register wire. Its OBSERVED
+USAGE may not.
+
+### 1. Why the line falls there
+
+The refusal in §2 is about a *per-node monthly usage curve* — a series showing how much
+a node moved and when. That is a measurement **of a household**: when its operator is
+awake, when they are on holiday, when their teenager started streaming. Against a
+coordinator assumed hostile (ADR-0020, #60/#69) it is a linkability signal about a
+residential operator that buys matchmaking nothing, and refusing it costs nothing,
+which is why §2 refuses it and why this amendment does not disturb that.
+
+A **declared cap** is a different kind of claim. It is a constant the operator typed
+into a config file — the slice of their line they chose to donate. It says nothing
+about what they did, only about what they are willing to do. An operator could publish
+it on a forum without disclosing anything about their household, and nothing about it
+changes as the month is spent. The identical argument already licenses `SpeedCap`,
+which has ridden this wire since #143 without anyone treating it as a usage disclosure,
+and `-monthly-quota` is the same sentence in a different unit.
+
+That is the whole distinction, and it survives the obvious objection: a declared cap
+plus the exhausted bit does leak *something* — roughly when a node crossed its own
+line, once a cycle. That was already true from the bit alone, which §2 accepted. A
+constant does not make a series.
+
+### 2. What ships (#49)
+
+- The register wire gains `declaredQuotaBytes`: the operator's configured
+  `-monthly-quota`, in **bytes**. Read once from config, never from the live counter,
+  so a usage series is off this wire by construction rather than by care.
+- Both the exit and relay roles send it, for §2's reason — a relay spends its
+  operator's uplink exactly as an exit does.
+- The coordinator records it on the registry entry beside `speedCap` and compares it
+  against the signed policy's `serve_floor.min_declared_quota_bytes` in the
+  serve-eligibility gate (`servingCheck`), alongside the version fence and the
+  measured-throughput floor. Those three conditions are exactly the three fields of the
+  policy's `ServeFloor`, and they now live in one place.
+- It is **absent-optional**: a node predating #49 sends nothing and is treated exactly
+  as it is today.
+
+**Trusted for SpeedCap's reason, and no further.** The claim only ever binds downward:
+under-declaring fails the floor and lies a node out of traffic, and over-declaring buys
+nothing, because the node's own quota accounting still stops it at the real cap and
+reports that through the exhausted bit. There is no version of lying about this number
+that wins the liar traffic to carry.
+
+**The unit split is deliberate and is carried in the field names.** `speedCap` is a
+RATE in bits/s; `declaredQuotaBytes` is a VOLUME in bytes. The two are never
+interconvertible and never compared, so both names state their unit rather than relying
+on a reader's memory — the same split `capacity.Rate`/`capacity.Bytes` and the policy's
+own `min_measured_bps`/`min_declared_quota_bytes` already make, and for the same reason:
+a number an operator transcribes off their ISP paperwork without a factor-of-8
+conversion is one they cannot get wrong by a factor of 8.
+
+### 3. The consequence that needed deciding: an absent declaration is admitted
+
+`min_declared_quota_bytes` has been in the signed policy since #15 — parsed, validated,
+and **read by nothing**, because there was no byte-valued input to compare it against.
+So a policy already in the wild may set it: the project's own frozen fixture bundle
+sets 100 GB. Every node predating #49 declares nothing.
+
+Had an absent declaration been treated as a failing one, turning on this reader would
+have fenced the **entire existing fleet** out of the serve pool on a single coordinator
+restart, against a floor nobody knowingly enabled. That is the fleet-stranding failure
+design §8.6 is written against, so absent means "as today", exactly as an absent
+`speedCap` or `quotaState` does.
+
+**The cost, stated rather than buried:** for now the floor is skippable by declaring
+nothing. A node that states no commitment is admitted while one that honestly states a
+small commitment is refused, which is backwards for something meant to be a Sybil-cost
+lever.
+
+**What closes it is already in the same gate.** Once `min_serving_version` is raised
+past the first release that sends `declaredQuotaBytes`, "declares nothing" stops being
+reachable for any node that clears the version fence. The two policy conditions compose
+into a migration — raise the quota floor now, raise the version floor once the fleet has
+rolled — and no step strands anyone. **No code changes when that happens**, which is the
+point of recording it here rather than filing it.
+
+### 4. What this does NOT authorise
+
+The byte counts stay off the wire. So does anything from which a series could be
+reconstructed: periodic remaining-quota reports, a percentage-consumed field, a
+"bytes since last register" delta. Each of those is the usage curve §2 refused,
+arriving in instalments. The exhausted **bit** remains the whole of what this
+coordinator learns about consumption, and the next request for "just the byte counts"
+should be read against §1 above rather than against #49 as a precedent.

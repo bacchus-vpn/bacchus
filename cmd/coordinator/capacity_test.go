@@ -40,7 +40,7 @@ func TestQuotaStateWireContract(t *testing.T) {
 	if quotaOK != "ok" || quotaExhausted != "exhausted" {
 		t.Fatalf("quota state literals drifted: ok=%q exhausted=%q", quotaOK, quotaExhausted)
 	}
-	b, err := json.Marshal(wire{Type: "register", Role: "exit", ID: "e1", SpeedCap: 20_000_000, QuotaState: quotaExhausted})
+	b, err := json.Marshal(wire{Type: "register", Role: "exit", ID: "e1", SpeedCap: 20_000_000, QuotaState: quotaExhausted, DeclaredQuotaBytes: 400_000_000_000})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -50,6 +50,27 @@ func TestQuotaStateWireContract(t *testing.T) {
 	}
 	if back.SpeedCap != 20_000_000 || back.QuotaState != quotaExhausted {
 		t.Fatalf("declared limits did not round-trip on the wire: %s", b)
+	}
+	// The declared quota (issue #49) rides the same contract as the two above: it
+	// exists in both wire copies and nothing but this pair of tests stops them
+	// drifting.
+	if back.DeclaredQuotaBytes != 400_000_000_000 {
+		t.Fatalf("declared quota did not round-trip on the wire: %s", b)
+	}
+	// The JSON KEY is pinned by name, not just the round-trip. A round-trip through
+	// one struct is satisfied by any tag at all, so it would stay green if core's
+	// copy and this one disagreed — which is the exact drift this test exists to
+	// catch, and the one that would show up as a coordinator silently reading zero
+	// from every register rather than as a build failure anywhere.
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	// The key carries its unit deliberately: SpeedCap on this same wire is a RATE in
+	// bits/s and this is a VOLUME in bytes, so a rename that drops "Bytes" is a
+	// correctness regression rather than a style change, and fails here.
+	if _, ok := raw["declaredQuotaBytes"]; !ok {
+		t.Fatalf(`declared quota is not on the wire under "declaredQuotaBytes": %s`, b)
 	}
 }
 
@@ -70,6 +91,12 @@ func TestUndeclaredLimitsAreAbsentFromTheWire(t *testing.T) {
 	}
 	if _, ok := m["quotaState"]; ok {
 		t.Errorf("quotaState present on a register that declared none: %s", b)
+	}
+	// Issue #49's field joins the same property: a node declaring no quota sends the
+	// datagram it sent before the field existed, which is what "additive" has to mean
+	// on a wire nothing versions.
+	if _, ok := m["declaredQuotaBytes"]; ok {
+		t.Errorf("declaredQuotaBytes present on a register that declared none: %s", b)
 	}
 }
 

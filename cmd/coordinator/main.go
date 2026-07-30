@@ -55,6 +55,7 @@ import (
 
 	"github.com/bacchus-vpn/bacchus/core/accounting"
 	"github.com/bacchus-vpn/bacchus/core/admission"
+	"github.com/bacchus-vpn/bacchus/core/capacity"
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 	"github.com/bacchus-vpn/bacchus/core/geoip"
 	"github.com/bacchus-vpn/bacchus/core/handshake"
@@ -182,6 +183,23 @@ type wire struct {
 	RelayTag        string                 `json:"relayTag,omitempty"`    // stable opaque tag identifying the assigned peer relay (issue #56, ADR-0035), so a client rotating the coordinator pool can skip a second member that assigns the SAME relay it just failed on. Set only on the peer-relay path; empty for direct/TURN-fallback (no distinct relay to dedupe). Additive/optional — a client predating #56 ignores it.
 	IngressPort     int                    `json:"ingressPort,omitempty"` // a relay's onion-forward TCP listener port (issue #124, ADR-0038): the port a client's onion layer dials to use this node as an intermediate hop. Self-reported on register — the coordinator cannot observe a TCP listener from a UDP register — but only the PORT is trusted: buildSnapshot advertises the ingress as the coordinator-OBSERVED source IP joined to this port, so a relay cannot assert an ingress IP (see Entry.Ingress). Zero/absent => this relay advertises no ingress and is not relay-eligible. Additive/optional; a relay predating #124 omits it.
 	SpeedCap        uint64                 `json:"speedCap,omitempty"`    // a forwarder's DECLARED aggregate speed cap in bits/s (issue #143, ADR-0040): what its operator is WILLING to carry, which is not what it CAN carry. Self-reported, and trusted, because this claim can only ever bind downward: under-declaring merely reduces what the node is given (its operator's uplink, their ISP bill, their call), and over-declaring is inert because usable = min(declared, measured) and the measured term is NOT a self-report. Contrast Operator/Ingress, where the self-report is exactly the thing an attacker profits from and is therefore not trusted. Zero/absent = no declared cap; additive/optional, so a node predating #143 is treated exactly as it is today.
+	// DeclaredQuotaBytes is a forwarder's DECLARED monthly traffic quota in BYTES
+	// (issue #49, ADR-0040 amendment): the cap its operator configured, which is the
+	// input the signed policy's serve_floor.min_declared_quota_bytes is compared
+	// against. Mind the unit split against SpeedCap directly above — that is a RATE
+	// in bits/s, this is a VOLUME in bytes; both carry the unit in the field name
+	// because the two are never interconvertible and never compared.
+	//
+	// The CONFIGURED CAP only, never the counter and never a usage series. That
+	// distinction is what makes this disclosable where the byte counts are not: a cap
+	// is a constant its operator chose, a usage curve is a measurement of their
+	// household (ADR-0040, ADR-0020, #60).
+	//
+	// Self-reported and trusted on SpeedCap's argument — it binds only downward, so a
+	// node under-declaring merely fails this floor and lies itself out of traffic.
+	// Zero/absent = no declared quota; additive/optional, so a node predating #49 is
+	// treated exactly as it is today.
+	DeclaredQuotaBytes uint64 `json:"declaredQuotaBytes,omitempty"`
 	// SessionCapBps is the RESOLVED per-session speed cap in bits/s that this
 	// coordinator stamps on an "assign" for the exit to shape the session to (issue
 	// #58, ADR-0048). It is the speed_cap_bps of the signed policy's tier row for the
@@ -285,9 +303,16 @@ type relayNode struct {
 	// feed that ADR-0040 §8.6 defers to a child issue. Gating on it now would compare
 	// against a rating that is always the floor. The node enforces its own cap
 	// regardless (core/capacity).
-	speedCap  uint64
-	exhausted bool
-	lastSeen  time.Time
+	speedCap uint64
+	// declaredQuota is the operator's declared monthly quota in BYTES (issue #49) —
+	// the volume to speedCap's rate. Recorded off every register for the same reason
+	// speedCap is: the entry is replaced wholesale, so a field carried once would be
+	// dropped 10s later. It is read by the serve-eligibility gate (servingCheck) to
+	// apply the policy's min_declared_quota_bytes; it is NOT usage, so nothing here
+	// changes as the node spends it — that is what the exhausted bit reports.
+	declaredQuota uint64
+	exhausted     bool
+	lastSeen      time.Time
 	// country is the coordinator-DERIVED country tag (issue #136): resolved from the
 	// observed source IP in addr, falling back to the node's self-reported hint only
 	// when that resolves nothing. countrySource records which of the two it was, for
@@ -303,11 +328,13 @@ type relayNode struct {
 type exitNode struct {
 	id, tcpAddr string
 	udp         *net.UDPAddr // signaling addr (for direct mode)
-	// Declared limits (issue #143, ADR-0040); see relayNode. An exhausted exit is
-	// withheld from the country aggregate and refused at connect.
-	speedCap  uint64
-	exhausted bool
-	lastSeen  time.Time
+	// Declared limits (issue #143, ADR-0040; declaredQuota is issue #49); see
+	// relayNode. An exhausted exit is withheld from the country aggregate and refused
+	// at connect.
+	speedCap      uint64
+	declaredQuota uint64
+	exhausted     bool
+	lastSeen      time.Time
 	// country / countrySource: coordinator-derived, as for relayNode (issue #136). An
 	// exit with no country is unreachable, because a country is the only thing a
 	// client can ask for (issue #146) — see exitAssignable.
@@ -586,12 +613,19 @@ func handle(m wire, src *net.UDPAddr) {
 		if _, ok := admit(m, src, admission.Role(m.Role), m.ID); !ok {
 			return
 		}
-		// Version fence (issue #36, ADR-0015): a node too old to carry the
-		// current transport shape is dropped from matchmaking until it updates —
-		// a stale node still advertises the old, now-detectable fingerprint and
-		// would burn the users routed through it. Enforced here, at register,
-		// because a stale or hostile node cannot be trusted to fence itself.
-		if reason, ok := servingCheck(m.Release, m.ID); !ok {
+		// Serve-eligibility gate (issues #36/#15/#49, ADR-0015/0043, ADR-0040
+		// amendment): the version fence, the policy's declared-quota floor and its
+		// measured-throughput floor. A node too old to carry the current transport
+		// shape is dropped from matchmaking until it updates — a stale node still
+		// advertises the old, now-detectable fingerprint and would burn the users
+		// routed through it — and a node declaring less capacity than the policy
+		// requires never enters the serve pool at all. Enforced here, at register,
+		// because a stale or under-provisioned node cannot be trusted to fence itself.
+		//
+		// The declared quota is read straight off the register rather than from the
+		// registry entry, because this runs BEFORE the entry is built (and must: a
+		// fenced node is never stored).
+		if reason, ok := servingCheck(m.Release, m.ID, capacity.Bytes(m.DeclaredQuotaBytes)); !ok {
 			log.Printf("register %s (%s): fenced (%s)", m.ID, src, reason)
 			send(src, wire{Type: "reject", Reason: reason})
 			return
@@ -630,7 +664,7 @@ func handle(m wire, src *net.UDPAddr) {
 				log.Printf("relay %s (%s) reported ingress port %d, outside 1..65535 — ignoring it; this relay advertises no forwarding ingress and is not relay-eligible (issue #11)", m.ID, src, port)
 				port = 0
 			}
-			relays[m.ID] = &relayNode{id: m.ID, addr: src, ingressPort: port, speedCap: m.SpeedCap, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
+			relays[m.ID] = &relayNode{id: m.ID, addr: src, ingressPort: port, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
 		case "exit":
 			// An exit, unlike a relay, advertises a data-plane endpoint of its own, so
 			// its country is derived against that too: signaling arriving from one
@@ -667,7 +701,7 @@ func handle(m wire, src *net.UDPAddr) {
 					}
 				}
 			}
-			exits[m.ID] = &exitNode{id: m.ID, tcpAddr: m.Addr, udp: src, speedCap: m.SpeedCap, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
+			exits[m.ID] = &exitNode{id: m.ID, tcpAddr: m.Addr, udp: src, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
 		}
 	case "heartbeat":
 		// A heartbeat refreshes the observed address, so the derived country is
@@ -901,20 +935,35 @@ func handle(m wire, src *net.UDPAddr) {
 			exitID = ""
 		}
 		// The tier's speed cap rides the assignment to whichever party moves the bytes
-		// (issue #58/#74, ADR-0048): the exit shapes a direct session and the relay
+		// (issue #58/#74/#84, ADR-0048): the exit shapes a direct session and the relay
 		// shapes a peer-relayed one, so the coordinator stays out of the data path
 		// (ADR-0009/0033) and never sees a byte of it either way.
 		//
-		// Zero on a CHAINED connect, for the same reason exitID is empty above: the
-		// client assembled its own onion and this coordinator does not know the
-		// terminating exit (ADR-0042 §9), so it does not stamp a cap for a path it
-		// cannot account for. That leaves a chained connect unshaped by tier — a
-		// SEPARATE gap from the peer-relay one #74 closed, with a separate reason, and
-		// recorded as such in ADR-0048 §5 rather than folded into it.
+		// EVERY path, including a CHAINED connect. This used to be zeroed for a chained
+		// connect, on the same ground that leaves exitID empty above — the client
+		// assembled its own onion and this coordinator does not know the terminating
+		// exit (ADR-0042 §9). That reasoning conflated ACCOUNTING for a path with
+		// PACING its entry, and only the first needs to know where the path ends
+		// (issue #84).
+		//
+		// The chain's head is the right party for #74's reason exactly: it terminates
+		// nothing, but every byte of the session passes through it, so it can pace
+		// them. Pacing needs custody of the bytes, not comprehension of them.
+		//
+		// Stamped ONCE, at the entry, not per hop. The tier cap is a property of the
+		// session and the head is where the session enters the chain; each hop's own
+		// declared cap (ADR-0040) goes on applying independently and inside it.
+		//
+		// ADR-0042 §9 is untouched: this coordinator still does not learn the
+		// terminating exit, and enforcement never needed it. What the head learns is a
+		// coarse rate for a session it is already forwarding and already knows to be
+		// chained — the same disclosure #74 accepted, to the same class of party.
+		//
+		// The bypass this closes was not cosmetic: a chained connect goes through the
+		// same peer-relay assign as any other relayed session, so zeroing here meant a
+		// capped user who switched relay chaining on got a session with no tier ceiling
+		// at all, making the cap opt-out via a client setting.
 		sessionCap := limits.SpeedCapBps
-		if chained {
-			sessionCap = 0
-		}
 		sid := randID()
 		if m.Mode == "direct" {
 			if e.udp == nil {
@@ -948,10 +997,12 @@ func handle(m wire, src *net.UDPAddr) {
 			// verifyChainDisjoint). pickRelay already excludes the node it paired — the
 			// chain's head — but not the client's later hops, which it cannot see.
 			//
-			// SessionCapBps rides this assign too (issue #74, ADR-0048 §5): the RELAY
-			// shapes a peer-relayed session. It terminates nothing, but it moves every
-			// byte, so it can pace them — which is what makes this enforceable at a
-			// party that never learns the destination or the plaintext.
+			// SessionCapBps rides this assign too (issue #74/#84, ADR-0048 §5): the
+			// RELAY shapes a peer-relayed session. It terminates nothing, but it moves
+			// every byte, so it can pace them — which is what makes this enforceable at
+			// a party that never learns the destination or the plaintext. That holds
+			// whether or not the client is chaining: on a chained connect this relay is
+			// the chain's HEAD, and the head has the same custody of the same bytes.
 			//
 			// The EXIT is not involved and learns nothing new: no session identity, no
 			// token, no credential reaches it, so ADR-0048 §4's linkability property is
@@ -960,9 +1011,6 @@ func handle(m wire, src *net.UDPAddr) {
 			// materially smaller disclosure than the credential-to-exit design §4
 			// rejected. The splice stays transparent either way — the limiter wraps the
 			// copies, never the bytes' meaning (TestPeerRelaySplicePreservesE2E).
-			//
-			// Zero for a chained connect, via sessionCap above: that gap is separate and
-			// stays open.
 			pairAndReply(src, m.Nonce, r.addr,
 				wire{Type: "assign", Session: sid, ExitAddr: e.tcpAddr, SessionCapBps: sessionCap},
 				wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayPeer, RelayTag: relayTag(r.id), Release: coordRelease}, now)
@@ -971,9 +1019,13 @@ func handle(m wire, src *net.UDPAddr) {
 				// name, and printing e.id under an "exit" heading would record a hop as a
 				// terminator in the operator's log — the same misattribution §9 keeps out
 				// of the session table, arriving by the back door.
-				// No capNote: sessionCap is zero here by construction (see above), so a
-				// chained line carries no cap to report.
-				log.Printf("session %s PEER-RELAY (chained): client %s <-> relay %s -> first hop %s(%s); terminating exit not known to this coordinator", sid, src, r.addr, e.id, e.country)
+				//
+				// It DOES carry the capNote (issue #84). It used to omit it by an
+				// explicit note that sessionCap was zero here by construction; it no
+				// longer is, and a chained line silently missing the cap the session was
+				// actually stamped with would be the one place an operator could not see
+				// tier shaping working.
+				log.Printf("session %s PEER-RELAY (chained): client %s <-> relay %s -> first hop %s(%s); terminating exit not known to this coordinator%s", sid, src, r.addr, e.id, e.country, capNote(sessionCap))
 			} else {
 				log.Printf("session %s PEER-RELAY: client %s <-> relay %s -> exit %s(%s)%s", sid, src, r.addr, e.id, e.country, capNote(sessionCap))
 			}
@@ -1226,12 +1278,26 @@ func validIngressPort(p int) bool { return p >= 1 && p <= 65535 }
 // answer to "what is the fence right now", wherever it is asked.
 //
 // Serve eligibility is more than the version fence (issue #15): the same gate now
-// also applies the policy's measured-throughput floor. Both conditions live here
-// because they answer one question — may this node join the serve pool — and a node
-// that fails either is client-only: it may use the service, it just may not serve.
-// nodeID is needed for the capacity condition, which is per-node.
-func servingCheck(release, nodeID string) (reason string, ok bool) {
+// also applies the policy's measured-throughput floor and its declared-quota floor.
+// All three conditions live here because they answer one question — may this node
+// join the serve pool — and a node that fails any of them is client-only: it may use
+// the service, it just may not serve. nodeID is needed for the capacity condition,
+// which is per-node; declaredQuota is the node's own declaration off this register.
+//
+// The three conditions are exactly the three fields of the signed policy's
+// ServeFloor (min_serving_version, min_measured_bps, min_declared_quota_bytes), and
+// keeping them together is deliberate: the alternative is an operator having to know
+// which of three code paths answers "why is this node not serving".
+//
+// Order is cheapest-and-most-actionable first. The version fence needs nothing but
+// the register; the quota floor needs nothing but the register; the measured floor
+// needs a rating that in this build no node has. A node failing several is told about
+// the version first, because that is the one it can fix by updating.
+func servingCheck(release, nodeID string, declaredQuota capacity.Bytes) (reason string, ok bool) {
 	if reason, ok := versionCheck(release); !ok {
+		return reason, false
+	}
+	if reason, ok := meetsDeclaredQuotaFloor(declaredQuota); !ok {
 		return reason, false
 	}
 	return meetsMeasuredFloor(nodeID)

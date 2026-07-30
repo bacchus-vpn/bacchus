@@ -228,6 +228,88 @@ func meetsMeasuredFloor(nodeID string) (reason string, ok bool) {
 	return "", true
 }
 
+// policyDeclaredQuotaFloor is the serve-eligibility floor on a node's DECLARED
+// monthly quota, in BYTES (issue #49), read from the held policy.
+//
+// No constant default, for policyMeasuredFloor's reason exactly: a floor with a
+// fallback constant is a floor the coordinator authored, which is the property signed
+// policy exists to deny. No policy loaded means no floor, and the pre-policy status
+// quo applies.
+func policyDeclaredQuotaFloor() capacity.Bytes {
+	p, ok := currentPolicy()
+	if !ok {
+		return 0
+	}
+	return capacity.Bytes(p.ServeFloor.MinDeclaredQuotaBytes)
+}
+
+// meetsDeclaredQuotaFloor reports whether a node's declared monthly quota clears the
+// policy's floor, with a safe-to-log reason when it does not.
+//
+// This is the reader issue #49 existed to supply. The policy has carried
+// serve_floor.min_declared_quota_bytes since #15, fully parsed and validated, with
+// NOTHING reading it — because the register wire had no byte-valued input to compare
+// it against, only SpeedCap (a rate) and QuotaState (one bit). The wire now carries
+// the operator's declared cap, so the field stops being dead weight in a signed
+// document.
+//
+// # Why a self-report is enough here
+//
+// declared arrives from the node and is trusted on SpeedCap's argument: it binds only
+// downward. A node that under-declares fails this floor and is fenced out of the serve
+// pool; one that over-declares gains nothing, because its own quota accounting still
+// stops it at the real cap and reports that through QuotaState, at which point it is
+// skipped as exhausted. There is no version of lying about this number that wins the
+// liar traffic it can carry.
+//
+// # An ABSENT declaration is not a failing one
+//
+// A node that declares nothing is NOT fenced, and this is the single most consequential
+// line in the change. The policy field it reads has been parsed and validated since
+// #15 with nothing reading it, so a signed policy in the wild may already carry a
+// non-zero min_declared_quota_bytes — the project's own fixture bundle carries 100 GB.
+// Every node predating #49 sends no declaration at all. If absent failed, upgrading a
+// coordinator would fence the ENTIRE existing fleet out of the serve pool in one
+// restart, on a floor nobody knowingly turned on.
+//
+// That is the failure design §8.6 and serveFloor's doc are both written against, and
+// TestFleetSurvivesTheFeedLanding exists to prove a landing does not cause. Treating
+// absent as "not yet declared" is what makes this additive in the way ADR-0040's
+// SpeedCap and QuotaState already are: a node predating the field behaves exactly as
+// it does today.
+//
+// # What that costs, and what closes it
+//
+// It means the floor is, for now, skippable by declaring nothing — the node that
+// states no commitment is admitted while the one that honestly states a small commit-
+// ment is refused. That is backwards as a Sybil-cost lever (policy.ServeFloor's doc)
+// and it is a deliberate, bounded cost rather than an oversight.
+//
+// It is bounded because the fence that closes it already exists and sits in the SAME
+// gate: min_serving_version. Once the version floor is raised past the first release
+// that sends this field, "declares nothing" stops being reachable for any node that
+// clears the version fence, and absent-means-admitted becomes unreachable rather than
+// merely unused. The two policy conditions compose into the migration — raise the
+// quota floor now, raise the version floor when the fleet has rolled, and no step
+// strands anyone. No code changes when that happens.
+//
+// With the floor at zero — every policy that does not set it, and every coordinator
+// with no policy at all — this returns true for everyone. That is what makes #49 ship
+// OFF.
+func meetsDeclaredQuotaFloor(declared capacity.Bytes) (reason string, ok bool) {
+	floor := policyDeclaredQuotaFloor()
+	if floor == 0 {
+		return "", true
+	}
+	if declared == 0 {
+		return "", true // predates the field, or declares no quota: as today
+	}
+	if declared < floor {
+		return fmt.Sprintf("declared monthly quota %s is below the serve floor %s — this node may still use the service, it just cannot serve", declared, floor), false
+	}
+	return "", true
+}
+
 // policySource fetches the raw bundle bytes. The two implementations are an HTTP
 // endpoint and a local file an operator stages; both are just "bytes that must
 // then verify", because nothing about the transport is trusted.

@@ -284,7 +284,7 @@ func TestVersionFenceStillAppliesAlongsideTheFloor(t *testing.T) {
 	withPolicyState(t, true, &p)
 	setPolicy(t, "0.2.0", "0.2.0")
 
-	reason, ok := servingCheck("0.1.0", "any-node")
+	reason, ok := servingCheck("0.1.0", "any-node", 0)
 	if ok {
 		t.Fatal("a node below the version floor must still be fenced")
 	}
@@ -307,11 +307,213 @@ func TestServeFloorAppliesEvenWhenTheVersionFenceIsOff(t *testing.T) {
 	const nodeID = "slow-node"
 	attest(s, nodeID, true, 2*capacity.Mbit, 40)
 
-	reason, ok := servingCheck("0.2.0", nodeID)
+	reason, ok := servingCheck("0.2.0", nodeID, 0)
 	if ok {
 		t.Fatal("the capacity floor must apply with the version fence disabled")
 	}
 	if !strings.Contains(reason, "below the serve floor") {
 		t.Errorf("reason should be the serve floor, got %q", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The declared-quota floor (issue #49, ADR-0040 amendment).
+//
+// serve_floor.min_declared_quota_bytes has been in the signed policy since #15,
+// parsed and validated, with nothing reading it — there was no byte-valued input on
+// the register wire to compare it against. These cover the reader.
+// ---------------------------------------------------------------------------
+
+// policyWithQuotaFloor returns the frozen fixture policy with its DECLARED-QUOTA
+// floor overridden and the measured floor off, so these tests exercise one condition
+// at a time. The fixture's own min_declared_quota_bytes is non-zero (100 GB), which
+// is itself the reason TestUndeclaredQuotaIsAdmittedUnderANonZeroFloor matters.
+func policyWithQuotaFloor(t *testing.T, floorBytes uint64) policy.Policy {
+	t.Helper()
+	p := fixturePolicy(t)
+	p.ServeFloor.MinMeasuredBps = 0
+	p.ServeFloor.MinDeclaredQuotaBytes = floorBytes
+	return p
+}
+
+// TestDeclaredQuotaFloorHasNoConstantDefault is #39's property applied to this floor:
+// with no policy loaded there is NO floor, because a fallback constant would be a
+// floor the coordinator authored rather than one an operator signed.
+func TestDeclaredQuotaFloorHasNoConstantDefault(t *testing.T) {
+	withPolicyState(t, false, nil)
+	if got := policyDeclaredQuotaFloor(); got != 0 {
+		t.Errorf("with no policy loaded, declared-quota floor = %s, want 0", got)
+	}
+	if _, ok := meetsDeclaredQuotaFloor(0); !ok {
+		t.Error("with no policy loaded, a node declaring nothing must serve")
+	}
+}
+
+// TestDeclaredQuotaFloorIsReadFromPolicy: the floor is the signed document's, in the
+// unit the signed document states it in (BYTES, not the bits/s SpeedCap rides in).
+func TestDeclaredQuotaFloorIsReadFromPolicy(t *testing.T) {
+	p := policyWithQuotaFloor(t, 400_000_000_000)
+	withPolicyState(t, true, &p)
+	if got, want := policyDeclaredQuotaFloor(), capacity.Bytes(400_000_000_000); got != want {
+		t.Errorf("declared-quota floor = %s, want %s", got, want)
+	}
+}
+
+// TestDeclaredQuotaFloorRefusesAnUnderDeclaringNode is the floor actually DENYING,
+// which is the half that makes it enforcement rather than decoration — and the half
+// that was impossible before this issue, since the coordinator had no byte-valued
+// input to compare.
+//
+// MUTATION: drop the meetsDeclaredQuotaFloor call from servingCheck and this goes red.
+func TestDeclaredQuotaFloorRefusesAnUnderDeclaringNode(t *testing.T) {
+	setPolicy(t, "0.0.0", "0.2.0") // version fence off, so this is the only condition
+	p := policyWithQuotaFloor(t, 400*uint64(capacity.GB))
+	withPolicyState(t, true, &p)
+
+	reason, ok := servingCheck("0.2.0", "small-node", 100*capacity.GB)
+	if ok {
+		t.Fatal("a node declaring less than the policy floor must not serve")
+	}
+	// Safe to log: the reason names the two NUMBERS and nothing that identifies the
+	// node or its operator — same discipline as the version fence's reason.
+	if !strings.Contains(reason, "below the serve floor") {
+		t.Errorf("reason should name the serve floor, got %q", reason)
+	}
+	if !strings.Contains(reason, (100*capacity.GB).String()) || !strings.Contains(reason, (400*capacity.GB).String()) {
+		t.Errorf("reason should name the declared quota and the floor, got %q", reason)
+	}
+	if strings.Contains(reason, "small-node") {
+		t.Errorf("reason names the node; it is logged, so it must carry no node identity: %q", reason)
+	}
+}
+
+// TestDeclaredQuotaFloorAdmitsAtAndAboveTheFloor: the boundary is inclusive, so an
+// operator who declares exactly what the policy asks for is not refused by a
+// strictness nobody intended.
+func TestDeclaredQuotaFloorAdmitsAtAndAboveTheFloor(t *testing.T) {
+	setPolicy(t, "0.0.0", "0.2.0")
+	p := policyWithQuotaFloor(t, 400*uint64(capacity.GB))
+	withPolicyState(t, true, &p)
+
+	for _, declared := range []capacity.Bytes{400 * capacity.GB, 4 * capacity.TB} {
+		if reason, ok := servingCheck("0.2.0", "big-node", declared); !ok {
+			t.Errorf("a node declaring %s must serve under a %s floor, got %q", declared, 400*capacity.GB, reason)
+		}
+	}
+}
+
+// TestUndeclaredQuotaIsAdmittedUnderANonZeroFloor is the compatibility claim, and the
+// single most consequential assertion in issue #49.
+//
+// min_declared_quota_bytes has been parsed and validated since #15 with no reader, so
+// a policy in the wild may already set it — the frozen fixture bundle sets 100 GB.
+// Every node predating this change declares nothing. If an absent declaration failed
+// the floor, upgrading one coordinator would fence the ENTIRE fleet out of the serve
+// pool in a single restart, on a floor nobody knowingly switched on.
+//
+// So absent means "as today", exactly as an absent SpeedCap or QuotaState does
+// (ADR-0040). What that costs — the floor is skippable by declaring nothing — is
+// bounded by min_serving_version in this same gate: raise it past the release that
+// sends the field and "declares nothing" stops being reachable, with no code change.
+//
+// MUTATION: make a zero declaration fail a non-zero floor and this goes red.
+func TestUndeclaredQuotaIsAdmittedUnderANonZeroFloor(t *testing.T) {
+	setPolicy(t, "0.0.0", "0.2.0")
+	p := policyWithQuotaFloor(t, 400*uint64(capacity.GB))
+	withPolicyState(t, true, &p)
+
+	if reason, ok := servingCheck("0.2.0", "legacy-node", 0); !ok {
+		t.Fatalf("a node predating the field must be treated exactly as today, got %q", reason)
+	}
+}
+
+// TestDeclaredQuotaFloorAtZeroAdmitsEveryone is what makes this ship OFF: with the
+// floor unset — every policy that does not set it, and every coordinator running no
+// policy at all — no declaration is too small, including none.
+func TestDeclaredQuotaFloorAtZeroAdmitsEveryone(t *testing.T) {
+	setPolicy(t, "0.0.0", "0.2.0")
+	p := policyWithQuotaFloor(t, 0)
+	withPolicyState(t, true, &p)
+
+	for _, declared := range []capacity.Bytes{0, 1, 100 * capacity.GB} {
+		if reason, ok := servingCheck("0.2.0", "any-node", declared); !ok {
+			t.Errorf("with the floor at zero a node declaring %s must serve, got %q", declared, reason)
+		}
+	}
+}
+
+// TestVersionFenceOutranksTheQuotaFloor pins the order servingCheck applies its three
+// conditions in. A node that fails both is told to update first, because that is the
+// one it can act on — and because a reason naming a quota floor would send an
+// operator to the wrong config file.
+func TestVersionFenceOutranksTheQuotaFloor(t *testing.T) {
+	setPolicy(t, "0.2.0", "0.2.0")
+	p := policyWithQuotaFloor(t, 400*uint64(capacity.GB))
+	withPolicyState(t, true, &p)
+
+	reason, ok := servingCheck("0.1.0", "old-small-node", 1*capacity.GB)
+	if ok {
+		t.Fatal("a node failing both the version fence and the quota floor must be fenced")
+	}
+	if !strings.Contains(reason, "below the minimum serving version") {
+		t.Errorf("the version fence should answer first, got %q", reason)
+	}
+}
+
+// TestRegisterAppliesTheDeclaredQuotaFloor is the gate observed through register —
+// the surface that actually decides whether a node joins the serve pool — and it
+// proves the wire field reaches the floor, not just that the predicate works.
+func TestRegisterAppliesTheDeclaredQuotaFloor(t *testing.T) {
+	setPC(t)
+	setPolicy(t, "0.0.0", "0.2.0")
+	resetRegistry(t)
+	p := policyWithQuotaFloor(t, 400*uint64(capacity.GB))
+	withPolicyState(t, true, &p)
+
+	const nodeID = "small-exit"
+	peer := fakePeer(t)
+	handle(wire{Type: "register", Role: "exit", ID: nodeID, Country: "rs", Addr: "203.0.113.10:20000",
+		Release: "0.2.0", DeclaredQuotaBytes: 100 * uint64(capacity.GB)}, peer.LocalAddr().(*net.UDPAddr))
+
+	if reason := readReject(t, peer); !strings.Contains(reason, "below the serve floor") {
+		t.Fatalf("reject reason should name the serve floor, got %q", reason)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if _, ok := exits[nodeID]; ok {
+		t.Fatal("a node below the declared-quota floor must not enter the serve pool")
+	}
+}
+
+// TestRegisterStoresTheDeclaredQuota: a node that clears the floor is admitted AND
+// its declaration is recorded on the registry entry beside speedCap. It is read off
+// every register for the reason speedCap is — the entry is replaced wholesale, so a
+// field carried once would be dropped on the next refresh.
+func TestRegisterStoresTheDeclaredQuota(t *testing.T) {
+	setPC(t)
+	setPolicy(t, "0.0.0", "0.2.0")
+	resetRegistry(t)
+	p := policyWithQuotaFloor(t, 400*uint64(capacity.GB))
+	withPolicyState(t, true, &p)
+
+	exit, relay := fakePeer(t), fakePeer(t)
+	handle(wire{Type: "register", Role: "exit", ID: "e1", Country: "rs", Addr: "203.0.113.10:20000",
+		Release: "0.2.0", DeclaredQuotaBytes: 4 * uint64(capacity.TB)}, exit.LocalAddr().(*net.UDPAddr))
+	handle(wire{Type: "register", Role: "relay", ID: "r1", Country: "rs",
+		Release: "0.2.0", DeclaredQuotaBytes: 400 * uint64(capacity.GB)}, relay.LocalAddr().(*net.UDPAddr))
+
+	mu.Lock()
+	defer mu.Unlock()
+	if exits["e1"] == nil {
+		t.Fatal("an exit declaring above the floor must enter the serve pool")
+	}
+	if got, want := exits["e1"].declaredQuota, 4*uint64(capacity.TB); got != want {
+		t.Errorf("exit declaredQuota = %d, want %d", got, want)
+	}
+	if relays["r1"] == nil {
+		t.Fatal("a relay declaring at the floor must enter the serve pool")
+	}
+	if got, want := relays["r1"].declaredQuota, 400*uint64(capacity.GB); got != want {
+		t.Errorf("relay declaredQuota = %d, want %d", got, want)
 	}
 }
