@@ -188,13 +188,11 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 		return
 	}
 	if prefix == udpTargetPrefix {
-		// NOT shaped to the tier cap: the UDP relay hand-rolls its own datagram loop
-		// and paces through meterN/WaitN rather than through an io.Reader, so pace
-		// has nothing to wrap here (core/udprelay.go). The operator's own aggregate
-		// cap and quota still apply to every datagram; what does not is the
-		// per-session tier limit. ADR-0048 §5 records it as a known gap with a
-		// follow-up rather than leaving it to be discovered.
-		e.exitTerminateUDP(sid, nc, addr)
+		// Shaped to the same tier cap as the TCP path below (issue #74, ADR-0048 §5).
+		// The UDP relay hand-rolls its own datagram loop rather than copying a stream,
+		// so it applies pace per datagram through WaitN instead of wrapping an
+		// io.Reader — same limiter, same composition inside the operator's own cap.
+		e.exitTerminateUDP(sid, pace, nc, addr)
 		return
 	}
 	remote, err := net.DialTimeout("tcp", target, 10*time.Second)

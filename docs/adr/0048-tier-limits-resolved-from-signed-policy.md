@@ -220,13 +220,14 @@ and the splice is transparent by design (`TestPeerRelaySplicePreservesE2E`, ADR-
 Filed as **#74**. The node's own declared cap and quota still pace every one of these
 paths; what is missing is the per-tier limit.
 
-> **The first bullet was closed by the amendment (issue #74) at the end of this
-> document, and its reasoning above is superseded.** "A relay could not shape the
-> session" is false: a relay terminates nothing but forwards every byte, so it can
-> pace them. A peer-relayed session is now shaped **at the relay**, and the exit is
-> told nothing — which is why §4's linkability property is untouched rather than
-> traded away. The second bullet (a chained connect) is **still open**, for the
-> different reason it gives.
+> **The first and third bullets were closed by the amendment (issue #74) at the end
+> of this document, and the first's reasoning above is superseded.** "A relay could
+> not shape the session" is false: a relay terminates nothing but forwards every
+> byte, so it can pace them. A peer-relayed session is now shaped **at the relay**,
+> and the exit is told nothing — which is why §4's linkability property is untouched
+> rather than traded away. The third bullet was mechanical: the UDP relay paces per
+> datagram with `WaitN`, which needs no reader. **The second bullet — a chained
+> connect — is the one that stays open**, for the different reason it gives.
 
 ## Consequences
 
@@ -256,9 +257,10 @@ paths; what is missing is the per-tier limit.
   `core/udprelay.go`, outside this change's file ownership, and is noted on the same
   issue.
 
-  > **Superseded for the relay path — see the amendment (issue #74) at the end of this
-  > document.** A relay-mode client is now shaped at the relay. What remains unshaped
-  > is a **chained** connect, for its own separate reason (ADR-0042 §9).
+  > **Superseded — see the amendment (issue #74) at the end of this document.** Both
+  > halves are closed: a relay-mode client is shaped at the relay, and a client driving
+  > UDP is shaped per datagram. What remains unshaped is a **chained** connect, for its
+  > own separate reason (ADR-0042 §9).
 - **`min_declared_quota_bytes` is still enforced by nothing**, for the reason
   ADR-0043's #15 amendment gives.
 
@@ -285,11 +287,12 @@ paths; what is missing is the per-tier limit.
 
 ---
 
-## Amendment (issue #74, 2026-07-30): a peer-relayed session is shaped at the RELAY
+## Amendment (issue #74, 2026-07-30): a peer-relayed session is shaped at the RELAY, and the UDP relay paces per datagram
 
 §5 listed three paths per-session shaping did not reach, and argued the first was hard
 to close. That argument contained a false premise, and this amendment records the
-correction rather than quietly overwriting it.
+correction rather than quietly overwriting it. Two of the three now close; the third is
+restated as the separate thing it always was.
 
 ### What §5 got wrong
 
@@ -334,6 +337,29 @@ coordinator can send a large cap or none, and the forwarder honours it. That is 
 revenue-integrity failure rather than a linkability one, still bounded above by the
 node's own declared aggregate cap (ADR-0040), which no coordinator can raise.
 
+### The UDP relay: same limiter, applied per datagram
+
+§5's third bullet was not a design question at all, only a shape mismatch:
+`exitTerminateUDP` hand-rolls a datagram loop, so there is no `io.Reader` for
+`LimitReads` to wrap. `capacity.Limiter.WaitN` is that method's counterpart for exactly
+this caller — its own doc names core's UDP relay as the reason it exists — so
+`exitTerminateUDP` now takes the same `*capacity.Limiter` and calls `WaitN` per
+datagram, in both directions, beside the `meterN` already there.
+
+`meterN` is kept rather than replaced. The two answer different questions, the same way
+§4's three wrappers do on the TCP path: accounting counts what the session **moved**,
+`pace` what its tier is **entitled to**, `meterN` what the operator **will carry**.
+`WaitN` is called before `meterN` so the tier cap nests inside the operator's, matching
+that composition.
+
+One invariant is load-bearing and now has a test of its own. `WaitN` returns an error
+rather than deadlocking when asked for more bytes than the bucket can hold, and the only
+reason that branch is unreachable here is that `maxUDPDatagram` is 65535 — one byte under
+`capacity`'s 64 KiB burst. `TestMaxUDPDatagramFitsTheLimiterBurst` pins it, because
+widening `maxUDPDatagram` past the burst would make every capped UDP session start
+failing its largest datagrams instead of pacing them, and nothing else in the suite would
+notice.
+
 ### What does NOT close: a chained connect
 
 **A chained (onion) connect still carries no cap, and this is a different gap with a
@@ -360,12 +386,16 @@ Mutation-checked, the bar #58 set:
 | drop the `if chained { sessionCap = 0 }` guard | `TestChainedPeerRelayAssignCarriesNoSessionCap` |
 | drop `sessionPace` from `handlerFor`'s `ExitAddr` branch | `TestPeerRelaySpliceShapesToTheTierCap` (`core`) |
 | drop `pace.LimitReads` from `relayPipe`'s copies | `TestPeerRelaySpliceShapesToTheTierCap` |
+| drop either `pace.WaitN` from `exitTerminateUDP` | `TestUDPSessionCapShapesTheExitEgress` |
+| widen `maxUDPDatagram` past the limiter's burst | `TestMaxUDPDatagramFitsTheLimiterBurst` |
 
 `TestPeerRelaySpliceShapesToTheTierCap` drives `handlerFor` rather than `relayPipe`
 directly, so it covers the production wiring end to end and either mutation reddens it.
 `TestUncappedPeerRelaySpliceIsNotShaped` is its control, and also guards the chained and
 unpoliced-coordinator cases, where the assign carries no cap and the splice must run
-unshaped.
+unshaped. `TestUDPSessionCapShapesTheExitEgress` and `TestUDPUncappedSessionIsNotShaped`
+are the same pair for the datagram path, driven through `exitTerminate`'s
+`udpTargetPrefix` branch.
 
 **One test was inverted rather than added**, and that is the honest record of this
 change: `TestPeerRelayAssignCarriesNoSessionCap` asserted §5's original decision and is

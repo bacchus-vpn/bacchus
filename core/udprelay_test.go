@@ -155,6 +155,161 @@ func TestExitTerminateUDPIdleTimeout(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// UDP-side tier shaping (issue #74, ADR-0048 §5).
+// ---------------------------------------------------------------------------
+
+// burstResponder binds a loopback UDP listener that waits for one datagram (the
+// exit's, which is what teaches it the exit's ephemeral source address) and then
+// fires back count datagrams of size bytes as fast as it can.
+//
+// It stands in for TestSessionCapShapesTheExitEgress's (session_cap_test.go) TCP
+// server writing one large payload on accept, adapted to UDP's framing: a single
+// datagram cannot exceed maxUDPDatagram, so a payload big enough to clear the
+// token bucket's burst has to cross as several datagrams rather than one write.
+func burstResponder(t *testing.T, size, count int) *net.UDPAddr {
+	t.Helper()
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	go func() {
+		buf := make([]byte, 2048)
+		_, from, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		payload := make([]byte, size)
+		for i := 0; i < count; i++ {
+			_, _ = conn.WriteToUDP(payload, from)
+		}
+	}()
+	return conn.LocalAddr().(*net.UDPAddr)
+}
+
+// TestUDPSessionCapShapesTheExitEgress is TestSessionCapShapesTheExitEgress's
+// (session_cap_test.go) UDP counterpart: same tier cap, same exitTerminate entry
+// point, driven through the udpTargetPrefix branch instead of a TCP dial.
+//
+// The bucket starts full at burstBytes, so the assertion is on the bytes BEYOND
+// the burst: at 512 kbit/s (64 KB/s) a 64 KB overshoot cannot cross in under a
+// second however fast the machine is, because a token bucket's rate is not a
+// property of the hardware.
+//
+// MUTATION: drop either pace.WaitN call from exitTerminateUDP and this goes red —
+// the datagrams arrive immediately.
+func TestUDPSessionCapShapesTheExitEgress(t *testing.T) {
+	const capBps = 512_000     // 64 KB/s
+	const datagramSize = 65000 // under maxUDPDatagram
+	const numDatagrams = 2     // 130,000 bytes — clears one 64 KB burst
+	const wantAtLeast = 900 * time.Millisecond
+
+	key, err := generateExitKey()
+	if err != nil {
+		t.Fatalf("generateExitKey: %v", err)
+	}
+	dest := burstResponder(t, datagramSize, numDatagrams)
+
+	cConn, sConn := net.Pipe()
+	deadline(t, cConn, sConn)
+
+	e := &Engine{roles: map[string]bool{RoleExit: true}, exitKey: key, udpIdleTimeout: 5 * time.Second, limiterCtx: context.Background()}
+	pace := sessionPace(wire{Type: "assign", Session: "s1", SessionCapBps: capBps})
+	if pace == nil {
+		t.Fatal("no limiter built for a capped assignment")
+	}
+	go e.exitTerminate("s1", pace, sConn)
+
+	nc, err := clientHandshake(cConn, key.Public, udpTargetPrefix+dest.String(), nil)
+	if err != nil {
+		t.Fatalf("clientHandshake: %v", err)
+	}
+	defer nc.Close()
+
+	// One datagram out, to teach the responder where to answer. It is also the
+	// client->exit direction's own trip through pace.WaitN.
+	if err := writeUDPFrame(nc, []byte("ping")); err != nil {
+		t.Fatalf("writeUDPFrame: %v", err)
+	}
+
+	start := time.Now()
+	buf := make([]byte, maxUDPDatagram)
+	for i := 0; i < numDatagrams; i++ {
+		if _, err := readUDPFrame(nc, buf); err != nil {
+			t.Fatalf("readUDPFrame %d of %d: %v", i+1, numDatagrams, err)
+		}
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < wantAtLeast {
+		t.Errorf("%d bytes crossed a %d bps session cap in %s; want at least %s — the UDP relay is NOT shaped to its tier",
+			numDatagrams*datagramSize, capBps, elapsed.Truncate(time.Millisecond), wantAtLeast)
+	}
+}
+
+// TestUDPUncappedSessionIsNotShaped is the control for the test above, mirroring
+// TestUncappedSessionIsNotShaped: with no cap on the assignment the same
+// datagrams cross at memory speed. Without it the timing assertion above could be
+// satisfied by any accidental stall and would keep passing while proving nothing.
+func TestUDPUncappedSessionIsNotShaped(t *testing.T) {
+	const datagramSize = 65000
+	const numDatagrams = 2
+
+	key, err := generateExitKey()
+	if err != nil {
+		t.Fatalf("generateExitKey: %v", err)
+	}
+	dest := burstResponder(t, datagramSize, numDatagrams)
+
+	cConn, sConn := net.Pipe()
+	deadline(t, cConn, sConn)
+
+	e := &Engine{roles: map[string]bool{RoleExit: true}, exitKey: key, udpIdleTimeout: 5 * time.Second, limiterCtx: context.Background()}
+	go e.exitTerminate("s1", sessionPace(wire{Type: "assign", Session: "s1"}), sConn)
+
+	nc, err := clientHandshake(cConn, key.Public, udpTargetPrefix+dest.String(), nil)
+	if err != nil {
+		t.Fatalf("clientHandshake: %v", err)
+	}
+	defer nc.Close()
+
+	if err := writeUDPFrame(nc, []byte("ping")); err != nil {
+		t.Fatalf("writeUDPFrame: %v", err)
+	}
+
+	start := time.Now()
+	buf := make([]byte, maxUDPDatagram)
+	for i := 0; i < numDatagrams; i++ {
+		if _, err := readUDPFrame(nc, buf); err != nil {
+			t.Fatalf("readUDPFrame %d of %d: %v", i+1, numDatagrams, err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("an UNCAPPED UDP session took %s to move %d bytes — an unpoliced coordinator's UDP sessions are being shaped", elapsed, numDatagrams*datagramSize)
+	}
+}
+
+// TestMaxUDPDatagramFitsTheLimiterBurst pins the invariant exitTerminateUDP's
+// WaitN calls rely on: capacity.Limiter.WaitN errors rather than deadlocking when
+// asked for more bytes than the bucket can ever hold, and the only reason that
+// error is unreachable in the UDP relay is that a datagram cannot be that large.
+//
+// It is a one-line assertion standing in for a whole failure mode: widen
+// maxUDPDatagram past the burst and every capped UDP session would start dropping
+// its largest datagrams instead of pacing them, with nothing else in the suite
+// noticing.
+func TestMaxUDPDatagramFitsTheLimiterBurst(t *testing.T) {
+	pace := sessionPace(wire{Type: "assign", Session: "s1", SessionCapBps: 512_000})
+	if pace == nil {
+		t.Fatal("no limiter built for a capped assignment")
+	}
+	if err := pace.WaitN(context.Background(), maxUDPDatagram); err != nil {
+		t.Fatalf("a maxUDPDatagram-sized datagram (%d bytes) exceeds the limiter's burst: %v — exitTerminateUDP would fail every large datagram rather than pace it",
+			maxUDPDatagram, err)
+	}
+}
+
 // pipeSession is a minimal one-shot fake Session: its single OpenStream
 // returns one half of a net.Pipe(), delivering the other half through peer.
 // It exists so handleSocksUDPAssociate can be driven against a real

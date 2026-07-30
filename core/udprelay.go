@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core/accounting"
+	"github.com/bacchus-vpn/bacchus/core/capacity"
 )
 
 // UDP relay forwarding (issue #41): carries a client's captured UDP flow
@@ -83,7 +84,15 @@ func readUDPFrame(r io.Reader, buf []byte) ([]byte, error) {
 // udpIdleTimeout passes with no datagram in either direction (NAT-style
 // expiry — the backstop; see udpIdleTimeout's doc in core/engine.go for why
 // the client is expected to drive teardown first in the common case).
-func (e *Engine) exitTerminateUDP(sid string, nc *noiseConn, target string) {
+//
+// pace is the tier's per-session speed cap (issue #58/#74, ADR-0048), nil for
+// uncapped — the same *Limiter exitTerminate wraps a reader with on the TCP
+// path, applied here per datagram through WaitN instead, because this loop
+// moves whole datagrams and there is no reader to wrap. It sits inside meterN's
+// operator-declared cap exactly as it does on that path: accounting counts what
+// the session moved, pace what its tier is entitled to, meterN what the
+// operator will carry.
+func (e *Engine) exitTerminateUDP(sid string, pace *capacity.Limiter, nc *noiseConn, target string) {
 	raddr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
 		return
@@ -117,6 +126,18 @@ func (e *Engine) exitTerminateUDP(sid string, nc *noiseConn, target string) {
 			}
 			touch()
 			ctr.Add(uint64(n))
+			// Tier cap (issue #74, ADR-0048 §4): what this session's plan is entitled
+			// to, checked before the operator's own declared cap below so the two
+			// compose in the same order the TCP path nests them in.
+			//
+			// n cannot exceed burstBytes, which is what makes WaitN's error case
+			// unreachable here rather than merely unlikely: a UDP payload cannot be
+			// larger than maxUDPDatagram (65535), one byte under capacity's 64 KiB
+			// burst. That headroom is load-bearing — do not widen maxUDPDatagram
+			// without revisiting it.
+			if err := pace.WaitN(e.limiterCtx, n); err != nil {
+				return
+			}
 			// Declared limits (issue #143): pace and count this datagram against the
 			// operator's cap, and stop the flow once the quota is spent. meter() cannot
 			// reach here — this loop moves datagrams, not a stream.
@@ -137,6 +158,9 @@ func (e *Engine) exitTerminateUDP(sid string, nc *noiseConn, target string) {
 		}
 		touch()
 		ctr.Add(uint64(len(payload)))
+		if err := pace.WaitN(e.limiterCtx, len(payload)); err != nil { // tier cap (issue #74); see above
+			return
+		}
 		if err := e.meterN(len(payload)); err != nil { // declared limits (issue #143); see above
 			return
 		}
