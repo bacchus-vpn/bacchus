@@ -1,0 +1,25 @@
+[Unit]
+Description=Bacchus coordinator IP-to-Country database refresh (issue #136, ADR-0042)
+# network-online rather than network: this fetches from a public endpoint, and a
+# oneshot that starts before routing is up just fails and waits for the next timer.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# The argument must match the coordinator's -geoip flag. Change one and change the
+# other, or the coordinator keeps loading whatever was staged before.
+#
+# This deliberately does NOT restart bacchus-coordinator afterwards. The coordinator
+# reads the database once, at startup, so a refresh takes effect at its next start —
+# and turning a weekly data refresh into a weekly coordinator restart is an
+# availability decision that belongs to whoever runs the host, not to this unit. Apply
+# it when it suits: systemctl try-restart bacchus-coordinator. See deploy/README.md.
+ExecStart=/usr/local/bin/bacchus-geoip-refresh.sh /var/lib/bacchus/geoip
+User=root
+
+# A failed refresh exits non-zero and leaves the previous table in place, so this unit
+# going to "failed" is the signal that the table has stopped being refreshed. Nothing
+# here alerts on that — attach OnFailure= to whatever this host already notifies with.
+# The backstop, if nobody ever looks, is the coordinator's own startup warning once the
+# staged files pass 90 days (core/geoip.StaleAfter).

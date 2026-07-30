@@ -1,0 +1,31 @@
+[Unit]
+Description=Weekly refresh of the Bacchus coordinator IP-to-Country database
+
+[Timer]
+# WHY WEEKLY. Nothing else in this system will ever remind a reader, so the reasoning
+# lives here rather than only in a commit message.
+#
+# The cadence is not set by what upstream offers — it republishes hourly — but by what
+# the data is worth and by how much room the failure path needs:
+#
+#   * The coordinator warns at startup once the staged files pass 90 days
+#     (core/geoip.StaleAfter). Weekly leaves room for roughly twelve consecutive misses
+#     before that floor is reached, so a transient upstream outage, a host that was off,
+#     or a refresh nobody noticed failing never gets near the point where the data is
+#     actually suspect.
+#   * Country attribution drifts slowly. A daily fetch would cost a few megabytes a day
+#     against a public feed and buy no accuracy anyone could measure.
+#
+# Persistent=true because the failure this timer exists to prevent is SILENCE, not
+# lateness: a host that was off at the scheduled moment refreshes shortly after boot
+# instead of quietly waiting out the rest of the week.
+#
+# RandomizedDelaySec because every coordinator installing this unit would otherwise hit
+# one publisher at the same instant. That is merely polite with one operator's fleet and
+# starts to matter as coordinators federate to third-party operators (issue #61).
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=6h
+
+[Install]
+WantedBy=timers.target

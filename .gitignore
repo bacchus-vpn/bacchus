@@ -45,6 +45,13 @@ ip2country-v4.tsv
 ip2country-v6.tsv
 ip2country-v*.tsv.gz
 #
+# deploy/bacchus-geoip-refresh.sh fetches and decompresses under these before renaming
+# each family into place, so a coordinator starting mid-refresh cannot read a
+# half-written table (issue #85). A completed run leaves none of them behind; a killed
+# one can. Excluded for the same two reasons as the files above — they are the same bulk
+# data a few seconds earlier, not a different kind of thing.
+ip2country-v*.tmp
+#
 # GeoLite2 remains loadable for a deployment that already staged it. That one is
 # a licensed MaxMind dataset under its own terms, which are not ours to
 # redistribute under.

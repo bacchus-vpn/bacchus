@@ -76,18 +76,28 @@ domain, no account, no licence key. It is the same publisher core/asn's table
 comes from (ADR-0044), so one feed covers both datasets.
 
 ```
-mkdir -p /var/lib/bacchus/geoip && cd /var/lib/bacchus/geoip
-curl -sSfO https://iptoasn.com/data/ip2country-v4.tsv.gz
-curl -sSfO https://iptoasn.com/data/ip2country-v6.tsv.gz
-gunzip -f ip2country-v4.tsv.gz ip2country-v6.tsv.gz
+deploy/bacchus-geoip-refresh.sh /var/lib/bacchus/geoip
 
 bacchus-coordinator -geoip /var/lib/bacchus/geoip ...
 ```
-Keep upstream's own filenames — the loader looks for exactly those. The IPv6 file
-is optional; without it, an IPv6-registering node resolves to nothing and falls
-back to its hint, so stage it unless you are certain the fleet is v4 only. The
-startup log prints the row count **per family** and names the format it read,
-which is how you confirm both.
+The script fetches both families, decompresses them and stages them under upstream's
+own filenames — the loader looks for exactly those, so nothing is renamed. Both are
+staged: without the v6 table an IPv6-registering node resolves to nothing and falls
+back to its hint, so the fleet would have to be certainly v4-only for that to be
+harmless. The same script is the refresh step; see
+[Keeping it fresh](#keeping-it-fresh-issue-85) below.
+
+**Confirm it before treating it as staged.** The startup log prints the row count
+**per family** and names the format it read — for example, with counts that move with
+every upstream release:
+```
+geoip: loaded 450917 IPv4 + 117150 IPv6 rows from /var/lib/bacchus/geoip [iptoasn ip2country] (139652 unusable rows skipped)
+```
+Both families non-zero, both in the hundreds of thousands, and `[iptoasn ip2country]`
+named is the healthy case. A large
+`unusable rows skipped` count is normal here rather than alarming — upstream attributes
+a substantial share of both files to no country at all, and a row with no country is
+loaded as a gap rather than as an answer.
 
 **Why not MaxMind GeoLite2** (issue #61). It works and still loads — see below —
 but downloading it needs a free MaxMind account and licence key, and its terms
@@ -106,8 +116,8 @@ instead. A directory holding **both** formats loads the range files and ignores
 the CSVs, so migrating is a fetch, a restart, and a check that the startup log
 names `iptoasn ip2country`.
 
-Refresh it on upstream's cadence — it rebuilds hourly, so anything from monthly
-is fine. Stale geodata does not fail; it silently mislabels a node's country, so
+Refresh it on a **timer, not on memory** — see [Keeping it fresh](#keeping-it-fresh-issue-85)
+below. Stale geodata does not fail; it silently mislabels a node's country, so
 the coordinator warns at startup once the staged files are more than 90 days old.
 A database that is configured but unreadable is **fatal**: an operator who asked
 for derived countries must not silently get self-reported ones. So is one that
@@ -130,6 +140,58 @@ by leaving out a flag a direct-mode exit does not otherwise need. Such an exit n
 carries no country and is offered to no client; the startup warning names that
 specifically, rather than reporting an unresolved address. Nothing changes without the
 flag: an exit with no `-advertise` keeps its observed country as before.
+
+### Keeping it fresh (issue #85)
+
+The database is deliberately not in the repository, which means **nothing in CI, no
+test and no build can see it go stale** — the one staleness signal is a warning the
+coordinator prints at startup, on a process that may not restart for months. A refresh
+run by hand closes the gap on the day it is run and reopens it silently over the
+following ones, so the refresh is a unit rather than a procedure:
+
+| file | what it is |
+|---|---|
+| `deploy/bacchus-geoip-refresh.sh` | fetch, decompress and stage both families into a directory |
+| `deploy/bacchus-geoip-refresh.service` | oneshot that runs the script against `/var/lib/bacchus/geoip` |
+| `deploy/bacchus-geoip-refresh.timer` | runs it **weekly**; carries the reasoning for the cadence |
+
+Install it on each coordinator host:
+```bash
+install -m 755 deploy/bacchus-geoip-refresh.sh /usr/local/bin/
+cp deploy/bacchus-geoip-refresh.service deploy/bacchus-geoip-refresh.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now bacchus-geoip-refresh.timer
+systemctl start bacchus-geoip-refresh.service   # stage it once, now, rather than next Monday
+```
+The unit's `ExecStart` names `/var/lib/bacchus/geoip`; if the coordinator's `-geoip`
+points somewhere else, change both.
+
+**A refresh cannot leave you worse off than not refreshing.** Each family is fetched
+and decompressed under a temporary name *inside the destination directory* and renamed
+into place, so a coordinator starting mid-refresh never reads a half-written table; and
+nothing is renamed until both families have downloaded, decompressed and passed a row
+floor, so a bad download replaces nothing and the previous table survives intact. That
+ordering is the point: the fallback for a missing country table is each node's own
+self-report, so a refresh able to destroy a good table would be worse than none.
+
+**A refresh does not reach a running coordinator.** The database is read once, at
+startup. The unit deliberately does not restart the coordinator — turning a weekly data
+refresh into a weekly coordinator restart is an availability decision for whoever runs
+the host — so apply it when it suits:
+```bash
+systemctl try-restart bacchus-coordinator
+journalctl -u bacchus-coordinator -n 20 | grep geoip   # confirm the new row counts
+```
+
+**A failed refresh is visible, but nothing alerts on it.** The unit exits non-zero and
+goes to `failed`, which is what to watch:
+```bash
+systemctl list-timers bacchus-geoip-refresh.timer
+systemctl status bacchus-geoip-refresh.service
+```
+Attach `OnFailure=` to whatever this host already notifies with. If nobody ever looks,
+the backstop is the coordinator's own 90-day staleness warning above — which is a
+backstop, not a monitor: it only speaks when the coordinator restarts.
 
 ## IP→AS table (issue #23, ADR-0044)
 
