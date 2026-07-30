@@ -1,5 +1,3 @@
-//go:build windows
-
 // General UDP forwarding (issue #41): a genuine SOCKS5 UDP ASSOCIATE client
 // (RFC 1928 §4/§7) against the tunnel's local SOCKS server
 // (core/client.go's handleSocksUDPAssociate, core/udprelay.go), plus the
@@ -8,7 +6,7 @@
 // internal knowledge — it treats the local SOCKS server as any standard
 // SOCKS5 UDP ASSOCIATE server, the same relationship dialSOCKS already has
 // with it for CONNECT.
-package main
+package enforcement
 
 import (
 	"encoding/binary"

@@ -1,5 +1,3 @@
-//go:build windows
-
 // Late underlay-address exclusion for the transport pool (issue #109).
 //
 // The full-device tunnel keeps its own control plane reachable by excluding a
@@ -61,7 +59,7 @@
 //     ever being reachable while the tunnel is up (today it is not —
 //     disablePhysicalIPv6 — so this closes a gap that would otherwise open the
 //     day that changes, not a currently reachable leak).
-package main
+package enforcement
 
 import (
 	"sync"
@@ -89,26 +87,32 @@ type poolExcluder struct {
 	// reserve(); removeFn reaps a route reserve() installed into a
 	// since-disabled excluder (issue #117). All four injected for the same
 	// reason: testable ordering/self-reap logic without a real Windows route
-	// table. newPoolExcluder wires them to routes.go / killswitch.go.
+	// table. newPoolExcluder wires them to the platform's osNet (osnet.go).
 	excludeFn func(gw gatewayInfo, ip string)
 	allowFn   func(ip string)
 	gatewayFn func() (gatewayInfo, error)
 	removeFn  func(ips []string)
 }
 
-func newPoolExcluder() *poolExcluder {
+// newPoolExcluder wires the four injected primitives to osn. This is the
+// "only the wiring changes per platform" half of ADR-0039's poolroutes.go row
+// — the state machine above it is untouched, and every one of the four still
+// arrives as a function value rather than being called by name, so the
+// existing tests that drive the #109/#117/#123b/#123c orderings keep working
+// against fakes with no osNet at all.
+func newPoolExcluder(osn osNet) *poolExcluder {
 	return &poolExcluder{
 		seen: map[string]bool{},
 		excludeFn: func(gw gatewayInfo, ip string) {
 			if isIPv6Literal(ip) {
-				addExclusionRoutesV6([]string{ip}, gw)
+				osn.addExclusionRoutesV6([]string{ip}, gw)
 			} else {
-				addExclusionRoutes([]string{ip}, gw)
+				osn.addExclusionRoutes([]string{ip}, gw)
 			}
 		},
-		allowFn:   refreshKillSwitchAllowIP,
-		gatewayFn: defaultGateway,
-		removeFn:  removeRoutes,
+		allowFn:   osn.refreshKillSwitchAllowIP,
+		gatewayFn: osn.defaultGateway,
+		removeFn:  osn.removeRoutes,
 	}
 }
 

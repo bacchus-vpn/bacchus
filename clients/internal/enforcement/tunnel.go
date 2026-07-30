@@ -1,7 +1,5 @@
-//go:build windows
-
-// Orchestrates full-device routing: brings up a wintun adapter, points the
-// OS default route at it (split-default, so the physical default route is
+// Orchestrates full-device routing: brings up a TUN device, points the OS
+// default route at it (split-default, so the physical default route is
 // preserved rather than replaced), excludes the coordinator/STUN/TURN
 // endpoints — and the pool's own reality underlay addresses, learned late via
 // the excluder (poolroutes.go, issue #109) — so the session's own transport
@@ -11,7 +9,16 @@
 // Split-tunnel "include" mode (splittunnel.go) inverts the middle part: no
 // split-default is installed at all, and the bypass/include set gets routed
 // into the tunnel adapter instead of out of it (issue #64).
-package main
+//
+// This is ADR-0039's "Orchestration only" row: the sequencing below is
+// portable, but it used to call routes.go/killswitch.go's functions directly
+// by name, which is what pinned it to Windows. It now calls them through
+// osNet (osnet.go), the way poolroutes.go has always called its four injected
+// primitives. Nothing about the order changed in that re-pointing, and the
+// order is the part that matters — every step's rollback is deferred in
+// reverse, and the defers run LIFO, so read the deferred cleanup next to the
+// step it undoes rather than top to bottom.
+package enforcement
 
 import (
 	"fmt"
@@ -27,6 +34,8 @@ import (
 const tunIP = "10.66.0.2"
 
 type tunnel struct {
+	os          osNet
+	logf        func(string, ...any)
 	dev         tun.Device
 	nt          *netTun
 	gw          gatewayInfo
@@ -36,13 +45,19 @@ type tunnel struct {
 	killSwitch  bool
 }
 
+func (t *tunnel) log(format string, args ...any) {
+	if t.logf != nil {
+		t.logf(format, args...)
+	}
+}
+
 // startTunnel brings the full-device tunnel up. socksAddr is the client's
 // own already-running local SOCKS5 server (core.Engine.Connect started it);
-// every coordinator pool member plus stunURL/turnURL are excluded from the
-// tunnel's route so the underlying signalling/relay session keeps flowing over
-// the physical interface — the client can rotate to any pool member, so all of
-// them must stay reachable outside the tunnel (issue #6), regardless of
-// split-tunnel mode. dnsUpstream is the plain-DNS server queried (over
+// every coordinator pool member plus cfg.STUNURL/cfg.TURNURL are excluded from
+// the tunnel's route so the underlying signalling/relay session keeps flowing
+// over the physical interface — the client can rotate to any pool member, so
+// all of them must stay reachable outside the tunnel (issue #6), regardless of
+// split-tunnel mode. cfg.DNSUpstream is the plain-DNS server queried (over
 // DNS-over-TCP, through the tunnel) for every intercepted DNS query. policy is
 // the destination-based split-tunnelling decision (splittunnel.go): its
 // static CIDR/IP entries get a route right away and its domain entries are
@@ -53,10 +68,15 @@ type tunnel struct {
 // #109): any reserved before now (during the initial pooled Connect) are
 // excluded here alongside the control plane, and the excluder is switched live
 // so a mid-session failover excludes its new address as it dials.
-// killSwitch arms the fail-closed lockdown once the tunnel is up.
-func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr string, policy *bypassPolicy, pe *poolExcluder, killSwitch bool) (_ *tunnel, err error) {
-	logLine("[tun] bring-up start")
-	gw, err := defaultGateway()
+// cfg.KillSwitch arms the fail-closed lockdown once the tunnel is up.
+func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypassPolicy, pe *poolExcluder, socksAddr string) (_ *tunnel, err error) {
+	log := func(format string, args ...any) {
+		if logf != nil {
+			logf(format, args...)
+		}
+	}
+	log("[tun] bring-up start")
+	gw, err := osn.defaultGateway()
 	if err != nil {
 		return nil, fmt.Errorf("read default route: %w", err)
 	}
@@ -65,14 +85,14 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 	// into the caller's Coordinators backing array. Always via the physical
 	// gateway, in both modes — the tunnel's own signalling must never be
 	// captured by its own route.
-	endpoints := append([]string{}, coordinators...)
-	endpoints = append(endpoints, stunURL, turnURL)
+	endpoints := append([]string{}, cfg.Coordinators...)
+	endpoints = append(endpoints, cfg.STUNURL, cfg.TURNURL)
 	excluded := resolveExclusions(endpoints...)
-	addExclusionRoutes(excluded, gw)
+	osn.addExclusionRoutes(excluded, gw)
 	ok := false
 	defer func() {
 		if !ok {
-			removeRoutes(excluded)
+			osn.removeRoutes(excluded)
 		}
 	}()
 
@@ -89,7 +109,7 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 			// that races past this point self-reaps instead of installing a
 			// route after this snapshot already ran and missed it.
 			pe.disable()
-			removeRoutes(pe.reserved())
+			osn.removeRoutes(pe.reserved())
 		}
 	}()
 
@@ -108,18 +128,18 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 	// the split-default route exists (further down) so there's never a
 	// window where bypass traffic could get captured before its exclusion
 	// does. Include mode can't route its (include) set here: inclusion routes
-	// bind via -InterfaceAlias, which needs the tun adapter to already exist —
-	// that happens later, once tun.CreateTUN below has run.
+	// bind to the tun adapter, which needs that adapter to already exist —
+	// that happens later, once osn.createTUN below has run.
 	if policy.mode != modeInclude {
-		addExclusionRoutes(bypassEntries, gw)
+		osn.addExclusionRoutes(bypassEntries, gw)
 		defer func() {
 			if !ok {
 				// Re-derived rather than reusing bypassEntries: onLearn
 				// (wired below) can add more dynamic entries during the rest
 				// of bring-up, and dynamicSnapshot() here runs at unwind
 				// time, so it picks those up too.
-				removeRoutes(policy.staticEntries())
-				removeRoutes(policy.dynamicSnapshot())
+				osn.removeRoutes(policy.staticEntries())
+				osn.removeRoutes(policy.dynamicSnapshot())
 			}
 		}()
 	}
@@ -135,28 +155,28 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 	// gateway.
 	policy.onLearn = func(ip string, armed bool) {
 		if policy.mode == modeInclude {
-			addInclusionRoutes([]string{ip}, tunIP)
+			osn.addInclusionRoutes([]string{ip}, tunIP)
 		} else {
-			addExclusionRoutes([]string{ip}, gw)
+			osn.addExclusionRoutes([]string{ip}, gw)
 		}
-		if killSwitch && armed {
-			refreshKillSwitchAllowIP(ip)
+		if cfg.KillSwitch && armed {
+			osn.refreshKillSwitchAllowIP(ip)
 		}
 	}
 
-	logLine("[tun] creating wintun adapter")
-	dev, err := tun.CreateTUN(tunAdapterName, 0)
+	log("[tun] creating tun device")
+	dev, err := osn.createTUN()
 	if err != nil {
-		return nil, fmt.Errorf("create wintun adapter (run bacchus.exe as Administrator?): %w", err)
+		return nil, err
 	}
-	logLine("[tun] wintun adapter created")
+	log("[tun] tun device created")
 	defer func() {
 		if !ok {
 			_ = dev.Close()
 		}
 	}()
 
-	if err := configureTunInterface(tunIP, 24); err != nil {
+	if err := osn.configureTunInterface(tunIP, 24); err != nil {
 		return nil, err
 	}
 
@@ -170,7 +190,7 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 	// was still being installed unconditionally, and would loop straight back
 	// into the tunnel it was supposed to avoid.
 	if policy.mode == modeInclude {
-		addInclusionRoutes(bypassEntries, tunIP)
+		osn.addInclusionRoutes(bypassEntries, tunIP)
 		// Deliberately doesn't lean on "the adapter's own teardown removes
 		// its routes" here: this defer is registered *after* dev.Close()'s
 		// (above), so on unwind it runs first (defers are LIFO) and removes
@@ -182,18 +202,18 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 		// call) — see removeRoutes' doc comment for that caveat.
 		defer func() {
 			if !ok {
-				removeRoutes(policy.staticEntries())
-				removeRoutes(policy.dynamicSnapshot())
+				osn.removeRoutes(policy.staticEntries())
+				osn.removeRoutes(policy.dynamicSnapshot())
 			}
 		}()
-	} else if err := addSplitDefaultRoute(tunIP); err != nil {
+	} else if err := osn.addSplitDefaultRoute(tunIP); err != nil {
 		return nil, err
 	}
 
-	disablePhysicalIPv6(gw.ifAlias)
+	osn.disablePhysicalIPv6(gw.ifAlias)
 	defer func() {
 		if !ok {
-			enablePhysicalIPv6(gw.ifAlias)
+			osn.enablePhysicalIPv6(gw.ifAlias)
 		}
 	}()
 
@@ -201,12 +221,12 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 	if err != nil {
 		return nil, err
 	}
-	logLine("[tun] starting netstack")
-	nt, err := startNetstack(dev, addr, socksAddr, dnsUpstream, policy)
+	log("[tun] starting netstack")
+	nt, err := startNetstack(dev, addr, socksAddr, cfg.DNSUpstream, policy)
 	if err != nil {
 		return nil, err
 	}
-	logLine("[tun] netstack up")
+	log("[tun] netstack up")
 	defer func() {
 		if !ok {
 			nt.Close()
@@ -230,7 +250,7 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 	// blocks it while connected, rather than leaving it alone as never-tunnelled
 	// traffic. Fails safe (no leak), but is a real, undecided UX question for
 	// include+kill-switch together; flagged, not solved here.
-	if killSwitch {
+	if cfg.KillSwitch {
 		// Nest the pool-allowlist arming inside the bypass arming so the pool's
 		// reserved underlays and the bypass dynamic set are both snapshotted
 		// atomically with the single enableKillSwitch call — each excluder's own
@@ -242,7 +262,7 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 		if err := policy.arm(func(dynamicSnapshot []string) error {
 			return pe.armAllowlist(func(poolIPs []string) error {
 				control := append(append([]string{}, excluded...), poolIPs...)
-				return enableKillSwitch(control, append(policy.staticEntries(), dynamicSnapshot...))
+				return osn.enableKillSwitch(control, append(policy.staticEntries(), dynamicSnapshot...))
 			})
 		}); err != nil {
 			return nil, err
@@ -250,13 +270,16 @@ func startTunnel(coordinators []string, stunURL, turnURL, dnsUpstream, socksAddr
 	}
 
 	ok = true
-	logLine("[tun] bring-up complete")
-	return &tunnel{dev: dev, nt: nt, gw: gw, excludedIPs: excluded, policy: policy, excluder: pe, killSwitch: killSwitch}, nil
+	log("[tun] bring-up complete")
+	return &tunnel{
+		os: osn, logf: logf, dev: dev, nt: nt, gw: gw,
+		excludedIPs: excluded, policy: policy, excluder: pe, killSwitch: cfg.KillSwitch,
+	}, nil
 }
 
 // Close tears the tunnel down and restores the machine's normal networking.
 // The kill-switch is lifted first so egress is restored before the adapter
-// and routes go away; then the netstack stops, the wintun adapter is deleted
+// and routes go away; then the netstack stops, the TUN adapter is deleted
 // (expected to remove its own addresses/routes along with it — including any
 // include-mode inclusion routes and, in exclude mode, the split-default
 // route, all bound to the adapter — per standard Windows adapter-deletion
@@ -276,7 +299,7 @@ func (t *tunnel) Close() {
 		return
 	}
 	if t.killSwitch {
-		disableKillSwitch()
+		t.os.disableKillSwitch()
 	}
 	if t.nt != nil {
 		t.nt.Close()
@@ -284,8 +307,8 @@ func (t *tunnel) Close() {
 	if t.dev != nil {
 		_ = t.dev.Close()
 	}
-	enablePhysicalIPv6(t.gw.ifAlias)
-	removeRoutes(t.excludedIPs)
+	t.os.enablePhysicalIPv6(t.gw.ifAlias)
+	t.os.removeRoutes(t.excludedIPs)
 	if t.excluder != nil {
 		// The pool's underlay exclusions (issue #109) are gateway-bound host
 		// routes like the control-plane ones, so they need explicit removal too;
@@ -296,12 +319,13 @@ func (t *tunnel) Close() {
 		// a failover reserve() racing this Close self-reaps if it lands after
 		// the reserved() snapshot below.
 		t.excluder.disable()
-		removeRoutes(t.excluder.reserved())
+		t.os.removeRoutes(t.excluder.reserved())
 	}
 	if t.policy != nil {
-		removeRoutes(t.policy.staticEntries())
-		removeRoutes(t.policy.dynamicSnapshot())
+		t.os.removeRoutes(t.policy.staticEntries())
+		t.os.removeRoutes(t.policy.dynamicSnapshot())
 	}
+	t.log("[tun] torn down")
 }
 
 func v4Address(s string) (tcpip.Address, error) {

@@ -1,8 +1,8 @@
 //go:build windows
 
-// OS-level network configuration for full-device routing: reading the
-// current default route, excluding the coordinator/STUN/TURN endpoints from
-// the tunnel (so the WebRTC session itself doesn't loop into the TUN
+// OS-level network configuration for full-device routing on Windows: reading
+// the current default route, excluding the coordinator/STUN/TURN endpoints
+// from the tunnel (so the WebRTC session itself doesn't loop into the TUN
 // device), installing the tunnel's split-default route, blocking IPv6 on the
 // physical adapter, and (split-tunnel "include" mode only, issue #64) routing
 // specific destinations *into* the tunnel adapter instead of the split-default
@@ -12,36 +12,27 @@
 // calling IP Helper API directly — structured, well-documented, and avoids
 // hand-parsing `route print`/`netsh` text output. All of it requires the
 // process to be running elevated (Administrator); see README.
-package main
+//
+// This is one half of the Windows osNet implementation (killswitch_windows.go
+// is the other) — the 414-line "Total" row of ADR-0039's file-by-file costing,
+// minus the address handling and log redaction that turned out to be portable
+// and now live in addrs.go / redact.go. What remains is genuinely
+// Windows-only: every function below is a cmdlet invocation, and both the
+// cmdlets and syscall.SysProcAttr's CreationFlags field exist on no other
+// platform.
+package enforcement
 
 import (
 	"fmt"
-	"net"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 const tunAdapterName = "Bacchus"
-
-// gatewayInfo describes the default route in place before the tunnel comes
-// up, so it can be restored / used for exclusion routes and so IPv6 can be
-// disabled on the right physical adapter.
-type gatewayInfo struct {
-	nextHop string
-	ifIndex int
-	ifAlias string
-
-	// nextHopV6 is the IPv6 default-gateway next hop on the same interface, if
-	// any (issue #117) — "" when this interface has no IPv6 default route
-	// (common: physical IPv6 is disabled for most of the tunnel's lifetime via
-	// disablePhysicalIPv6, and many networks have no IPv6 at all). Populated
-	// best-effort by defaultGateway; addExclusionRoutesV6 is a no-op without
-	// it, since there is then nothing to route an IPv6 exclusion via.
-	nextHopV6 string
-}
 
 // createNoWindow is the CREATE_NO_WINDOW process-creation flag. bacchus.exe is
 // built -H=windowsgui and has no console of its own, so without this flag every
@@ -52,6 +43,32 @@ type gatewayInfo struct {
 // pipes; only the window is suppressed.
 const createNoWindow = 0x08000000
 
+// winOS is the Windows osNet implementation: PowerShell invocations, plus the
+// two things every one of them needs.
+//
+// logf is the client's log sink, injected via Policy.Logf rather than called
+// by name — this package is shared by clients/windows (which logs to
+// bacchus.log via eventlog.go) and clients/fyne (which has its own), and
+// neither is importable from here.
+//
+// run is the PowerShell escape hatch, and it is the reason the ordering
+// guarantees in this file are testable at all. In production it is nil and
+// runPS shells out for real; a test sets it to record the exact script
+// sequence, which is how parity item 5's "excluded before the dial, never
+// orphaned" and item 2's arm/unwind ordering get asserted without an elevated
+// Windows host and a live route table. Same idea as poolExcluder's injected
+// excludeFn/allowFn, one layer down.
+type winOS struct {
+	logf func(string, ...any)
+	run  func(script string) (string, error)
+}
+
+func (o *winOS) log(format string, args ...any) {
+	if o.logf != nil {
+		o.logf(format, args...)
+	}
+}
+
 // newPSCmd builds the powershell.exe invocation every OS-config call in this
 // file runs, windowless (see createNoWindow).
 func newPSCmd(script string) *exec.Cmd {
@@ -60,7 +77,10 @@ func newPSCmd(script string) *exec.Cmd {
 	return cmd
 }
 
-func runPS(script string) (string, error) {
+func (o *winOS) runPS(script string) (string, error) {
+	if o.run != nil {
+		return o.run(script)
+	}
 	out, err := newPSCmd(script).CombinedOutput()
 	if err != nil {
 		// These OS-config calls aren't core.Events, so a failure otherwise leaves no
@@ -87,51 +107,14 @@ func runPS(script string) (string, error) {
 		// forensic footprint for a client whose whole point is running in a
 		// hostile jurisdiction. The returned error below is deliberately left
 		// full and unredacted: it only ever reaches the live, ephemeral tray
-		// status (setStatus in main.go), never the log file, so it keeps full
-		// diagnostic value for the running session.
+		// status (setStatus in clients/windows/main.go), never the log file,
+		// so it keeps full diagnostic value for the running session.
 		first := redactIPs(firstLine(strings.TrimSpace(script)))
 		outFirst := redactIPs(firstLine(strings.TrimSpace(string(out))))
-		logLine("[tun] ps failed: %s | %s", first, outFirst)
+		o.log("[tun] ps failed: %s | %s", first, outFirst)
 		return "", fmt.Errorf("powershell: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
-}
-
-// firstLine returns s up to (not including) its first newline, or s
-// unchanged if it has none.
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
-	return s
-}
-
-// ipCandidatePattern matches substrings shaped like an IPv4 or IPv6 literal —
-// bare, or with a "/NN" prefix length — as candidates for redactIPs. It's
-// intentionally loose: every match still has to parse via net.ParseIP before
-// being redacted, so it can't mangle ordinary command text that merely
-// contains a colon or a run of digits and dots (e.g. a DisplayName or a
-// -RouteMetric value).
-var ipCandidatePattern = regexp.MustCompile(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:/[0-9]{1,3})?|[0-9A-Fa-f]*(?::[0-9A-Fa-f]*)+(?:/[0-9]{1,3})?`)
-
-// redactIPs replaces every IP-literal-shaped substring in s with "<ip>".
-// Applied to anything derived from a PowerShell command or its output before
-// it reaches bacchus.log (issue #140). Matches uniformly rather than trying
-// to single out "sensitive" addresses from the client's own local
-// gateway/TUN ones — that's what keeps it robust against whatever call site
-// is added next, at the cost of also redacting addresses that were already
-// harmless (e.g. the split-default 0.0.0.0/1 prefix).
-func redactIPs(s string) string {
-	return ipCandidatePattern.ReplaceAllStringFunc(s, func(tok string) string {
-		host := tok
-		if i := strings.IndexByte(tok, '/'); i >= 0 {
-			host = tok[:i]
-		}
-		if net.ParseIP(host) == nil {
-			return tok
-		}
-		return "<ip>"
-	})
 }
 
 // defaultGateway returns the current best (lowest-metric) IPv4 default
@@ -140,8 +123,8 @@ func redactIPs(s string) string {
 // (issue #117, gatewayInfo.nextHopV6) — a missing/absent IPv6 route is not an
 // error, since most networks and most of the tunnel's lifetime have none
 // (disablePhysicalIPv6); only the IPv4 lookup is required to succeed.
-func defaultGateway() (gatewayInfo, error) {
-	out, err := runPS(`$r = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop |
+func (o *winOS) defaultGateway() (gatewayInfo, error) {
+	out, err := o.runPS(`$r = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop |
 		Sort-Object -Property RouteMetric | Select-Object -First 1
 	$r6 = Get-NetRoute -DestinationPrefix "::/0" -InterfaceIndex $r.InterfaceIndex -ErrorAction SilentlyContinue |
 		Sort-Object -Property RouteMetric | Select-Object -First 1
@@ -165,114 +148,6 @@ func defaultGateway() (gatewayInfo, error) {
 	}, nil
 }
 
-// resolveExclusions resolves each "host:port" or "scheme:host:port" endpoint
-// to its IPv4 addresses. Bad/unresolvable entries are skipped rather than
-// failing the whole connect — losing one exclusion just means that one
-// endpoint's own traffic rides the tunnel's default route, which is safe
-// (if wasteful) as long as at least the ones that matter resolve.
-func resolveExclusions(endpoints ...string) []string {
-	seen := map[string]bool{}
-	var ips []string
-	for _, ep := range endpoints {
-		host := hostOf(ep)
-		if host == "" {
-			continue
-		}
-		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
-			if !seen[ip.String()] {
-				seen[ip.String()] = true
-				ips = append(ips, ip.String())
-			}
-			continue
-		}
-		addrs, err := net.LookupHost(host)
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ip := net.ParseIP(a)
-			if ip == nil || ip.To4() == nil || seen[ip.String()] {
-				continue
-			}
-			seen[ip.String()] = true
-			ips = append(ips, ip.String())
-		}
-	}
-	return ips
-}
-
-// resolveExclusionsV6 is resolveExclusions' IPv6 counterpart (issue #117): a
-// separate function, rather than a parameter on resolveExclusions, so every
-// existing caller (the control-plane/bypass exclusions, always IPv4 in
-// practice) is untouched — only poolExcluder's reserve() calls this, for a
-// reality exit address specifically. Physical IPv6 is disabled while the
-// tunnel is up (disablePhysicalIPv6), so today this is defense in depth
-// against that posture ever changing or a reselect landing in the narrow
-// pre-disable window, not a currently reachable leak.
-func resolveExclusionsV6(endpoints ...string) []string {
-	seen := map[string]bool{}
-	var ips []string
-	for _, ep := range endpoints {
-		host := hostOf(ep)
-		if host == "" {
-			continue
-		}
-		if ip := net.ParseIP(host); ip != nil {
-			if ip.To4() == nil && !seen[ip.String()] {
-				seen[ip.String()] = true
-				ips = append(ips, ip.String())
-			}
-			continue
-		}
-		addrs, err := net.LookupHost(host)
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ip := net.ParseIP(a)
-			if ip == nil || ip.To4() != nil || seen[ip.String()] {
-				continue
-			}
-			seen[ip.String()] = true
-			ips = append(ips, ip.String())
-		}
-	}
-	return ips
-}
-
-// isIPv6Literal reports whether ip (already a parsed, resolved address string
-// — as reserve()'s dedup set holds) is IPv6. Used to route an exclusion
-// through addExclusionRoutes or its V6 counterpart (issue #117).
-func isIPv6Literal(ip string) bool {
-	parsed := net.ParseIP(ip)
-	return parsed != nil && parsed.To4() == nil
-}
-
-// hostOf extracts the host from "host:port", "scheme:host:port" (STUN/TURN
-// URL forms like "stun:1.2.3.4:3478"), or a bracketed IPv6 "[::1]:port".
-// Returns "" if it can't parse one out.
-func hostOf(endpoint string) string {
-	s := endpoint
-	switch {
-	case strings.HasPrefix(s, "["):
-		// A bracketed IPv6 host:port ("[2001:db8::1]:443") also has 2+ colons
-		// but no scheme to strip — net.SplitHostPort below already understands
-		// the bracket form directly, so it must be left untouched here rather
-		// than falling into the scheme-stripping branch, which would slice
-		// into the address itself at its first colon.
-	case strings.Contains(s, "://"):
-		s = s[strings.Index(s, "://")+3:]
-	case strings.Count(s, ":") >= 2:
-		// "stun:host:port" — drop the leading scheme.
-		s = s[strings.Index(s, ":")+1:]
-	}
-	host, _, err := net.SplitHostPort(s)
-	if err != nil {
-		return ""
-	}
-	return host
-}
-
 // addExclusionRoutes routes each prefix via the real default gateway
 // (bypassing the tunnel's split-default override) so traffic to it keeps
 // flowing over the physical interface instead of looping into the TUN
@@ -281,9 +156,9 @@ func hostOf(endpoint string) string {
 // destination-based split tunnelling (splittunnel.go) also has whole bypass
 // CIDRs to exclude. Used unconditionally for the control-plane endpoints, and
 // for the bypass/include set specifically in split-tunnel "exclude" mode.
-func addExclusionRoutes(prefixes []string, gw gatewayInfo) {
+func (o *winOS) addExclusionRoutes(prefixes []string, gw gatewayInfo) {
 	for _, p := range prefixes {
-		_, _ = runPS(fmt.Sprintf(
+		_, _ = o.runPS(fmt.Sprintf(
 			`New-NetRoute -DestinationPrefix "%s" -NextHop "%s" -InterfaceIndex %d -RouteMetric 1 -ErrorAction Stop | Out-Null`,
 			ensureCIDR(p), gw.nextHop, gw.ifIndex))
 	}
@@ -295,12 +170,12 @@ func addExclusionRoutes(prefixes []string, gw gatewayInfo) {
 // exclusion via, which is safe: physical IPv6 is disabled while the tunnel is
 // up regardless (disablePhysicalIPv6), so an unexcluded IPv6 dial fails
 // closed rather than leaking.
-func addExclusionRoutesV6(prefixes []string, gw gatewayInfo) {
+func (o *winOS) addExclusionRoutesV6(prefixes []string, gw gatewayInfo) {
 	if gw.nextHopV6 == "" {
 		return
 	}
 	for _, p := range prefixes {
-		_, _ = runPS(fmt.Sprintf(
+		_, _ = o.runPS(fmt.Sprintf(
 			`New-NetRoute -DestinationPrefix "%s" -NextHop "%s" -InterfaceIndex %d -RouteMetric 1 -ErrorAction Stop | Out-Null`,
 			ensureCIDR(p), gw.nextHopV6, gw.ifIndex))
 	}
@@ -315,9 +190,9 @@ func addExclusionRoutesV6(prefixes []string, gw gatewayInfo) {
 // follow the untouched physical default straight past the tunnel. Requires
 // the tun adapter to already exist (New-NetIPAddress/CreateTUN), unlike
 // addExclusionRoutes which only needs the physical gateway.
-func addInclusionRoutes(prefixes []string, tunNextHop string) {
+func (o *winOS) addInclusionRoutes(prefixes []string, tunNextHop string) {
 	for _, p := range prefixes {
-		_, _ = runPS(fmt.Sprintf(
+		_, _ = o.runPS(fmt.Sprintf(
 			`New-NetRoute -InterfaceAlias "%s" -DestinationPrefix "%s" -NextHop "%s" -RouteMetric 1 -ErrorAction Stop | Out-Null`,
 			tunAdapterName, ensureCIDR(p), tunNextHop))
 	}
@@ -347,31 +222,28 @@ func addInclusionRoutes(prefixes []string, tunNextHop string) {
 // another program independently created to the same destination would be
 // removed too. Pre-existing behavior (unchanged by the rename here), not
 // specific to include mode.
-func removeRoutes(prefixes []string) {
+func (o *winOS) removeRoutes(prefixes []string) {
 	for _, p := range prefixes {
-		_, _ = runPS(fmt.Sprintf(
+		_, _ = o.runPS(fmt.Sprintf(
 			`Remove-NetRoute -DestinationPrefix "%s" -Confirm:$false -ErrorAction SilentlyContinue`, ensureCIDR(p)))
 	}
 }
 
-// ensureCIDR normalizes s to a CIDR prefix: a bare IP address becomes a host
-// route — /32 for IPv4, /128 for a bare IPv6 literal (issue #117), since
-// removeRoutes is family-agnostic and now also reaps IPv6 exclusions
-// (poolroutes.go) through this same helper. A value that already has a "/" (a
-// real CIDR) passes through unchanged.
-func ensureCIDR(s string) string {
-	if strings.Contains(s, "/") {
-		return s
+// createTUN brings up the wintun adapter. The error text names elevation
+// because that is overwhelmingly the reason this fails in the field, and
+// parity item 7 turns on it: a client that cannot create the device must say
+// so, not degrade silently to unprotected.
+func (o *winOS) createTUN() (tun.Device, error) {
+	dev, err := tun.CreateTUN(tunAdapterName, 0)
+	if err != nil {
+		return nil, fmt.Errorf("create wintun adapter (run bacchus.exe as Administrator?): %w", err)
 	}
-	if ip := net.ParseIP(s); ip != nil && ip.To4() == nil {
-		return s + "/128"
-	}
-	return s + "/32"
+	return dev, nil
 }
 
 // configureTunInterface assigns addr/prefixLen to the tunnel adapter.
-func configureTunInterface(addr string, prefixLen int) error {
-	if _, err := runPS(fmt.Sprintf(
+func (o *winOS) configureTunInterface(addr string, prefixLen int) error {
+	if _, err := o.runPS(fmt.Sprintf(
 		`New-NetIPAddress -InterfaceAlias "%s" -IPAddress "%s" -PrefixLength %d -ErrorAction Stop | Out-Null`,
 		tunAdapterName, addr, prefixLen)); err != nil {
 		return fmt.Errorf("assign tunnel address: %w", err)
@@ -389,9 +261,9 @@ func configureTunInterface(addr string, prefixLen int) error {
 // via addInclusionRoutes instead, so the real default route stays authoritative
 // for everything else. Calling this in include mode is exactly the bug #64
 // fixed: it would recapture every "direct" dial straight back into the tunnel.
-func addSplitDefaultRoute(addr string) error {
+func (o *winOS) addSplitDefaultRoute(addr string) error {
 	for _, prefix := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-		if _, err := runPS(fmt.Sprintf(
+		if _, err := o.runPS(fmt.Sprintf(
 			`New-NetRoute -InterfaceAlias "%s" -DestinationPrefix "%s" -NextHop "%s" -ErrorAction Stop | Out-Null`,
 			tunAdapterName, prefix, addr)); err != nil {
 			return fmt.Errorf("add split-default route %s: %w", prefix, err)
@@ -403,12 +275,12 @@ func addSplitDefaultRoute(addr string) error {
 // disablePhysicalIPv6 turns off the IPv6 binding on the given physical
 // adapter so nothing can leak out over IPv6 while the tunnel (IPv4-only in
 // this pass) is up.
-func disablePhysicalIPv6(ifAlias string) {
-	_, _ = runPS(fmt.Sprintf(
+func (o *winOS) disablePhysicalIPv6(ifAlias string) {
+	_, _ = o.runPS(fmt.Sprintf(
 		`Disable-NetAdapterBinding -InterfaceAlias "%s" -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue`, ifAlias))
 }
 
-func enablePhysicalIPv6(ifAlias string) {
-	_, _ = runPS(fmt.Sprintf(
+func (o *winOS) enablePhysicalIPv6(ifAlias string) {
+	_, _ = o.runPS(fmt.Sprintf(
 		`Enable-NetAdapterBinding -InterfaceAlias "%s" -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue`, ifAlias))
 }

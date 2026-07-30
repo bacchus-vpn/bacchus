@@ -39,7 +39,7 @@
 // Crash recovery: the prior DefaultOutboundAction is stashed in a marker
 // firewall rule's Description so it survives our death. recoverKillSwitch,
 // run at startup, undoes a lockdown left behind by a crashed session.
-package main
+package enforcement
 
 import (
 	"fmt"
@@ -86,12 +86,12 @@ func killSwitchAllowIPs(control, bypass []string) []string {
 // enableKillSwitch installs the allowlist and flips the outbound default to
 // Block. control is the set of control-plane IPs already excluded from the
 // tunnel route; bypass is the configured split-tunnel bypass list.
-func enableKillSwitch(control, bypass []string) error {
+func (o *winOS) enableKillSwitch(control, bypass []string) error {
 	// Clear any stale lockdown first (e.g. a prior crash) so we start clean
 	// and capture a true prior state rather than our own leftover Block.
-	recoverKillSwitch()
+	o.recoverKillSwitch()
 
-	prior, err := readDefaultOutboundActions()
+	prior, err := o.readDefaultOutboundActions()
 	if err != nil {
 		return fmt.Errorf("kill-switch: read firewall state: %w", err)
 	}
@@ -100,24 +100,24 @@ func enableKillSwitch(control, bypass []string) error {
 	armed := false
 	defer func() {
 		if !armed {
-			removeKillSwitchRules()
+			o.removeKillSwitchRules()
 		}
 	}()
 
 	// Allow rules (evaluated because the default action becomes Block).
-	if _, err := runPS(fmt.Sprintf(
+	if _, err := o.runPS(fmt.Sprintf(
 		`New-NetFirewallRule -DisplayName "Bacchus-Allow-Tunnel" -Group "%s" -Direction Outbound -Action Allow -InterfaceAlias "%s" -ErrorAction Stop | Out-Null`,
 		fwGroup, tunAdapterName)); err != nil {
 		return fmt.Errorf("kill-switch: allow tunnel adapter: %w", err)
 	}
 	allow := killSwitchAllowIPs(control, bypass)
-	if _, err := runPS(fmt.Sprintf(
+	if _, err := o.runPS(fmt.Sprintf(
 		`New-NetFirewallRule -DisplayName "%s" -Group "%s" -Direction Outbound -Action Allow -RemoteAddress %s -ErrorAction Stop | Out-Null`,
 		fwAllowRemotesName, fwGroup, psStringArray(allow))); err != nil {
 		return fmt.Errorf("kill-switch: allow remotes: %w", err)
 	}
 	// Keep the DHCP lease alive so the physical link doesn't drop from under us.
-	if _, err := runPS(fmt.Sprintf(
+	if _, err := o.runPS(fmt.Sprintf(
 		`New-NetFirewallRule -DisplayName "Bacchus-Allow-DHCP" -Group "%s" -Direction Outbound -Action Allow -Protocol UDP -RemotePort 67 -LocalPort 68 -ErrorAction Stop | Out-Null`,
 		fwGroup)); err != nil {
 		return fmt.Errorf("kill-switch: allow dhcp: %w", err)
@@ -125,13 +125,13 @@ func enableKillSwitch(control, bypass []string) error {
 
 	// Marker rule: its presence means "we flipped the default action", and its
 	// Description carries the prior state so a crashed session can be restored.
-	if _, err := runPS(fmt.Sprintf(
+	if _, err := o.runPS(fmt.Sprintf(
 		`New-NetFirewallRule -DisplayName "%s" -Group "%s" -Direction Outbound -Action Allow -Enabled False -RemoteAddress 127.0.0.1 -Description "%s" -ErrorAction Stop | Out-Null`,
 		fwMarkerName, fwGroup, prior)); err != nil {
 		return fmt.Errorf("kill-switch: write marker: %w", err)
 	}
 
-	if _, err := runPS(`Set-NetFirewallProfile -All -DefaultOutboundAction Block -ErrorAction Stop`); err != nil {
+	if _, err := o.runPS(`Set-NetFirewallProfile -All -DefaultOutboundAction Block -ErrorAction Stop`); err != nil {
 		return fmt.Errorf("kill-switch: set default block: %w", err)
 	}
 	armed = true
@@ -140,28 +140,28 @@ func enableKillSwitch(control, bypass []string) error {
 
 // disableKillSwitch restores the prior outbound default and removes the
 // allowlist. Safe to call even if the kill-switch is not currently armed.
-func disableKillSwitch() {
-	prior := readMarkerPriorState()
+func (o *winOS) disableKillSwitch() {
+	prior := o.readMarkerPriorState()
 	if prior != "" {
-		restoreDefaultOutboundActions(prior)
+		o.restoreDefaultOutboundActions(prior)
 	}
-	removeKillSwitchRules()
+	o.removeKillSwitchRules()
 }
 
 // recoverKillSwitch undoes a lockdown left behind by a crashed prior session.
 // Called at startup and again defensively before arming. Idempotent: a no-op
 // when no marker is present.
-func recoverKillSwitch() {
-	prior := readMarkerPriorState()
+func (o *winOS) recoverKillSwitch() {
+	prior := o.readMarkerPriorState()
 	if prior == "" {
 		return
 	}
-	restoreDefaultOutboundActions(prior)
-	removeKillSwitchRules()
+	o.restoreDefaultOutboundActions(prior)
+	o.removeKillSwitchRules()
 }
 
-func removeKillSwitchRules() {
-	_, _ = runPS(fmt.Sprintf(
+func (o *winOS) removeKillSwitchRules() {
+	_, _ = o.runPS(fmt.Sprintf(
 		`Remove-NetFirewallRule -Group "%s" -ErrorAction SilentlyContinue`, fwGroup))
 }
 
@@ -179,8 +179,8 @@ func removeKillSwitchRules() {
 // connection racing the gap is blocked, not leaked. Best-effort throughout —
 // if the rule can't be read (e.g. the kill-switch isn't armed), this is a
 // silent no-op rather than an error the caller has to handle.
-func refreshKillSwitchAllowIP(ip string) {
-	current, err := runPS(fmt.Sprintf(
+func (o *winOS) refreshKillSwitchAllowIP(ip string) {
+	current, err := o.runPS(fmt.Sprintf(
 		`(Get-NetFirewallRule -DisplayName "%s" -ErrorAction Stop |
 			Get-NetFirewallAddressFilter -ErrorAction Stop).RemoteAddress -join ","`,
 		fwAllowRemotesName))
@@ -188,28 +188,28 @@ func refreshKillSwitchAllowIP(ip string) {
 		return
 	}
 	allow := append(strings.Split(current, ","), ip)
-	_, _ = runPS(fmt.Sprintf(`Remove-NetFirewallRule -DisplayName "%s" -ErrorAction SilentlyContinue`, fwAllowRemotesName))
-	_, _ = runPS(fmt.Sprintf(
+	_, _ = o.runPS(fmt.Sprintf(`Remove-NetFirewallRule -DisplayName "%s" -ErrorAction SilentlyContinue`, fwAllowRemotesName))
+	_, _ = o.runPS(fmt.Sprintf(
 		`New-NetFirewallRule -DisplayName "%s" -Group "%s" -Direction Outbound -Action Allow -RemoteAddress %s -ErrorAction SilentlyContinue | Out-Null`,
 		fwAllowRemotesName, fwGroup, psStringArray(allow)))
 }
 
 // readDefaultOutboundActions returns the current per-profile outbound default
 // as "Domain=Allow;Private=Allow;Public=NotConfigured".
-func readDefaultOutboundActions() (string, error) {
-	return runPS(`((Get-NetFirewallProfile -All | Sort-Object Name |
+func (o *winOS) readDefaultOutboundActions() (string, error) {
+	return o.runPS(`((Get-NetFirewallProfile -All | Sort-Object Name |
 		ForEach-Object { "$($_.Name)=$($_.DefaultOutboundAction)" }) -join ";")`)
 }
 
 // restoreDefaultOutboundActions applies a state string produced by
 // readDefaultOutboundActions, one profile at a time.
-func restoreDefaultOutboundActions(state string) {
+func (o *winOS) restoreDefaultOutboundActions(state string) {
 	for _, part := range strings.Split(state, ";") {
 		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
 		if len(kv) != 2 || kv[0] == "" || kv[1] == "" {
 			continue
 		}
-		_, _ = runPS(fmt.Sprintf(
+		_, _ = o.runPS(fmt.Sprintf(
 			`Set-NetFirewallProfile -Name %s -DefaultOutboundAction %s -ErrorAction SilentlyContinue`,
 			kv[0], kv[1]))
 	}
@@ -217,8 +217,8 @@ func restoreDefaultOutboundActions(state string) {
 
 // readMarkerPriorState returns the prior-state string stashed in the marker
 // rule's Description, or "" if no marker exists.
-func readMarkerPriorState() string {
-	out, err := runPS(fmt.Sprintf(
+func (o *winOS) readMarkerPriorState() string {
+	out, err := o.runPS(fmt.Sprintf(
 		`$r = Get-NetFirewallRule -DisplayName "%s" -ErrorAction SilentlyContinue
 		if ($r) { $r.Description } else { "" }`, fwMarkerName))
 	if err != nil {
