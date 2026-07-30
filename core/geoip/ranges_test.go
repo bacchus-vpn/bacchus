@@ -25,10 +25,17 @@ import (
 //     bleeds by one address is a failure and not a rounding.
 //   - `nl` in lower case, because the loader must canonicalize (Canonical) rather than
 //     store whatever the file said.
-//   - Two rows that must become GAPS rather than answers: a ZZ row and upstream's `None`
-//     marker. See ccUnattributed.
+//   - THREE rows that must become GAPS rather than answers: a ZZ row, upstream's `None`
+//     marker, and a row whose country column is EMPTY. See ccUnattributed — upstream
+//     encodes unattributed space all three ways, and issue #91 was the third one being
+//     read as a missing field rather than an empty one.
 //   - One IPv6 row, which belongs to the other family and must be skipped rather than
 //     filed into the v4 table where it would corrupt the sort.
+//
+// The empty-country rows below end in a TAB with nothing after it, exactly as upstream
+// writes them. That trailing tab is the whole of #91 and it is invisible on the page, so
+// do not "tidy" it away: an editor that strips trailing whitespace turns these into
+// two-field rows and the fixture stops covering the case it exists for.
 const rangesV4 = `# Synthetic IP-to-Country fixture — issue #61.
 # Documentation address space only (RFC 5737 / RFC 3849).
 
@@ -39,11 +46,13 @@ const rangesV4 = `# Synthetic IP-to-Country fixture — issue #61.
 198.51.100.0	198.51.100.255	ZZ
 192.0.2.200	192.0.2.209	RU
 203.0.113.200	203.0.113.255	None
+192.0.2.220	192.0.2.229	
 192.0.2.128	192.0.2.191	GB
 `
 
 const rangesV6 = `2001:db8::	2001:db8::ffff	NL
 2001:db8:1::	2001:db8:1::ffff	RU
+2001:db8:3::	2001:db8:3::ffff	
 `
 
 // stageRanges writes a range-format database directory and returns its path.
@@ -105,6 +114,8 @@ func TestLoadRangesResolvesAndRespectsBoundaries(t *testing.T) {
 		{"203.0.113.128", ""},    // one above FR's last address
 		{"198.51.100.9", ""},     // the ZZ row must be a gap, not an answer
 		{"203.0.113.250", ""},    // the `None` row must be a gap, not an answer
+		{"192.0.2.225", ""},      // the EMPTY-country row must be a gap too (issue #91)
+		{"2001:db8:3::5", ""},    // and in the v6 family, which is where upstream writes them
 		{"2001:db8:dead::1", ""}, // the v6 row that sat in the v4 file was never loaded
 		{"2001:db8:2::1", ""},    // v6 gap
 	} {
@@ -124,13 +135,71 @@ func TestLoadRangesResolvesAndRespectsBoundaries(t *testing.T) {
 		}
 	}
 
-	// Five attributed rows load; the ZZ row, the `None` row and the v6 row in the v4
-	// file are the three skips.
+	// Five attributed v4 rows and two v6 ones load. The five skips are all three ways
+	// upstream spells "no country" — a ZZ row, a `None` row and an empty column in each
+	// family — plus the v6 row that sat in the v4 file.
 	if v4, v6 := db.Len(); v4 != 5 || v6 != 2 {
 		t.Errorf("Len = %d, %d; want 5, 2", v4, v6)
 	}
-	if db.Skipped != 3 {
-		t.Errorf("Skipped = %d; want 3 (a ZZ row, a None row, and a v6 row in the v4 file)", db.Skipped)
+	if db.Skipped != 5 {
+		t.Errorf("Skipped = %d; want 5 (a ZZ row, a None row, an empty-country row in each family, and a v6 row in the v4 file)", db.Skipped)
+	}
+}
+
+// TestLoadRangesReadsUpstreamsEmptyCountryColumn is issue #91, pinned on its own because
+// the fixture above can be broken invisibly: the rows it covers this with end in a tab,
+// and an editor that strips trailing whitespace would silently turn them into two-field
+// rows that this loader is SUPPOSED to refuse. Written out as an explicit \t here, it
+// cannot be tidied away by accident.
+//
+// The failure it guards against is total, not partial. Upstream's published v6 table
+// carries thousands of these rows, so a loader that refuses them refuses the whole file
+// and the coordinator will not start at all — which is what made `-geoip` unusable in
+// production with the v6 family staged, and left every node's country self-reported.
+func TestLoadRangesReadsUpstreamsEmptyCountryColumn(t *testing.T) {
+	// Exactly upstream's shape: three tab-separated columns, the third empty.
+	const body = "192.0.2.0\t192.0.2.63\tNL\n" +
+		"198.51.100.0\t198.51.100.255\t\n" +
+		"203.0.113.0\t203.0.113.127\tFR\n"
+
+	db, err := LoadDir(stageRanges(t, body, ""))
+	if err != nil {
+		t.Fatalf("LoadDir refused a file carrying upstream's empty country column: %v", err)
+	}
+	// A gap, not an answer, and not a pseudo-country: an address in unattributed space
+	// must fall back to the node's own hint rather than resolve confidently to nothing.
+	if cc, ok := db.Lookup(netip.MustParseAddr("198.51.100.9")); ok {
+		t.Errorf("Lookup = %q, true; want unresolved — an empty country column is an absence, not a country", cc)
+	}
+	// The rows on either side still load, so this is not "the file was accepted and
+	// mostly discarded".
+	for ip, want := range map[string]string{"192.0.2.10": "NL", "203.0.113.10": "FR"} {
+		if cc, ok := db.Lookup(netip.MustParseAddr(ip)); !ok || cc != want {
+			t.Errorf("Lookup(%s) = %q, %v; want %q, true", ip, cc, ok, want)
+		}
+	}
+	if db.Skipped != 1 {
+		t.Errorf("Skipped = %d; want 1 — the empty-country row is counted as skipped, exactly as a ZZ row is", db.Skipped)
+	}
+}
+
+// TestLoadRangesRequiresTabSeparatedColumns is the other half of #91's fix, and it is
+// what stops the fix being read as a loosening. Splitting on the tab rather than on runs
+// of whitespace is STRICTER: a space-separated row used to be re-joined into three valid
+// fields and loaded, and now fails the count.
+//
+// That direction matters because the whole reason this loader is strict is the
+// silent-partial-load failure — a file in a shape upstream does not publish is a file
+// that is not what it should be, and reading it leniently would attribute ranges from
+// something that is not the country table.
+func TestLoadRangesRequiresTabSeparatedColumns(t *testing.T) {
+	spaced := "192.0.2.0 192.0.2.63 NL\n"
+	_, err := LoadDir(stageRanges(t, spaced, ""))
+	if err == nil {
+		t.Fatal("LoadRanges accepted a space-separated row; the format is tab-separated and anything else is a different file")
+	}
+	if !strings.Contains(err.Error(), "line 1") {
+		t.Errorf("error %q does not name the offending line", err)
 	}
 }
 

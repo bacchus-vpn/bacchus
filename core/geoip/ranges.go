@@ -38,6 +38,13 @@ const (
 // The result would be a confident wrong answer in exactly the case where the honest
 // answer is "no idea". An absence is represented as a gap, which resolves to unknown and
 // lets the caller fall back.
+//
+// Upstream encodes that absence THREE ways, not one: this code, the markers `None` and
+// `Unknown`, and — in the v6 file only — an empty country column. Canonical maps all but
+// this one to "", so the constant covers the case Canonical cannot: a well-formed code
+// that means "no answer". The empty column is what issue #91 was: it reached the loader
+// as a MISSING FIELD rather than as an empty one and was refused as structural damage,
+// which is why readRanges splits on the tab rather than on runs of whitespace.
 const ccUnattributed = "ZZ"
 
 // LoadRanges reads a database from iptoasn.com's IP-to-Country range files. Either path
@@ -79,6 +86,21 @@ func LoadRanges(rangesV4Path, rangesV6Path string) (*DB, error) {
 // upstream publishes the IP-to-ASN files from the same page, in the same shape, with five
 // columns. Staged under a country filename, every row of one fails here on line 1 with the
 // count named, rather than loading with the AS number read as a country code.
+//
+// # Why the split is on the tab and not on whitespace
+//
+// Issue #91: an unattributed row in the v6 file leaves the country column EMPTY rather
+// than writing ZZ, and splitting on runs of whitespace cannot tell an empty third column
+// from a missing one — the row arrives as two fields and is refused as structural damage.
+// That is the wrong branch for it. Upstream's own v6 table carries thousands of those
+// rows, so the loader refused the published file outright and no amount of staging could
+// produce one it would accept.
+//
+// The format is tab-separated, so splitting on the tab is what actually reads it, and it
+// is STRICTER than splitting on whitespace rather than looser: a row whose columns are
+// space-separated, or one carrying an extra tab, now fails the count instead of being
+// silently re-joined into three fields. Each field is trimmed afterwards, which is what
+// keeps a CRLF file and a trailing-space row working.
 func readRanges(r io.Reader, is func(netip.Addr) bool) (out []block, skipped int, err error) {
 	sc := bufio.NewScanner(r)
 	// Upstream rows are short, but a scanner that stops at the default 64 KiB limit
@@ -91,12 +113,19 @@ func readRanges(r io.Reader, is func(netip.Addr) bool) (out []block, skipped int
 		if i := strings.IndexByte(text, '#'); i >= 0 {
 			text = text[:i]
 		}
-		if text = strings.TrimSpace(text); text == "" {
+		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		fields := strings.Fields(text)
+		// Split on the tab, not on whitespace, so an EMPTY country column stays a third
+		// field and reaches Canonical as the absence it is. text is deliberately not
+		// trimmed first: trimming would eat the trailing tab such a row ends with, which
+		// is the whole of issue #91. Each field is trimmed below instead.
+		fields := strings.Split(text, "\t")
 		if len(fields) != 3 {
 			return nil, 0, fmt.Errorf("line %d: want `range_start range_end country_code`, got %d field(s)", line, len(fields))
+		}
+		for i := range fields {
+			fields[i] = strings.TrimSpace(fields[i])
 		}
 		lo, err := netip.ParseAddr(fields[0])
 		if err != nil {
