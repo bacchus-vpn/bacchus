@@ -7,6 +7,17 @@ a wintun TUN adapter — not just the browser.
 
 > v0 — rebuilt properly later (code-signing).
 
+> **Where the routing code lives.** As of bacchus#59 the whole OS enforcement
+> layer — TUN device, routes, kill-switch, split tunnelling, the netstack
+> bridge — lives in `clients/internal/enforcement` behind
+> `enforcement.Enforcer`, not in this package. This client calls it; so does
+> `clients/fyne`. One implementation, two callers: a fix to the routing or the
+> kill-switch is a fix to both clients at once.
+>
+> This client is **not** deprecated and has not changed behaviour. ADR-0039's
+> 2026-07-30 amendment records the parity bar Fyne now meets on Windows, which
+> makes retirement a decision the owner can take — it does not take it.
+
 ## What it does
 - Tray menu: **status · selected country · Refresh countries · country list ·
   Connect · Disconnect · Connection settings… · Show invite QR… · Quit**.
@@ -16,11 +27,12 @@ a wintun TUN adapter — not just the browser.
   coordinator assigns the exit inside it — issue #146; forced through the
   TURN relay, see "Why TURN-only" below) and starts it in-process;
   drives UI state from `core.Event`s. Once the tunnel's SOCKS5 server is up,
-  brings up a wintun adapter + userspace netstack (`tun2socks.go`) and
-  reroutes the device's default route through it (`routes.go`), excluding the
+  brings up a wintun adapter + userspace netstack and
+  reroutes the device's default route through it, excluding the
   coordinator/STUN/TURN endpoints so the tunnel's own signalling doesn't loop
   into itself. Disables IPv6 on the physical adapter for the duration, then
-  arms the **fail-closed kill-switch** (`killswitch.go`).
+  arms the **fail-closed kill-switch**. All of that lives in
+  `clients/internal/enforcement` (see below), not in this package.
 - **Disconnect / Quit** → lifts the kill-switch, tears the tunnel down
   (restores routing + IPv6), cancels the engine's context, and stops it.
 
@@ -85,7 +97,8 @@ how reality's underlay is kept leak-safe here in
   the way the known TURN server is; instead it's excluded from the tunnel's
   route (and allow-listed under the kill-switch) on the dial path, just before
   the underlay connects, via `Config.OnUnderlayDial` (issue #109 — see
-  `poolroutes.go` and "Why TURN-only" above). That holds on a mid-session
+  `clients/internal/enforcement/poolroutes.go` and "Why TURN-only" above).
+  That holds on a mid-session
   failover too: a re-dial to a different exit excludes its own new address as
   it dials it.
 - **Relay hops** (issue #28) routes your relayed traffic through more than
