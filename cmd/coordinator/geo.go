@@ -15,18 +15,18 @@ import (
 // from every node in the fleet and leave nothing assignable.
 var errNoGeoIPButRequired = errors.New("coordinator: -geoip-required needs -geoip; with no database staged no node would ever get a country and nothing would be assignable")
 
-// minPlausibleBlocks is the fewest prefixes a staged database may hold before this
+// minPlausibleBlocks is the fewest rows a staged database may hold before this
 // coordinator refuses to start with it.
 //
-// It is not a tuning knob. A GeoLite2 Country release carries hundreds of thousands of
-// prefixes per family, so this sits three orders of magnitude below any legitimate
-// staging and exists solely to catch the copy that died in its first moments. It is
-// deliberately NOT set near the real row count: MaxMind's counts move with every
-// publication, and a floor that tracked them would take the coordinator down over an
-// ordinary release.
+// It is not a tuning knob. Either supported release — iptoasn's IP-to-Country files or a
+// GeoLite2 Country CSV — carries hundreds of thousands of rows per family, so this sits
+// three orders of magnitude below any legitimate staging and exists solely to catch the
+// copy that died in its first moments. It is deliberately NOT set near the real row
+// count: both publishers' counts move with every release, and a floor that tracked them
+// would take the coordinator down over an ordinary refresh.
 //
 // It lives here rather than in core/geoip because only this binary knows what it is
-// pointed at — the package is a CSV loader that must stay usable with small fixtures.
+// pointed at — the package is a loader that must stay usable with small fixtures.
 const minPlausibleBlocks = 1000
 
 // Coordinator-derived node country (issue #136, ADR-0042).
@@ -112,20 +112,24 @@ func setupGeoIP(dir string, require bool) error {
 	}
 	geoDB = db
 	v4, v6 := db.Len()
-	log.Printf("geoip: loaded %d IPv4 + %d IPv6 prefixes from %s (%d unusable rows skipped) (issue #136)", v4, v6, dir, db.Skipped)
+	// The source is named because -geoip accepts two formats and the row counts alone do
+	// not say which one was read, so without it this line cannot confirm that the file an
+	// operator staged is the file that loaded (geoip.LoadDir prefers the range format when
+	// a directory holds both).
+	log.Printf("geoip: loaded %d IPv4 + %d IPv6 rows from %s [%s] (%d unusable rows skipped) (issue #136)", v4, v6, dir, db.Source, db.Skipped)
 	if v4+v6 < minPlausibleBlocks {
 		// The loader is scale-free by design and cannot know what size to expect (see
-		// geoip.plausible). This binary can: -geoip points at a GeoLite2 Country
-		// release, which carries hundreds of thousands of prefixes per family. An order
-		// of magnitude under that is a half-copied staging directory, and it fails
-		// silently in the worst way — every node in the missing ranges falls back to
-		// its own self-reported country, which is what #136 exists to stop.
+		// geoip.plausible). This binary can: -geoip points at a published country
+		// release, and both accepted formats carry hundreds of thousands of rows per
+		// family. An order of magnitude under that is a half-copied staging directory,
+		// and it fails silently in the worst way — every node in the missing ranges falls
+		// back to its own self-reported country, which is what #136 exists to stop.
 		//
 		// Fatal rather than a warning, for the same reason an unloadable database is:
 		// an operator who passed -geoip asked for derived countries, and running with a
 		// table too small to derive them leaves the property they asked for quietly
 		// absent.
-		return fmt.Errorf("coordinator: the geoip database at %s holds only %d prefixes, far below the ~10^5 a GeoLite2 Country release carries — the staging directory looks truncated or incomplete; restage it (issue #136)", dir, v4+v6)
+		return fmt.Errorf("coordinator: the geoip database at %s holds only %d rows, far below the ~10^5 a published country release carries — the staging directory looks truncated or incomplete; restage it (issue #136)", dir, v4+v6)
 	}
 	if db.Stale {
 		// Not fatal: a stale table still resolves most of the address space, and

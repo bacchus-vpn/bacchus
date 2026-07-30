@@ -97,6 +97,7 @@ package core
 
 import (
 	"container/list"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -111,6 +112,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core/asn"
@@ -129,21 +131,91 @@ import (
 // snapshot, not race any particular TTL.
 const relayDirReloadInterval = 5 * time.Minute
 
+// forwardDialTimeout is how long a forwarding hop waits for its own outbound dial
+// to the next hop (relayForward). It is named rather than inline because it is the
+// number the CLIENT's per-layer budget is derived from: the one thing layer i+1's
+// handshake legitimately waits on is hop i completing this dial.
+const forwardDialTimeout = 10 * time.Second
+
+// chainLayerTimeout is the default budget for ONE layer of a telescoping dial
+// (issue #24) — the value newEngine puts in Engine.chainLayerTimeout, which is
+// where dialChain reads it so a test can shrink it.
+//
+// # Why a chained dial has to bound itself
+//
+// A dead hop is not the hard case: the hop before it gives up on its own dial after
+// forwardDialTimeout and drops the circuit, so the client sees a broken layer within
+// ~10s without anything here. The hard case is a hop that ACCEPTS the TCP connection
+// and then answers nothing — a wedged process, an ingress port since taken over by
+// something that is not a Bacchus node, a middlebox that completes handshakes it
+// does not carry. Then hop i-1's dial succeeds, the splice is set up, and the
+// client's layer-i handshake blocks on a read that will never return.
+//
+// Nothing else in the path stops that. clientHandshake carries no deadline (core/
+// e2e.go), noiseConn carries none either, and the callers disagree about whether
+// they impose one: the pool's validateSession does, handleSocksConnect's context
+// bounds only OpenStream, and core/udprelay.go's ASSOCIATE path is the same. So the
+// bound belongs in dialChain, where it also gets the one thing an outer deadline
+// cannot give — which LAYER was in flight when it fired, and therefore which hop to
+// hold responsible.
+//
+// # Why it is per layer and not one budget for the dial
+//
+// Each layer waits on exactly one thing: the hop before it dialing the hop after it,
+// bounded by forwardDialTimeout, plus a couple of round trips. So a per-layer budget
+// of forwardDialTimeout plus slack is a statement about one hop, and a layer that
+// overruns it has overrun something attributable. One shared budget for the whole
+// dial is not: a legitimately slow early layer would spend it and get a perfectly
+// healthy later hop blamed and cooled, which is precisely the misattribution the
+// cooling memory must not accumulate.
+//
+// The cost of that choice is that the worst case multiplies by depth (four layers,
+// four budgets). It is bounded and it is the right trade: a chain in which every
+// layer runs to its budget is dying anyway, every caller that imposes its own
+// deadline still cuts it shorter, and the alternative buys a smaller number by
+// cooling the wrong nodes.
+const chainLayerTimeout = forwardDialTimeout + 5*time.Second
+
+// chainRebuildMax is how many times one data-path dial will discard its chain and
+// build a fresh one before giving up (issue #24, ADR-0038 §5).
+//
+// It is the bound the issue asks for, and the case it exists for is a directory that
+// is chronically too short for the configured depth: there, every rebuild returns
+// substantially the hops the last one did, each dial fails the same way, and without
+// a ceiling the loop is infinite. buildChain's own errChainTooShort does not close
+// that — a directory with just enough hops to BUILD a chain and not enough to build
+// a DIFFERENT one succeeds at every rebuild and fails at every dial.
+//
+// Two, for the same reason countryAttempts is two (core/pool.go): each attempt
+// spends a full telescoping dial serially inside one caller, so a larger number
+// trades the responsiveness of failing over to another candidate for diminishing
+// returns. Two rebuilds cover the common case — one dead hop, and one more in case
+// the replacement is dead too — and leave the rest to the failover machinery that
+// exists for it.
+const chainRebuildMax = 2
+
 // Chain-construction failures. All of them fail the path rather than shortening
 // the chain (see the file doc): each names a distinct reason the requested depth
 // could not be honoured, so an operator can tell "my directory is too small" from
 // "my directory does not list my exit."
 var (
-	errNoRelayDirectory = errors.New("core: relay chaining needs a signed relay directory (Config.RelayDirectory)")
-	errChainTooShort    = errors.New("core: not enough distinct relay hops in the directory for the requested chain depth")
-	errChainNoExit      = errors.New("core: the signed directory names no exit to terminate the chain at")
-	errChainNoTURN      = errors.New("core: a chained path needs an assigned peer relay; the coordinator offered only the TURN fallback")
-	errChainRelayIsHop  = errors.New("core: the assigned peer relay is also a hop in this chain, which would put one node at both ends of it")
-	errHopNotInMesh     = errors.New("core: onion forward target is not a node in the signed directory")
-	errHopSelfDial      = errors.New("core: onion forward target is this node itself")
-	errForwardDisabled  = errors.New("core: this node does not forward onion layers")
-	errForwardPeerBusy  = errors.New("core: this hop is already carrying its per-previous-hop limit of forwarded circuits")
-	errForwardNodeBusy  = errors.New("core: this hop is already carrying its aggregate limit of forwarded circuits")
+	errNoRelayDirectory  = errors.New("core: relay chaining needs a signed relay directory (Config.RelayDirectory)")
+	errChainTooShort     = errors.New("core: not enough distinct relay hops in the directory for the requested chain depth")
+	errChainNoExit       = errors.New("core: the signed directory names no exit to terminate the chain at")
+	errChainNoTURN       = errors.New("core: a chained path needs an assigned peer relay; the coordinator offered only the TURN fallback")
+	errChainRelayIsHop   = errors.New("core: the assigned peer relay is also a hop in this chain, which would put one node at both ends of it")
+	errChainNoPinnedHead = errors.New("core: the chain's head is no longer a node in the signed directory, so a rebuild over this session cannot reach it")
+	errHopNotInMesh      = errors.New("core: onion forward target is not a node in the signed directory")
+	errHopSelfDial       = errors.New("core: onion forward target is this node itself")
+	errForwardDisabled   = errors.New("core: this node does not forward onion layers")
+	errForwardPeerBusy   = errors.New("core: this hop is already carrying its per-previous-hop limit of forwarded circuits")
+	errForwardNodeBusy   = errors.New("core: this hop is already carrying its aggregate limit of forwarded circuits")
+
+	// errChainHopStalled is a hop that took the layer and then said nothing —
+	// distinct from every error above, all of which are somebody's decision or a
+	// broken connection. See stallGuard and chainLayerTimeout for why a chained
+	// dial has to name this case itself rather than wait for a caller's deadline.
+	errChainHopStalled = errors.New("core: chain hop accepted the layer and then answered nothing within its budget")
 )
 
 // relayHop is one node a chain can peel a layer at: its X25519 static key (the
@@ -608,6 +680,16 @@ type chainPlan struct {
 	exitID  string
 	exitPub []byte // exitID decoded — the innermost layer's PeerStatic
 	exitDia string // the address the LAST hop dials to reach the exit
+
+	// country is the egress country this plan was selected for, carried so a REBUILD
+	// (issue #24) can reproduce the selection rather than guess at it. The country a
+	// chain was built for lives in three different places depending on which path
+	// built it — a pool candidate's Country, the single-transport Engine's
+	// connectCountry — and by the time a hop dies the caller that knew it is long
+	// gone, since a rebuild is driven from a data-path dial and not from a connect.
+	// So the plan remembers what it was asked for. Like exitID it never reaches a
+	// wire; a chained connect deliberately omits the country field (see connectReq).
+	country string
 }
 
 // firstHopID is what the client puts in connect{firstHop} to be wired to the head
@@ -661,6 +743,29 @@ func (e *Engine) chainFor(mode, country string) (*chainPlan, error) {
 // excluded from the hop candidate set (a chain that doubles back through its own
 // exit hides nothing), and no node is used twice.
 func (e *Engine) buildChain(n int, country string) (*chainPlan, error) {
+	return e.buildChainHeaded(n, country, "")
+}
+
+// buildChainHeaded is buildChain with the chain's head optionally PINNED to the node
+// id pinHead — which is what a rebuild over a live session needs (issue #24).
+//
+// The head cannot be re-chosen without a new session, and that is structural rather
+// than conservative. A chain's head is the node the coordinator paired this client
+// with, named in connect{firstHop}; the session's streams are accepted by that node's
+// exitTerminate and layer 1's Noise_NK runs against that node's static key. A
+// "rebuild" that picked a different head would hand layer 1 a key nobody in the path
+// holds, so every stream over the session would fail authentication — a worse outcome
+// than the dead hop it was trying to route around. So a rebuild keeps the head and
+// re-chooses everything behind it; replacing the head itself is the failover
+// machinery's job, and dialChainedStream escalates to it rather than trying here.
+//
+// Reusing the head is NOT the in-place repair ADR-0038 §5 forbids. The circuit is
+// discarded whole: a fresh stream, a fresh Noise_NK to the head as well, fresh hops
+// behind it, and a freshly chosen terminating exit. Nothing is spliced onto anything
+// that was already standing, and no downstream layer is re-keyed — which is the
+// property §5 is about. The head being the same NODE is a selection outcome forced by
+// the session, not a surviving piece of the broken circuit.
+func (e *Engine) buildChainHeaded(n int, country, pinHead string) (*chainPlan, error) {
 	// Loaded ONCE and threaded through the rest of this call (rather than each
 	// helper re-reading e.relayDir itself) so one chain build sees a single,
 	// self-consistent directory generation even if a reload (issue #27) lands
@@ -672,14 +777,30 @@ func (e *Engine) buildChain(n int, country string) (*chainPlan, error) {
 	if d == nil {
 		return nil, errNoRelayDirectory
 	}
-	exit, err := e.chooseChainExit(d, country)
+	// Prefer nodes this client has not just watched fail (issue #24). The avoidance
+	// is a PREFERENCE, not a filter, and the fall-back below is the whole reason it
+	// is one: cooling is a liveness bet, and losing a liveness bet must not become an
+	// outage. A directory small enough that every alternative is cooling would
+	// otherwise stop producing chains at all, turning one hop's bad minute into a
+	// client that cannot connect — while reusing a cooling hop costs at worst the
+	// dial that proves it is still down.
+	//
+	// This is deliberately NOT the fail-closed rule at the top of this file. That rule
+	// is about never silently handing the user a WEAKER path than they configured: a
+	// shorter chain, an unchained path, a depth quietly clamped. A chain of the full
+	// requested depth, with full diversity, that happens to include a node which
+	// failed a minute ago is exactly as strong as the user asked for. It is only less
+	// likely to work, and it says so.
+	got, err := selectChain(d, n, country, pinHead, e.hopCooling)
 	if err != nil {
-		return nil, err
+		relaxed, ferr := selectChain(d, n, country, pinHead, nil)
+		if ferr != nil {
+			return nil, err // report the strict attempt: the fallback's error adds nothing
+		}
+		e.emit(EventInfo, "", "relay chain (%d hops): every alternative node is cooling after a recent failure, so this chain reuses one rather than refusing to connect", n)
+		got = relaxed
 	}
-	hops, div, err := selectHops(d.hops, n-1, exit.id, d.as)
-	if err != nil {
-		return nil, err
-	}
+	exit, hops, div := got.exit, got.hops, got.div
 	// Say so when the chain is weaker than its depth implies. A fallback nobody can
 	// see is indistinguishable from the control working, which is the failure mode
 	// #23 names — so the degradation is REPORTED, not just permitted.
@@ -708,7 +829,60 @@ func (e *Engine) buildChain(n int, country string) (*chainPlan, error) {
 		exitID:  exit.id,
 		exitPub: exit.pub,
 		exitDia: d.exitAddr[exit.id],
+		country: country,
 	}, nil
+}
+
+// chainChoice is one attempt at the two independent selections a chain needs — a
+// terminating exit and the hops that reach it — kept together so buildChainHeaded can
+// run the whole selection twice (once avoiding cooling nodes, once not) without
+// interleaving the two halves' fallbacks.
+type chainChoice struct {
+	exit relayHop
+	hops []relayHop
+	div  hopDiversity
+}
+
+// selectChain picks a terminating exit in country and the n-1 peeling hops that reach
+// it, skipping every node avoid reports as cooling.
+//
+// The two selections share one avoid predicate because a chain is only as live as its
+// weakest member: rebuilding around a dead HOP onto the exit that was already refusing
+// to answer would spend a whole telescoping dial to fail in the same place. avoid is
+// nil for "consider everything", which is both the pre-#24 behaviour and the relaxed
+// rung buildChainHeaded falls back to.
+//
+// pinHead survives avoid unconditionally. A pinned head is not a candidate being
+// chosen — the session already terminates at it — so a cooling mark on it has nothing
+// to act on here; the caller that pinned it is the one that has to decide whether to
+// keep the session at all.
+func selectChain(d *relayDirectory, n int, country, pinHead string, avoid func(string) bool) (chainChoice, error) {
+	exit, err := chooseChainExitAvoiding(d, country, avoid)
+	if err != nil {
+		return chainChoice{}, err
+	}
+	hops, div, err := selectHopsHeaded(hopsAvoiding(d.hops, avoid, pinHead), n-1, exit.id, pinHead, d.as)
+	if err != nil {
+		return chainChoice{}, err
+	}
+	return chainChoice{exit: exit, hops: hops, div: div}, nil
+}
+
+// hopsAvoiding drops the candidates avoid reports as cooling, always keeping pinHead.
+// A nil avoid returns cand itself — no copy, no allocation — because that is the path
+// every non-rebuilding client took before issue #24 and it should stay exactly as
+// cheap as it was.
+func hopsAvoiding(cand []relayHop, avoid func(string) bool, pinHead string) []relayHop {
+	if avoid == nil {
+		return cand
+	}
+	out := make([]relayHop, 0, len(cand))
+	for _, h := range cand {
+		if h.id == pinHead || !avoid(h.id) {
+			out = append(out, h)
+		}
+	}
+	return out
 }
 
 // chooseChainExit picks the chain's terminating exit at random from the signed
@@ -725,11 +899,24 @@ func (e *Engine) buildChain(n int, country string) (*chainPlan, error) {
 // terminating exit must be reached where it terminates end-to-end channels (its
 // advertised address), not at a forwarding ingress it might also publish.
 func (e *Engine) chooseChainExit(d *relayDirectory, country string) (relayHop, error) {
+	return chooseChainExitAvoiding(d, country, nil)
+}
+
+// chooseChainExitAvoiding is chooseChainExit skipping every exit avoid reports as
+// cooling (issue #24). A nil avoid is chooseChainExit exactly.
+//
+// It is a plain function rather than a method because it reads nothing off the engine
+// — the avoid predicate is passed in — which is what lets selectChain run it twice
+// under two different predicates without either call being able to observe the other.
+func chooseChainExitAvoiding(d *relayDirectory, country string, avoid func(string) bool) (relayHop, error) {
 	cand := d.exitsIn(country)
 	// An exit whose advertised address the directory does not carry cannot be
 	// reached by the last hop, so it is not a candidate however well it matches.
 	usable := cand[:0:0]
 	for _, h := range cand {
+		if avoid != nil && avoid(h.id) {
+			continue
+		}
 		if d.exitAddr[h.id] != "" {
 			usable = append(usable, h)
 		}
@@ -855,6 +1042,21 @@ func (e *Engine) chooseChainExit(d *relayDirectory, country string) (relayHop, e
 // The first hop gets one extra constraint: it must be pairable (exit-registered),
 // because it is reached by being named in connect{firstHop}.
 func selectHops(cand []relayHop, want int, excludeID string, lookup asn.Lookup) ([]relayHop, hopDiversity, error) {
+	return selectHopsHeaded(cand, want, excludeID, "", lookup)
+}
+
+// selectHopsHeaded is selectHops with the head PINNED to the node id pinHead instead
+// of chosen (issue #24). Everything the doc above says about the fill, the diversity
+// ladder and the unknown-AS pool applies unchanged; the only difference is which
+// candidate lands at position 0.
+//
+// A rebuild over a live session needs this because the head is not the client's to
+// choose any more — the coordinator already paired the session to it, and layer 1's
+// Noise_NK runs against that node's key. See buildChainHeaded. An absent pinHead is
+// errChainNoPinnedHead rather than a fall back to choosing one: a rebuild that quietly
+// re-headed the chain would produce a plan every stream authenticates against the
+// wrong key, which looks like a hostile hop rather than like the stale directory it is.
+func selectHopsHeaded(cand []relayHop, want int, excludeID, pinHead string, lookup asn.Lookup) ([]relayHop, hopDiversity, error) {
 	if want <= 0 {
 		return nil, hopDiversity{}, nil
 	}
@@ -903,12 +1105,22 @@ func selectHops(cand []relayHop, want int, excludeID string, lookup asn.Lookup) 
 		}
 	}
 	for _, h := range pool {
+		if pinHead != "" {
+			if h.id == pinHead {
+				take(h)
+				break
+			}
+			continue
+		}
 		if h.pairable {
 			take(h)
 			break
 		}
 	}
 	if len(out) == 0 {
+		if pinHead != "" {
+			return nil, hopDiversity{}, fmt.Errorf("%w: %s", errChainNoPinnedHead, shortID(pinHead))
+		}
 		return nil, hopDiversity{}, fmt.Errorf("%w: no directory entry can head a chain (the head must be one the coordinator can pair a client to)", errChainTooShort)
 	}
 
@@ -1145,9 +1357,16 @@ func addrPort(a net.Addr) int {
 // mechanisms and the whole SOCKS path unchanged: they already move Sessions
 // around, and the embedded interface forwards every method, so a chained session
 // is a Session everywhere that does not specifically ask.
+// The plan is an atomic.Pointer rather than a plain field because a chain can be
+// REBUILT under a live session (issue #24): a hop dying downstream of the head does
+// not drop the session, so the fix is a fresh chain over the same session, and every
+// stream opened after it must see the new one. The same shape relayDirectory's own
+// hot-swap uses (core/engine.go's relayDir), for the same reason — every *chainPlan a
+// Load can return is immutable, so the only new invariant is that WHICH immutable
+// plan a session hands out can change during its life.
 type chainedSession struct {
 	Session
-	plan *chainPlan
+	plan atomic.Pointer[chainPlan]
 }
 
 // withChain tags sess with plan, or returns sess untouched when there is no chain
@@ -1156,18 +1375,189 @@ func withChain(sess Session, plan *chainPlan) Session {
 	if plan == nil {
 		return sess
 	}
-	return &chainedSession{Session: sess, plan: plan}
+	cs := &chainedSession{Session: sess}
+	cs.plan.Store(plan)
+	return cs
 }
 
-// planOf recovers the chain a session was paired with, or nil for an ordinary
-// unchained session (every session today). Read at the point an end-to-end
-// channel is opened, so a failover that swaps the session underneath a listener
-// also swaps the chain, with no separate bookkeeping to keep in step.
+// planOf recovers the chain a session is currently paired with, or nil for an
+// ordinary unchained session (every session at the default depth). Read at the point
+// an end-to-end channel is opened, so a failover that swaps the session underneath a
+// listener also swaps the chain — and so a rebuild (swapPlan) is picked up by every
+// later stream — with no separate bookkeeping to keep in step.
 func planOf(sess Session) *chainPlan {
 	if cs, ok := sess.(*chainedSession); ok {
-		return cs.plan
+		return cs.plan.Load()
 	}
 	return nil
+}
+
+// swapPlan installs fresh as sess's chain, but only if old is still the one it is
+// carrying. It reports whether it won.
+//
+// The compare is what keeps a single hop death from causing one rebuild per
+// concurrent stream. A browser opens several connections at once; when a hop dies
+// they all fail within milliseconds of each other, and each would otherwise select a
+// fresh chain and stamp it on the session, so the last writer's chain wins and the
+// rest of the work — including the directory reads and the crypto/rand draws — was
+// spent for nothing. With the compare, the first one to finish installs its chain and
+// the others find their own attempt stale, drop it, and retry over the chain that is
+// now there. Losing is the normal, correct outcome, which is why the caller does not
+// treat false as a failure.
+func swapPlan(sess Session, old, fresh *chainPlan) bool {
+	cs, ok := sess.(*chainedSession)
+	if !ok {
+		return false
+	}
+	return cs.plan.CompareAndSwap(old, fresh)
+}
+
+// ---------- client side: chain liveness (issue #24) ----------
+
+// stallGuard closes a stream if the layer being negotiated over it has not finished
+// within its budget, and remembers that it did so — which is how a chained dial tells
+// a hop that answered WRONG from a hop that did not answer at all.
+//
+// Closing is the only lever available. clientHandshake is blocked in a read on the
+// stream and neither it nor noiseConn carries a deadline (core/e2e.go), so the read
+// has to be broken from outside; this is the same mechanism the pool's validateSession
+// already uses to bound its probe, applied per layer.
+//
+// stop() and the timer callback serialize on one mutex, which is what makes the
+// success path safe: a guard stopped before the timer runs can never close the
+// connection the caller just built, and a timer already past the lock has set fired,
+// so stop reports the stall instead of pretending the handshake merely errored.
+type stallGuard struct {
+	mu      sync.Mutex
+	rw      io.Closer
+	timer   *time.Timer
+	fired   bool
+	stopped bool
+}
+
+// newStallGuard arms a guard over rw for d. A non-positive d disarms it entirely
+// (nothing is closed, stop always reports false), which is how a test asks for the
+// unbounded pre-#24 behaviour and how an engine literal with no configured budget
+// behaves rather than closing streams instantly.
+func newStallGuard(rw io.Closer, d time.Duration) *stallGuard {
+	g := &stallGuard{rw: rw}
+	if d <= 0 {
+		return g
+	}
+	g.timer = time.AfterFunc(d, func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if g.stopped {
+			return
+		}
+		g.fired = true
+		_ = g.rw.Close()
+	})
+	return g
+}
+
+// stop disarms the guard and reports whether it had already fired — i.e. whether the
+// failure the caller is about to classify is this guard's doing.
+func (g *stallGuard) stop() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.stopped = true
+	if g.timer != nil {
+		g.timer.Stop()
+	}
+	return g.fired
+}
+
+// chainFault says WHY a telescoping dial failed, in the only terms the recovery
+// decision needs. The four are genuinely different situations and conflating any two
+// of them produces a wrong response:
+//
+//   - hopDead / hopStalled are liveness. A fresh chain can route around them.
+//   - hopRefused is a hop that is up and declining (ADR-0038 §6 occupancy caps). Also
+//     worth routing around — a different chain will not be refused by a node it does
+//     not contain — but the node itself is fine and should be come back to, which is
+//     what an EXPIRING cooling mark says and a removal would not.
+//   - hopRejected is admission verification failing (#26/#60). NOT liveness, and
+//     deliberately not recoverable — see chainDialError.recoverable.
+type chainFault int
+
+const (
+	hopDead     chainFault = iota // the layer broke: no answer, or a broken stream
+	hopStalled                    // the layer was taken and then went silent past its budget
+	hopRefused                    // the hop sealed a refusal: it is up and said no
+	hopRejected                   // the hop or exit failed its admission check
+)
+
+// chainDialError is a failed telescoping dial, carrying the two things a caller needs
+// in order to do anything about it: WHICH node to hold responsible, and whether a
+// fresh chain is a legitimate response.
+//
+// It wraps the error dialChain already produced rather than replacing it, so every
+// existing reader keeps working unchanged — the message is byte-identical, errors.As
+// still reaches *hopRefusedError, errors.Is still reaches the sentinels.
+type chainDialError struct {
+	// hop is the 1-based index of the SUSPECT within plan.hops, matching the number
+	// the message prints. len(plan.hops)+1 means the terminating exit. 1 means the
+	// head, which is the one position a rebuild cannot move (buildChainHeaded).
+	hop int
+	of  int // len(plan.hops)
+
+	// suspect is the node id to cool. It is empty only when the plan did not carry one
+	// (a hand-built plan with no exitID), never for a hop.
+	suspect string
+
+	fault chainFault
+	err   error
+}
+
+func (e *chainDialError) Error() string { return e.err.Error() }
+func (e *chainDialError) Unwrap() error { return e.err }
+
+// atHead reports whether the suspect is the chain's head — the node the session itself
+// terminates at, which no rebuild over that session can replace.
+func (e *chainDialError) atHead() bool { return e.hop == 1 }
+
+// recoverable reports whether discarding this chain and building a fresh one is a
+// legitimate response to this failure.
+//
+// Everything except hopRejected is. hopRejected is excluded on purpose, and the
+// exclusion is the security half of this change: issue #26 decided that a hop whose
+// admission credential fails verification fails the WHOLE chain — "fail-closed, not
+// de-selection" — and set aside retrying with another hop because it needed selection
+// state that did not exist. That state now exists, and reusing it here would quietly
+// reverse that decision, so it does not.
+//
+// The line is worth stating in its own right rather than as deference to a prior
+// issue. A liveness failure means the hop did not answer; rebuilding is recovery. A
+// verification failure means the hop DID answer and was refused by the client's own
+// anchor; rebuilding around it would walk the client hop by hop through a directory
+// looking for one whose credential passes — turning a hard refusal into a search, and
+// giving whoever controls the directory chainRebuildMax attempts per stream to find a
+// hop the client will accept. If per-hop de-selection on a bad credential is ever
+// wanted, it is a decision to take deliberately, in the ADR, and not a side effect of
+// adding a liveness rebuild.
+func (e *chainDialError) recoverable() bool { return e.fault != hopRejected }
+
+// watchVerify wraps an admission verify callback so dialChain learns whether a failed
+// handshake failed BECAUSE of it. The alternative is inspecting the returned error for
+// the admission package's sentinels, which would have to be kept in step with every
+// reason a credential can be rejected — including the ones a future authority format
+// adds. Observing the callback cannot fall out of step: it fires exactly when the
+// check rejects.
+//
+// A nil in (no anchor configured, the fail-open case) stays nil, so a client without a
+// relay anchor hands clientHandshake precisely what it handed it before.
+func watchVerify(in func(cred []byte) error, rejected *bool) func(cred []byte) error {
+	if in == nil {
+		return nil
+	}
+	return func(cred []byte) error {
+		if err := in(cred); err != nil {
+			*rejected = true
+			return err
+		}
+		return nil
+	}
 }
 
 // ---------- client side: the telescoping dial ----------
@@ -1241,6 +1631,7 @@ func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target strin
 	}
 
 	cur := raw
+	nHops := len(plan.hops)
 	for i, h := range plan.hops {
 		// Each hop is told only where to send the next layer: the hop after it, or —
 		// for the last one — the exit. It is never told the destination, the client,
@@ -1259,7 +1650,14 @@ func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target strin
 		// so it is reported against that hop and not against the one whose handshake
 		// happened to be in flight when it arrived.
 		sn := newRefusalSniffer(cur)
-		nc, err := clientHandshake(sn, h.pub, hopTargetPrefix+next, hopVerifyFunc(hv, h.pub))
+		// Bound this one layer and remember whether the bound is what ended it (issue
+		// #24). The guard closes cur, which is the stream this layer is negotiated over,
+		// so a hop that took the layer and went silent breaks the read instead of
+		// parking this goroutine for the process's lifetime.
+		var rejected bool
+		guard := newStallGuard(cur, e.chainLayerTimeout)
+		nc, err := clientHandshake(sn, h.pub, hopTargetPrefix+next, watchVerify(hopVerifyFunc(hv, h.pub), &rejected))
+		stalled := guard.stop()
 		if err != nil {
 			if cur != raw {
 				_ = cur.Close()
@@ -1267,10 +1665,17 @@ func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target strin
 			if i > 0 {
 				if reason, ok := sn.refusal(); ok {
 					prev := plan.hops[i-1]
-					return nil, fmt.Errorf("core: chain hop %d/%d: %w", i, len(plan.hops), &hopRefusedError{hop: shortID(prev.id), reason: reason})
+					return nil, &chainDialError{
+						hop: i, of: nHops, suspect: prev.id, fault: hopRefused,
+						err: fmt.Errorf("core: chain hop %d/%d: %w", i, nHops, &hopRefusedError{hop: shortID(prev.id), reason: reason}),
+					}
 				}
 			}
-			return nil, fmt.Errorf("core: chain hop %d/%d (%s): %w", i+1, len(plan.hops), shortID(h.id), err)
+			fault, cause := classifyLayer(err, stalled, rejected)
+			return nil, &chainDialError{
+				hop: i + 1, of: nHops, suspect: h.id, fault: fault,
+				err: fmt.Errorf("core: chain hop %d/%d (%s): %w", i+1, nHops, shortID(h.id), cause),
+			}
 		}
 		cur = nc
 	}
@@ -1278,20 +1683,230 @@ func (e *Engine) dialChain(raw io.ReadWriteCloser, plan *chainPlan, target strin
 	// layer the LAST hop's refusal surfaces on, since that hop's channel is what
 	// this one is dialed over.
 	sn := newRefusalSniffer(cur)
-	nc, err := clientHandshake(sn, plan.exitPub, target, e.exitVerifyFunc(plan.exitPub))
+	var rejected bool
+	guard := newStallGuard(cur, e.chainLayerTimeout)
+	nc, err := clientHandshake(sn, plan.exitPub, target, watchVerify(e.exitVerifyFunc(plan.exitPub), &rejected))
+	stalled := guard.stop()
 	if err != nil {
 		if cur != raw {
 			_ = cur.Close()
 		}
-		if len(plan.hops) > 0 {
+		if nHops > 0 {
 			if reason, ok := sn.refusal(); ok {
-				last := plan.hops[len(plan.hops)-1]
-				return nil, fmt.Errorf("core: chain hop %d/%d: %w", len(plan.hops), len(plan.hops), &hopRefusedError{hop: shortID(last.id), reason: reason})
+				last := plan.hops[nHops-1]
+				return nil, &chainDialError{
+					hop: nHops, of: nHops, suspect: last.id, fault: hopRefused,
+					err: fmt.Errorf("core: chain hop %d/%d: %w", nHops, nHops, &hopRefusedError{hop: shortID(last.id), reason: reason}),
+				}
 			}
 		}
-		return nil, fmt.Errorf("core: chain exit layer: %w", err)
+		fault, cause := classifyLayer(err, stalled, rejected)
+		// The exit sits one past the last hop, so hop == of+1 is "the terminator", and
+		// plan.exitID is the node to hold responsible rather than any hop — every hop
+		// before it demonstrably carried its own layer to completion.
+		return nil, &chainDialError{
+			hop: nHops + 1, of: nHops, suspect: plan.exitID, fault: fault,
+			err: fmt.Errorf("core: chain exit layer: %w", cause),
+		}
 	}
 	return nc, nil
+}
+
+// classifyLayer names why one layer failed and what to report as its cause.
+//
+// The precedence is deliberate. A rejection is checked first because it is the one
+// answer that is not about reachability at all: the hop replied, on time, and the
+// client's own anchor turned it down — so a rejection that happened to race the
+// layer's budget must still read as a rejection, or #26's fail-closed refusal would
+// become a rebuild the moment a slow network made it look like a stall.
+//
+// A stall substitutes errChainHopStalled for the underlying error, which by then says
+// only that a closed connection was read — true, unhelpful, and about the guard rather
+// than the hop. The original is kept wrapped inside it so nothing is lost.
+func classifyLayer(err error, stalled, rejected bool) (chainFault, error) {
+	switch {
+	case rejected:
+		return hopRejected, err
+	case stalled:
+		return hopStalled, fmt.Errorf("%w (%v)", errChainHopStalled, err)
+	default:
+		return hopDead, err
+	}
+}
+
+// ---------- client side: rebuilding a chain whose hop died (issue #24) ----------
+
+// chainRecovery is what one failed chained dial licenses the caller to do.
+type chainRecovery int
+
+const (
+	// chainGiveUp: nothing a different chain would fix. Fail the dial.
+	chainGiveUp chainRecovery = iota
+	// chainRebuild: discard this circuit and telescope a fresh one over a new stream.
+	chainRebuild
+	// chainRepath: the suspect is the head, which only a new SESSION can replace, so
+	// this belongs to the failover machinery rather than to a rebuild.
+	chainRepath
+)
+
+// recoveryFor decides what a failed chained dial licenses, and names the node to sink
+// into the cooling memory (issue #24's second requirement).
+//
+// It reports a suspect even when the recovery is chainGiveUp: a rejected credential is
+// not a reason to rebuild, but it is emphatically a reason for the next chain to prefer
+// somebody else, and those are separable decisions. The caller cools first and acts
+// second.
+func recoveryFor(plan *chainPlan, err error) (chainRecovery, string) {
+	var cde *chainDialError
+	if plan == nil || !errors.As(err, &cde) {
+		// Not a chain failure at all — an unchained dial, or a failure from somewhere
+		// above the telescope (a stream that would not open). Nothing to attribute.
+		return chainGiveUp, ""
+	}
+	switch {
+	case !cde.recoverable():
+		return chainGiveUp, cde.suspect
+	case cde.atHead():
+		return chainRepath, cde.suspect
+	default:
+		return chainRebuild, cde.suspect
+	}
+}
+
+// rebuildChain discards prev and selects a whole fresh chain of the same depth, in the
+// same country, behind the same (session-fixed) head — ADR-0038 §5's "a broken circuit
+// is discarded, not spliced," which is why this returns a new plan rather than editing
+// prev.
+//
+// Nothing of prev survives except its head and its depth. In particular the
+// TERMINATING EXIT is re-chosen, not carried over, and that is not incidental: a chain
+// is a path, the exit is on it, and an exit that stopped answering is exactly as much a
+// dead hop as any intermediate one. Re-choosing also keeps the property chooseChainExit
+// exists for — a client that reused its exit across rebuilds would, over a session's
+// life, be a client with a stable exit preference, which is what ADR-0042 §2 removed.
+func (e *Engine) rebuildChain(prev *chainPlan) (*chainPlan, error) {
+	if prev == nil || len(prev.hops) == 0 {
+		return nil, errors.New("core: chain rebuild asked for on a path that carries no chain")
+	}
+	// prev.hops is the n-1 peeling hops of a depth-n chain (the coordinator's
+	// blind-splicing relay is the nth node), so the depth to ask for again is +1.
+	return e.buildChainHeaded(len(prev.hops)+1, prev.country, prev.hops[0].id)
+}
+
+// dialChainedStream opens a transport stream over sess and brings the end-to-end
+// channel up over it — rebuilding the chain, on a fresh stream, when a hop proves dead
+// (issue #24). It is the seam every client data path should reach the exit through.
+//
+// # Why the retry cannot live any lower
+//
+// It needs to open a stream, and that is the whole reason it exists as a separate
+// function rather than as a loop inside dialE2E. ADR-0038 §5 forbids repairing a
+// circuit in place: a broken chain is discarded, not spliced, because splicing a fresh
+// tail onto the layers that are already standing would have to re-key everything
+// downstream and would tell the surviving hops exactly which of their successors died.
+// Discarding the circuit means the outermost handshake is spent, so the stream it was
+// spent on is spent too, and a rebuild needs a new one. dialE2E is handed a stream and
+// cannot make another; this owns the session, so it can.
+//
+// # An unchained session is one call through
+//
+// With no plan on the session — every session at the default hop count — this is
+// OpenStream followed by clientHandshake, once, with no guard armed, no cooling and no
+// rebuild: the same two calls in the same order the callers made before this existed.
+// The chain-aware behaviour is strictly what a chained session adds.
+//
+// # What each outcome does
+//
+//   - A dead or stalled hop, or a hop that refused: cool it, build a FRESH chain behind
+//     the same head, install it on the session so every later stream starts from it,
+//     and retry over a new stream. Bounded by chainRebuildMax.
+//   - The HEAD dead, stalled or refusing: cool it and drop the session. The head is
+//     fixed at pair time (connect{firstHop}), so no rebuild over this session can move
+//     off it, and dropping the session is what hands the problem to the machinery that
+//     can — reconnectLoop (ADR-0030) or the pool's maintainPath (ADR-0028), both of
+//     which re-run chainFor and will now avoid the cooled head. This is the client's
+//     own version of the coordinator's #96 relay-dead nudge, for the node the
+//     coordinator cannot nudge about: reselectDeadRelays only ever covers the assigned
+//     blind relay, and everything past it is the client's to notice.
+//   - An admission rejection: cool the node and fail. See chainDialError.recoverable.
+func (e *Engine) dialChainedStream(ctx context.Context, sess Session, exitPub []byte, target string) (*noiseConn, error) {
+	for attempt := 0; ; attempt++ {
+		plan := planOf(sess)
+		st, err := sess.OpenStream(ctx, e2eLabel)
+		if err != nil {
+			return nil, err
+		}
+		// The caller's context bounds the dial as well as the stream open, which is
+		// what the pool's validateSession used to arrange with a watchdog of its own
+		// and now gets from here: without it a chained dial would be bounded only by
+		// its own per-layer guards, so a caller that budgeted (validation gets
+		// relayTimeout) could be held for depth-many layer budgets past the point it
+		// had given up. On an UNCHAINED path this is new — handleSocksConnect's
+		// context previously bounded only OpenStream — and it is the caller's own
+		// existing budget applied to the handshake it was already meant to cover, not
+		// a new number and not a shorter one.
+		stopWatch := closeOnDone(ctx, st)
+		nc, derr := e.dialE2E(st, plan, exitPub, target)
+		stopWatch()
+		if derr == nil {
+			return nc, nil
+		}
+		_ = st.Close()
+
+		action, suspect := recoveryFor(plan, derr)
+		if suspect != "" {
+			e.markHopCooling(suspect)
+		}
+		switch action {
+		case chainGiveUp:
+			return nil, derr
+		case chainRepath:
+			e.emit(EventError, "", "relay chain: head hop %s is not carrying layers (%v) — only a new session can replace the head, so dropping this path", shortID(suspect), derr)
+			_ = sess.Close() // idempotent; the failover loops re-establish off Closed()
+			return nil, derr
+		}
+		if attempt >= chainRebuildMax {
+			// Said out loud rather than folded into the dial error, because "the chain
+			// was rebuilt twice and still failed" and "the chain failed" are different
+			// operational stories and only the first one says the directory is too small
+			// to route around its own failures.
+			e.emit(EventError, "", "relay chain: gave up after %d rebuild(s) — hop %s failed and the directory could not supply a chain that avoids the failures seen so far (%v)", chainRebuildMax, shortID(suspect), derr)
+			return nil, derr
+		}
+		fresh, rerr := e.rebuildChain(plan)
+		if rerr != nil {
+			e.emit(EventError, "", "relay chain: hop %s failed and no fresh chain could be built to replace it: %v", shortID(suspect), rerr)
+			return nil, derr
+		}
+		// Losing the swap is the ordinary outcome when several streams failed together;
+		// the next iteration reads whichever chain won and dials over that one.
+		if swapPlan(sess, plan, fresh) {
+			e.emit(EventInfo, "", "relay chain: hop %s failed — discarded the circuit and built a fresh %d-hop chain to exit %s", shortID(suspect), len(fresh.hops)+1, shortID(fresh.exitID))
+		}
+	}
+}
+
+// closeOnDone closes c when ctx is done, until the returned stop is called. It is the
+// same bound the pool's validateSession has always put around its probe, factored out
+// so a chained dial can carry it too: neither clientHandshake nor noiseConn honours a
+// context, so a caller's deadline can only be applied by closing what is being read.
+//
+// stop is safe to call more than once and always returns promptly; the goroutine exits
+// on whichever of the two fires first.
+func closeOnDone(ctx context.Context, c io.Closer) (stop func()) {
+	if ctx == nil || ctx.Done() == nil {
+		return func() {}
+	}
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.Close()
+		case <-done:
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // ---------- a hop's refusal, said out loud to the client ----------
@@ -1824,7 +2439,7 @@ func (e *Engine) relayForward(nc *noiseConn, next string) {
 			e.emit(EventInfo, "", "onion: forwarding for %s is back under its limits after turning away %d circuit(s)", peerLabel(peer), refused)
 		}
 	}()
-	up, err := net.DialTimeout("tcp", next, 10*time.Second)
+	up, err := net.DialTimeout("tcp", next, forwardDialTimeout)
 	if err != nil {
 		e.emit(EventError, "", "onion: dial next hop %s: %v", next, err)
 		return

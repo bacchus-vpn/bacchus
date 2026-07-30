@@ -542,6 +542,22 @@ type Engine struct {
 	candCoolMu  sync.Mutex                        // guards candidate health memory
 	candCooling map[selection.Candidate]time.Time // candidate -> last failed attempt
 
+	// Chain-node health memory (issue #24), client role. A relay chain's hops and its
+	// terminating exit are nodes, not selection.Candidates, so they cannot live in
+	// candCooling above; markHopCooling records one that failed to carry a layer and
+	// hop selection prefers somebody else while the mark is warm. Deliberately a
+	// parallel map rather than a widened candCooling — see markHopCooling for the
+	// three reasons. Nil on a node with no client role, which never selects hops.
+	hopCoolMu sync.Mutex           // guards hopCool
+	hopCool   map[string]time.Time // node id -> last layer it failed to carry
+
+	// chainLayerTimeout bounds ONE layer of a telescoping chain dial (issue #24).
+	// A field rather than the constant so a test can shrink it, exactly as
+	// crlReloadInterval and reselectBackoff are; newEngine sets it from
+	// chainLayerTimeout. Zero disarms the bound, which is what an Engine literal
+	// built by hand gets — see dialChain's stall guards.
+	chainLayerTimeout time.Duration
+
 	poolMu        sync.Mutex // guards the active pooled session, its exit key, and socksBound
 	activeSess    Session    // session new SOCKS connections use; swapped on failover
 	activeExitPub []byte     // the active session's exit static key
@@ -1107,6 +1123,11 @@ func newEngine(cfg Config, roles map[string]bool, exitKey noise.DHKey) (*Engine,
 		// Config.AdmissionCRLPath is set, in which case Start uses it as
 		// reloadCRLLoop's ticker interval.
 		crlReloadInterval: admissionCRLReloadInterval,
+		// Chain liveness + rebuild (issue #24): the per-node failure memory hop
+		// selection consults, and the budget one LAYER of a telescoping dial gets —
+		// per layer and not per dial, see chainLayerTimeout for why.
+		hopCool:           map[string]time.Time{},
+		chainLayerTimeout: chainLayerTimeout,
 		stop:              make(chan struct{}),
 		done:              make(chan struct{}),
 	}

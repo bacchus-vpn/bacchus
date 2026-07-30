@@ -806,3 +806,191 @@ require reopening any decision recorded above.
 Still deferred: chain liveness + rebuild (§9 item 6); IP-derived AS diversity;
 NAT-traversed intermediate hops; coordinator-independent relay identity (#190). This
 change is **Part of #76** and does not close it.
+
+## Amendment (issue #24, 2026-07-30): chain liveness — a dead hop is discarded and the chain rebuilt
+
+§9 item 6, named as still-deferred in every amendment above and described at the head of
+the issue #27 amendment as "a hop *dying mid-session*", now ships. This is the last of
+this record's implementation children.
+
+No new decision is taken here, which is why this is an amendment and not ADR-0049.
+Decision 5 already settled the policy — "a broken circuit is discarded, not spliced" —
+and §9 item 6 already named the shape: client-side detection, a full rebuild, bounded
+retry. What follows is that decision built, plus four sub-decisions the issue text left
+open, each of which is a consequence of a decision already recorded above rather than a
+replacement for one.
+
+### What was actually broken, which is not what "detected only as a stall" suggests
+
+The pre-#24 story was that a dead hop surfaced as an end-to-end stall and recovered
+through the ADR-0028 sustained-flow probe or the ADR-0030 reconnect. Only the first half
+was true. Neither mechanism could fire:
+
+- **ADR-0030's `reconnectLoop` and ADR-0028's `maintainPath` both wait on
+  `sess.Closed()`, and the session does not close.** A chained session terminates at the
+  chain's HEAD (`connect{firstHop}`); a hop dying *behind* the head leaves the
+  client↔head transport perfectly healthy. So the failover machinery never woke up.
+- **The sustained-flow probe runs at selection time only.** It proves a chain carried
+  bytes when the pool committed to it, and says nothing about the chain an hour later.
+
+What actually happened was worse than a stall: the plan was fixed on the session for its
+lifetime, and a chain is telescoped per STREAM (`dialE2E`), so every subsequent SOCKS
+connection re-dialed the same dead hop and failed identically, indefinitely, over a
+session nothing had any reason to drop. The coordinator could not help, exactly as the
+issue says: `reselectDeadRelays` (#96/#105) only ever covers the assigned blind relay,
+and by construction the coordinator does not know which nodes are in the chain past the
+first.
+
+### 1. Detection is per layer, inside `dialChain`, and it names the hop
+
+`dialChain` now arms a per-layer guard (`stallGuard`, budget `chainLayerTimeout`) and
+returns a `*chainDialError` carrying which hop to hold responsible and why
+(`hopDead`/`hopStalled`/`hopRefused`/`hopRejected`).
+
+The bound is needed for one specific failure and not for the obvious one. A hop that is
+simply *gone* was already bounded: the hop before it gives up its own forward dial after
+`forwardDialTimeout` and drops the circuit. The unbounded case is a hop that **accepts
+the TCP connection and then answers nothing** — a wedged process, an ingress port since
+taken over by something that is not a Bacchus node, a middlebox that completes
+handshakes it does not carry. Then the upstream dial succeeds, the splice stands, and
+the client's layer handshake blocks on a read that never returns: `clientHandshake` and
+`noiseConn` carry no deadline, and the callers disagreed about imposing one (the pool's
+`validateSession` did; `handleSocksConnect` bounded only `OpenStream`; so did
+`core/udprelay.go`'s ASSOCIATE path).
+
+Per layer rather than one budget for the whole dial, because each layer waits on exactly
+one thing — the hop before it completing one outbound dial — so an overrun is
+attributable. One shared budget is not: a legitimately slow early layer would spend it
+and get a healthy later hop blamed and cooled, which is precisely the misattribution a
+cooling memory must not accumulate. The cost is that the worst case multiplies by depth;
+that is bounded, every caller's own deadline still cuts it shorter, and the alternative
+buys a smaller number by cooling the wrong nodes.
+
+Attribution rule, stated because it is a judgement and not a lookup: **the suspect is the
+hop whose own layer did not complete.** Every hop before it demonstrably carried its
+layer to completion, so it is alive. The one exception is a sealed refusal (issue #25),
+which identifies its author explicitly and is therefore attributed to the *previous* hop
+— the one that decided — and not to the layer that was in flight when it arrived.
+
+### 2. The rebuild lives where streams are opened, because §5 leaves it nowhere else
+
+`dialChainedStream` (`core/relaychain.go`) opens the stream, telescopes over it, and on a
+liveness failure cools the suspect, builds a **fresh** chain, installs it on the session,
+and retries over a **new** stream. `handleSocksConnect` and the pool's `validateSession`
+now reach the exit through it. It also applies the caller's context to the handshake and
+not merely to `OpenStream` — which is what `validateSession` already arranged with a
+watchdog of its own, and which `handleSocksConnect` lacked; on an unchained path that is
+the caller's existing 15s budget covering the handshake it was always meant to cover, not
+a new bound and not a shorter one.
+
+That placement is forced by decision 5, not chosen for convenience. Repairing in place —
+splicing a replacement hop onto the layers already standing — would have to re-key every
+downstream layer and would tell the surviving hops which of their successors died. So the
+circuit is discarded whole; the outermost handshake is spent, therefore the stream it was
+spent on is spent too, and a rebuild needs a new one. `dialE2E` is handed a stream and
+cannot make another, so the retry cannot live there.
+
+**Reusing the head is not in-place repair.** A rebuild keeps `hops[0]` and re-chooses
+everything behind it, including the terminating exit. The head is not the client's to
+re-choose: the coordinator paired the session to that node and layer 1's Noise_NK runs
+against its static key, so a re-headed plan would hand layer 1 a key nobody in the path
+holds and every stream would fail authentication — a worse outcome than the dead hop.
+Nothing of the broken circuit survives; the head being the same NODE is a selection
+outcome the session forces, and the ADR-0038 §5 property (no re-keying, no leak of which
+hop died) holds unchanged.
+
+**A dead HEAD escalates instead of rebuilding.** Rebuilding behind it cannot move off it,
+so the client cools it and drops the session, which hands the problem to the machinery
+that *can* replace a head: `reconnectLoop` / `maintainPath` re-run `chainFor`, and the
+cooled head is now avoided. This is the client's own version of the coordinator's #96
+relay-dead nudge, for the one node the coordinator cannot nudge about.
+
+### 3. Failed hops sink into a parallel cooling memory, not a widened `candCooling`
+
+The issue asked for failed hops to go into "the existing cooling/health memory". That
+memory (`markCandidateCooling`/`candidateCooling`, `core/pool.go`) is keyed by
+`selection.Candidate` — a transport, a country and a mode — and cannot hold a hop. This
+ships `markHopCooling`/`hopCooling`, a parallel map in the same style, for three reasons
+rather than as a shortcut:
+
+1. **Different keys.** Widening one map to hold both means `map[any]time.Time`, which
+   accepts anything and loses the compile-time guarantee that only candidates reach the
+   candidate memory.
+2. **Different meanings.** A cooling *candidate* is sunk to the back of its tier and
+   still raced; a cooling *hop* is skipped when the directory can spare it, because a
+   chain either contains a node or it does not — there is no back of the tier for a hop.
+3. **Different lifetimes, for reasons specific to each.** `candCooldown` (30s) waits out
+   a censor's interference; `hopCooldown` (5 min) waits out a volunteer machine
+   restarting, saturating, or drifting off the directory.
+
+What the two share is the shape, and that is kept: an expiring mark under its own lock,
+read through a predicate the selector calls, never a removal. The expiry is load-bearing
+— a hop that refused because it was full (§6) is a perfectly good hop to come back to.
+
+**Avoidance is a preference, not a filter, and that is not a breach of the fail-closed
+rule.** If every alternative is cooling, selection falls back to reusing one and says so.
+The fail-closed rule forbids silently handing the user a *weaker* path than they
+configured — a shorter chain, an unchained path, a clamped depth. A chain of the full
+requested depth with full diversity that happens to include a node which failed a minute
+ago is exactly as strong as the one they asked for; it is only less likely to work.
+Refusing would turn one hop's bad minute into a client that cannot connect.
+
+A rebuilt chain goes through `buildChainHeaded` like any other, so it is reported by the
+same `hopDiversity.degraded()` notice (#23/#52): a rebuild is not a way to obtain a chain
+that skipped the diversity report and reads as healthy.
+
+### 4. An admission rejection is NOT routed around — #26's decision is not reversed
+
+`chainDialError.recoverable()` excludes `hopRejected`. Issue #26 decided that a hop whose
+admission credential fails verification fails the whole chain — "fail-closed, not
+de-selection" — and set the alternative aside because it needed candidate-exclusion state
+in hop selection that did not exist. This issue builds that state, and deliberately does
+not use it for that.
+
+The line is worth stating on its own merits rather than as deference. A liveness failure
+means the hop did not answer, and rebuilding is recovery. A verification failure means the
+hop *did* answer and the client's own anchor refused it; rebuilding around that would walk
+the client hop by hop through the directory looking for one whose credential passes,
+turning a hard refusal into a search and handing whoever controls the directory
+`chainRebuildMax` attempts per stream. The node is still cooled — declining to rebuild
+*now* and preferring somebody else *next time* are separable, and only the first is #26's
+decision.
+
+### Bounds, and what stops the spin
+
+`chainRebuildMax` (2) caps rebuilds per data-path dial. The case it exists for is not a
+directory too short to build a chain — `errChainTooShort` already refuses that
+synchronously — but a directory with just enough hops to build a chain and not enough to
+build a *different* one: there every rebuild legitimately succeeds and every dial over it
+legitimately fails, and nothing but a ceiling ends it. Two, for the same reason
+`countryAttempts` is two: each attempt spends a full telescoping dial serially inside one
+caller, and beyond that the cross-candidate failover is what should be doing the work.
+The give-up is logged, because "rebuilt twice and still failed" and "failed" are different
+operational stories and only the first says the directory cannot route around its own
+failures.
+
+A second, non-counting bound: a rebuild is only possible while the head is still a node the
+signed directory names (`errChainNoPinnedHead`). A reload (#27) that dropped it leaves
+nothing to pin, and inventing a different head is the authentication failure described
+above.
+
+Concurrent streams that fail together produce **one** rebuild, not one each:
+`chainedSession.plan` became an `atomic.Pointer` (the same hot-swap shape `relayDir`
+already uses) and the install is a compare-and-swap, so the first dial to finish installs
+its chain and the rest dial over that one instead of discarding their own work.
+
+### Honest limit: one client data path does not retry
+
+`core/udprelay.go`'s UDP ASSOCIATE path calls `dialE2E` directly, so it gets the per-layer
+stall bound, the attribution and the cooling — all of which live inside `dialChain` — and
+it picks up a chain rebuilt by any other path, since it reads `planOf(sess)` per
+associate. It does not itself open a second stream and retry. That is a file another lane
+owned in the wave this shipped in, not a design position; moving it onto
+`dialChainedStream` is a one-line change and the natural follow-up. Until then a UDP
+association is the one path where a hop dying is observed and remembered but costs that
+one association.
+
+**Still deferred:** IP-derived AS diversity; NAT-traversed intermediate hops (§9 item 9, a
+tracked non-goal — #30); coordinator-independent relay identity (#190). §9's
+implementation list is otherwise complete. This change is **Part of #76**; it closes #24
+and does not close #76 itself.

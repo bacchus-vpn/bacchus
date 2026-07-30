@@ -66,38 +66,53 @@ lookup is against a **local** file: there is no outbound geo query, which would
 both tell a third party the IP of every node in the network and add a dependency
 on reaching a foreign endpoint from inside a censored network.
 
-The database is **not in this repo** and never will be: it is a licensed MaxMind
-dataset under its own terms, and bulk data besides. Fetch and stage it out of
-band, exactly as the Windows client does with `wintun.dll`.
+The database is **not in this repo**: it is bulk data that would be wrong within
+weeks of any commit. Fetch and stage it out of band, exactly as the Windows
+client does with `wintun.dll`.
 
-**Provenance.** MaxMind *GeoLite2 Country* in the **CSV** distribution (not the
-`.mmdb` binary — the CSV needs no third-party decoder, so the whole parse is
-stdlib-only and auditable, and it is the upstream artifact as published, with no
-conversion step to trust). A free MaxMind account and licence key are required;
-MaxMind publishes updates weekly.
+**Provenance.** iptoasn.com's *IP-to-Country* files, one
+`range_start range_end country_code` row per line, under **PDDL v1.0** — public
+domain, no account, no licence key. It is the same publisher core/asn's table
+comes from (ADR-0044), so one feed covers both datasets.
 
 ```
-# Download GeoLite2-Country-CSV (needs your own MaxMind licence key), then:
-unzip GeoLite2-Country-CSV_*.zip
-mkdir -p /var/lib/bacchus/geoip
-cp GeoLite2-Country-CSV_*/GeoLite2-Country-Locations-en.csv \
-   GeoLite2-Country-CSV_*/GeoLite2-Country-Blocks-IPv4.csv \
-   GeoLite2-Country-CSV_*/GeoLite2-Country-Blocks-IPv6.csv \
-   /var/lib/bacchus/geoip/
+mkdir -p /var/lib/bacchus/geoip && cd /var/lib/bacchus/geoip
+curl -sSfO https://iptoasn.com/data/ip2country-v4.tsv.gz
+curl -sSfO https://iptoasn.com/data/ip2country-v6.tsv.gz
+gunzip -f ip2country-v4.tsv.gz ip2country-v6.tsv.gz
 
 bacchus-coordinator -geoip /var/lib/bacchus/geoip ...
 ```
-Keep MaxMind's own filenames — the loader looks for exactly those. The IPv6
-blocks file is optional; without it, an IPv6-registering node resolves to nothing
-and falls back to its hint, so stage it unless you are certain the fleet is v4
-only. The startup log prints the prefix count **per family**, which is how you
-confirm that.
+Keep upstream's own filenames — the loader looks for exactly those. The IPv6 file
+is optional; without it, an IPv6-registering node resolves to nothing and falls
+back to its hint, so stage it unless you are certain the fleet is v4 only. The
+startup log prints the row count **per family** and names the format it read,
+which is how you confirm both.
 
-Refresh it on MaxMind's cadence. Stale geodata does not fail — it silently
-mislabels a node's country — so the coordinator warns at startup once the staged
-files are more than 90 days old. A database that is configured but unreadable is
-**fatal**: an operator who asked for derived countries must not silently get
-self-reported ones.
+**Why not MaxMind GeoLite2** (issue #61). It works and still loads — see below —
+but downloading it needs a free MaxMind account and licence key, and its terms
+restrict redistribution. That is survivable while one operator runs every
+coordinator, since each host fetches its own. It becomes an onboarding tax the
+moment coordinators federate: every volunteer operator would need their own
+MaxMind account before their coordinator could derive a country at all, and the
+alternative to deriving it is trusting each node's self-report. A licence
+requirement sitting directly upstream of a security property is worth removing
+before anyone depends on it.
+
+A **GeoLite2 Country CSV** staging is still loaded, unchanged, for a deployment
+that already has one: put `GeoLite2-Country-Blocks-IPv4.csv`,
+`-Blocks-IPv6.csv` and `GeoLite2-Country-Locations-en.csv` in the directory
+instead. A directory holding **both** formats loads the range files and ignores
+the CSVs, so migrating is a fetch, a restart, and a check that the startup log
+names `iptoasn ip2country`.
+
+Refresh it on upstream's cadence — it rebuilds hourly, so anything from monthly
+is fine. Stale geodata does not fail; it silently mislabels a node's country, so
+the coordinator warns at startup once the staged files are more than 90 days old.
+A database that is configured but unreadable is **fatal**: an operator who asked
+for derived countries must not silently get self-reported ones. So is one that
+loads fewer than a thousand rows, which is a half-copied directory rather than a
+small release.
 
 `-geoip-required` additionally refuses the `-country` fallback, so no node
 self-report can reach a client's country choice at all. Do **not** use it in a
@@ -131,11 +146,17 @@ beat fetching — a periodic table fetch would be a predictable, fingerprintable
 from every client on a censored network, and the mapping drifts only ~1.3% a month, so
 the accuracy it buys is not worth the surface it costs.
 
-The difference from GeoLite2 is **licence, not size**. MaxMind's terms are not ours to
-redistribute under, so that database is fetched out of band; this table comes from
-iptoasn.com under PDDL v1.0 (public domain, redistribution permitted, no attribution
-required), so it can be committed. See
-[`core/asn/TABLE.md`](../core/asn/TABLE.md) for the full provenance record.
+**Why this table is committed when the country database above is not**, now that both
+come from the same publisher under the same terms — PDDL v1.0, public domain,
+redistribution permitted, no attribution required — so the licence permits committing
+either. What differs is what a commit would buy. The AS table is a **client** input, and
+a client cannot be handed a file: embedding is the only way it arrives, and its staleness
+is bounded by release cadence (below). The country table is a **coordinator** input on an
+operator-run machine that *can* be handed a file, so committing it would buy nothing and
+bake in data that is wrong within weeks. GeoLite2, the other loadable country format,
+could not be committed under any of this reasoning: MaxMind's terms are not ours to
+redistribute under. See [`core/asn/TABLE.md`](../core/asn/TABLE.md) for the full
+provenance record.
 
 **A coordinator still takes a file.** `-asn-table <path>` points the coordinator at a
 staged table for its capacity attestation (`observedAS`, ADR-0041). That is a separate
