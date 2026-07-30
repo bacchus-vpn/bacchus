@@ -97,7 +97,7 @@ func TestExitTerminateUDPRoundTrip(t *testing.T) {
 	deadline(t, cConn, sConn)
 
 	e := &Engine{roles: map[string]bool{RoleExit: true}, exitKey: key, udpIdleTimeout: 5 * time.Second}
-	go e.exitTerminate("", sConn)
+	go e.exitTerminate("", nil, sConn)
 
 	nc, err := clientHandshake(cConn, key.Public, udpTargetPrefix+target, nil)
 	if err != nil {
@@ -138,7 +138,7 @@ func TestExitTerminateUDPIdleTimeout(t *testing.T) {
 	deadline(t, cConn, sConn)
 
 	e := &Engine{roles: map[string]bool{RoleExit: true}, exitKey: key, udpIdleTimeout: 40 * time.Millisecond}
-	go e.exitTerminate("", sConn)
+	go e.exitTerminate("", nil, sConn)
 
 	nc, err := clientHandshake(cConn, key.Public, udpTargetPrefix+target, nil)
 	if err != nil {
@@ -220,7 +220,7 @@ func TestHandleSocksUDPAssociateRoundTrip(t *testing.T) {
 		if err != nil {
 			return
 		}
-		e.exitTerminate("", st)
+		e.exitTerminate("", nil, st)
 	}()
 
 	ctrlA, ctrlB := net.Pipe()
@@ -339,7 +339,7 @@ func TestHandleSocksUDPAssociateDropsCrossDestinationDatagram(t *testing.T) {
 		if err != nil {
 			return
 		}
-		e.exitTerminate("", st)
+		e.exitTerminate("", nil, st)
 	}()
 
 	ctrlA, ctrlB := net.Pipe()

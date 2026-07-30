@@ -90,6 +90,18 @@ const (
 	// several independent exit draws per request — to precisely the client that wants
 	// it, so the guard would bind only the honest.
 	refuseNoNonce assignRefusal = "connect-needs-nonce"
+	// refuseUnknownTier answers a client whose credential's (trust, plan) pair
+	// resolves to no row in the signed policy this coordinator holds (issue #58,
+	// ADR-0048; ADR-0006 decision 5). It is a refusal and never a fallback — see
+	// resolveTier for why substituting either a permissive or a restrictive default
+	// is worse than refusing.
+	//
+	// Named rather than bare on the same reasoning as refuseCountryBusy: the pair is
+	// the client's OWN credential's claim about itself and the policy is a signed
+	// document its holder can read, so naming it back reveals nothing it does not
+	// already hold — and it is the only refusal here whose fix is "your plan is not
+	// provisioned on this coordinator", which is unguessable from a bare error.
+	refuseUnknownTier assignRefusal = "unknown-tier"
 )
 
 // resolveFirstHop answers a connect that names its own first peeling hop (issue
@@ -223,7 +235,18 @@ func exitSessions(now time.Time) map[string]int {
 // exitAssignable reports whether an exit may be given a new session right now. It is
 // the single definition of assignable, shared by the country list and the assignment
 // itself, so the aggregate a client is shown can never disagree with what it gets.
-func exitAssignable(e *exitNode, sessions int) bool {
+//
+// It is per-CLIENT as of issue #58, because two of the signed policy's tier limits
+// are answers to this question: a tier's endpoint-quality floor decides which exits
+// it may be assigned to at all, and its priority decides how full an exit may be
+// before it is refused one. Threading the resolved limits through here rather than
+// applying them at the connect keeps the invariant this function exists for — the
+// country list a client is shown is computed under the same limits the connect will
+// enforce, so Available cannot promise what connect would then refuse.
+//
+// l is the zero tierLimits when no tier applies (see resolveTier), and every gate
+// below is inert for it, which is the pre-#58 behaviour exactly.
+func exitAssignable(e *exitNode, sessions int, l tierLimits) bool {
 	if e.exhausted {
 		// Its operator's declared monthly quota is spent for this cycle (#143).
 		return false
@@ -247,8 +270,16 @@ func exitAssignable(e *exitNode, sessions int) bool {
 		// Issue #145's serve-eligibility floor; OFF (serveFloor is zero).
 		return false
 	}
+	if _, ok := meetsEndpointQuality(e.id, l); !ok {
+		// The signed policy's endpoint_quality for this client's tier (issue #58).
+		// Withholds nobody while no class source is fed — see meetsEndpointQuality.
+		return false
+	}
 	usable, rated := exitRating(e.id, e.speedCap)
-	return !capacity.Full(usable, sessions, capacity.Unmetered(e.speedCap, rated), minShare)
+	// The fullness floor is the tier's, not the network's: priority buys a session
+	// admission onto an exit that is already full for a lower tier (tierMinShare).
+	// Inert while minShare is zero, which is how it ships.
+	return !capacity.Full(usable, sessions, capacity.Unmetered(e.speedCap, rated), tierMinShare(l))
 }
 
 // countrySnapshot aggregates the exit registry into the per-country view a client
@@ -261,7 +292,13 @@ func exitAssignable(e *exitNode, sessions int) bool {
 //
 // Exits whose country could not be derived are absent entirely: they belong to no
 // country, so no country choice can reach them.
-func countrySnapshot(now time.Time) []countryInfo {
+//
+// l is the requesting client's resolved tier limits (issue #58). Exits counts every
+// exit in the country regardless of tier — it is the network's shape, and it must
+// not become a per-tier oracle for how many premium exits a country holds — while
+// Available is what THIS client could be assigned, which is the number Busy is
+// derived from and the number connect has to agree with.
+func countrySnapshot(now time.Time, l tierLimits) []countryInfo {
 	load := exitSessions(now)
 	agg := map[string]*countryInfo{}
 	for _, e := range exits {
@@ -274,7 +311,7 @@ func countrySnapshot(now time.Time) []countryInfo {
 			agg[e.country] = ci
 		}
 		ci.Exits++
-		if exitAssignable(e, load[e.id]) {
+		if exitAssignable(e, load[e.id], l) {
 			ci.Available++
 		}
 	}
@@ -401,7 +438,16 @@ func excludedExits(src *net.UDPAddr, sids []string) map[string]bool {
 // mechanism, and the same argument, pickRelay already relies on. Two passes are
 // needed because the best tier is not known until every candidate has been seen; the
 // second pass's independent iteration order is what selects among the ties.
-func chooseExit(country string, exclude map[string]bool, now time.Time) (*exitNode, assignRefusal) {
+// l is the client's resolved tier limits (issue #58), applied through
+// exitAssignable so the candidate set is exactly the one countrySnapshot counted
+// as Available for the same client.
+//
+// Note where the tier does NOT reach: the octave banding below is untouched. The
+// tier decides which exits a client may be assigned and how full one may be, not
+// which of the survivors wins — turning priority into a sort would rebuild the
+// deterministic best-node pick ADR-0033 forbids and ADR-0042 §3 keeps out, and it
+// would do it with a number a paying client would then be able to observe.
+func chooseExit(country string, exclude map[string]bool, now time.Time, l tierLimits) (*exitNode, assignRefusal) {
 	cc := geoip.Canonical(country)
 	if cc == countryUnknown {
 		return nil, refuseNoCountry
@@ -419,7 +465,7 @@ func chooseExit(country string, exclude map[string]bool, now time.Time) (*exitNo
 			continue
 		}
 		known = true
-		if exitAssignable(e, load[e.id]) {
+		if exitAssignable(e, load[e.id], l) {
 			candidates = append(candidates, e)
 		}
 	}
@@ -428,9 +474,16 @@ func chooseExit(country string, exclude map[string]bool, now time.Time) (*exitNo
 	}
 	if len(candidates) == 0 {
 		// The country exists but nothing in it is assignable: every exit is out of
-		// quota, withheld, or full. This is #147. Note that exclusion cannot reach
-		// this branch — it is applied below, and only when it leaves a real choice —
-		// so a client can never busy out a country by excluding its way through it.
+		// quota, withheld, below this tier's endpoint-quality floor, or too full for
+		// its priority. This is #147. Note that exclusion cannot reach this branch —
+		// it is applied below, and only when it leaves a real choice — so a client can
+		// never busy out a country by excluding its way through it.
+		//
+		// A tier-driven refusal reports country-busy rather than a distinct reason,
+		// deliberately: the alternative tells a client how many exits in a country sit
+		// above or below its own class, which is a per-tier map of the network built
+		// one connect at a time. #146 removed the per-exit list to close exactly that,
+		// and the client's action is the same either way — try another country.
 		return nil, refuseCountryBusy
 	}
 

@@ -227,7 +227,7 @@ func TestExitWithoutACountryIsUnreachable(t *testing.T) {
 	if len(reply.Countries) != 0 {
 		t.Errorf("a country-less exit appeared in the country list: %+v", reply.Countries)
 	}
-	if e, refusal := chooseExit("NL", nil, time.Now()); e != nil || refusal != refuseNoCountry {
+	if e, refusal := chooseExit("NL", nil, time.Now(), tierLimits{}); e != nil || refusal != refuseNoCountry {
 		t.Errorf("chooseExit reached a country-less exit: (%v, %q)", e, refusal)
 	}
 }
@@ -249,12 +249,12 @@ func TestCountrylessExitIsNotAssignable(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if exitAssignable(exits["nowhere"], 0) {
+	if exitAssignable(exits["nowhere"], 0, tierLimits{}) {
 		t.Error("exitAssignable accepted an exit with no country; it is unreachable and cannot take a session")
 	}
 	// Non-vacuity: an otherwise identical exit that HAS a country is assignable, so the
 	// assertion above is about the country and not about the fixture.
-	if !exitAssignable(exits["somewhere"], 0) {
+	if !exitAssignable(exits["somewhere"], 0, tierLimits{}) {
 		t.Error("exitAssignable rejected a healthy exit with a country; the fixture is broken")
 	}
 }
@@ -349,10 +349,10 @@ func TestGeoIPRequiredRefusesAnExitThatAdvertisesNothing(t *testing.T) {
 	// The tag is the mechanism; being unassignable is the property. A client can only
 	// ask for a country, so an exit without one must be unreachable through every
 	// surface: it is absent from the country map, and a connect naming NL is refused.
-	if _, refusal := chooseExit("NL", nil, time.Now()); refusal != refuseNoCountry {
+	if _, refusal := chooseExit("NL", nil, time.Now(), tierLimits{}); refusal != refuseNoCountry {
 		t.Errorf("connect to NL was refused %q; want %q — the unverified exit is still assignable", refusal, refuseNoCountry)
 	}
-	if _, found := countryIn(wire{Countries: countrySnapshot(time.Now())}, "NL"); found {
+	if _, found := countryIn(wire{Countries: countrySnapshot(time.Now(), tierLimits{})}, "NL"); found {
 		t.Error("the unverified exit still appears in the country map — a client would be offered a country it cannot be paired in")
 	}
 
@@ -381,7 +381,7 @@ func TestNoAdvertisementKeepsItsCountryWithoutTheFlag(t *testing.T) {
 	if cc != "NL" || source != countryObserved {
 		t.Errorf("without -geoip-required a no-advertise exit got (%q, %q); want NL %q — the flag is what buys the guarantee, and -advertise stays optional without it", cc, source, countryObserved)
 	}
-	if _, refusal := chooseExit("NL", nil, time.Now()); refusal != refuseNone {
+	if _, refusal := chooseExit("NL", nil, time.Now(), tierLimits{}); refusal != refuseNone {
 		t.Errorf("the exit was not assignable (%q) — an ordinary direct-mode exit must keep working with no -advertise set", refusal)
 	}
 }

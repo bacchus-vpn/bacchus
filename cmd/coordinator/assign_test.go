@@ -138,7 +138,7 @@ func tierFor(cc string) (in map[string]bool, share map[string]capacity.Rate) {
 	load := exitSessions(time.Now())
 	var candidates []*exitNode
 	for _, e := range exits {
-		if e.country == cc && exitAssignable(e, load[e.id]) {
+		if e.country == cc && exitAssignable(e, load[e.id], tierLimits{}) {
 			candidates = append(candidates, e)
 		}
 	}
@@ -203,7 +203,7 @@ func TestAssignmentPrefersTheRoomierExit(t *testing.T) {
 	// live check on chooseExit rather than on the tier maths above, so it stays even
 	// though the tier assertion already settles the outcome.
 	for i := 0; i < 40; i++ {
-		e, refusal := chooseExit("NL", nil, time.Now())
+		e, refusal := chooseExit("NL", nil, time.Now(), tierLimits{})
 		if refusal != refuseNone {
 			t.Fatalf("chooseExit refused with %q", refusal)
 		}
@@ -267,7 +267,7 @@ func TestChooseExitDoesNotConcentrateOnOneNode(t *testing.T) {
 
 	seen := map[string]int{}
 	for i := 0; i < 300; i++ {
-		e, refusal := chooseExit("NL", nil, time.Now())
+		e, refusal := chooseExit("NL", nil, time.Now(), tierLimits{})
 		if refusal != refuseNone {
 			t.Fatalf("chooseExit refused with %q", refusal)
 		}
@@ -306,7 +306,7 @@ func TestExcludeSkipsTheExitAClientJustFailedOn(t *testing.T) {
 
 	failed := mintSessionFor(t, "e-a", client)
 	for i := 0; i < 60; i++ {
-		e, refusal := chooseExit("NL", excludedExits(client, []string{failed}), time.Now())
+		e, refusal := chooseExit("NL", excludedExits(client, []string{failed}), time.Now(), tierLimits{})
 		if refusal != refuseNone {
 			t.Fatalf("chooseExit refused with %q while two non-excluded exits existed", refusal)
 		}
@@ -342,7 +342,7 @@ func TestExclusionCannotPinByNamingTheComplement(t *testing.T) {
 
 	seen := map[string]int{}
 	for i := 0; i < 300; i++ {
-		e, refusal := chooseExit("NL", excludedExits(client, held), time.Now())
+		e, refusal := chooseExit("NL", excludedExits(client, held), time.Now(), tierLimits{})
 		if refusal != refuseNone {
 			t.Fatalf("chooseExit refused with %q; excluding must degrade to an ordinary assignment, not a refusal", refusal)
 		}
@@ -377,7 +377,7 @@ func TestExclusionIsIgnoredWhenItWouldLeaveNoChoice(t *testing.T) {
 	held := []string{mintSessionFor(t, "e-a", client)}
 	seen := map[string]int{}
 	for i := 0; i < 300; i++ {
-		e, refusal := chooseExit("NL", excludedExits(client, held), time.Now())
+		e, refusal := chooseExit("NL", excludedExits(client, held), time.Now(), tierLimits{})
 		if refusal != refuseNone {
 			t.Fatalf("chooseExit refused with %q; a dropped exclusion must assign normally, never refuse", refusal)
 		}
@@ -392,7 +392,7 @@ func TestExclusionIsIgnoredWhenItWouldLeaveNoChoice(t *testing.T) {
 	c := fakePeer(t)
 	registerExit("e-c", "NL", "203.0.113.12:20000", c)
 	for i := 0; i < 60; i++ {
-		e, _ := chooseExit("NL", excludedExits(client, held), time.Now())
+		e, _ := chooseExit("NL", excludedExits(client, held), time.Now(), tierLimits{})
 		if e.id == "e-a" {
 			t.Fatalf("with three exits the exclusion of e-a must be honoured, but it was returned on attempt %d", i)
 		}
@@ -580,7 +580,7 @@ func TestShareFullnessGateWouldRefuseIfEnabled(t *testing.T) {
 	loadExit(t, "e1", 4)
 
 	// As shipped (minShare zero): assignable.
-	if e, refusal := chooseExit("NL", nil, time.Now()); e == nil || refusal != refuseNone {
+	if e, refusal := chooseExit("NL", nil, time.Now(), tierLimits{}); e == nil || refusal != refuseNone {
 		t.Fatalf("with minShare at its shipped zero, a loaded exit was refused: (%v, %q)", e, refusal)
 	}
 	requestList(client)
@@ -592,7 +592,7 @@ func TestShareFullnessGateWouldRefuseIfEnabled(t *testing.T) {
 	minShare = p.Ceiling
 	t.Cleanup(func() { minShare = 0 })
 
-	if e, refusal := chooseExit("NL", nil, time.Now()); e != nil || refusal != refuseCountryBusy {
+	if e, refusal := chooseExit("NL", nil, time.Now(), tierLimits{}); e != nil || refusal != refuseCountryBusy {
 		t.Errorf("with the share floor raised, chooseExit returned (%v, %q); want a country-busy refusal — the gate is dead code", e, refusal)
 	}
 	requestList(client)
@@ -633,10 +633,10 @@ func TestUncappedAndUnratedExitIsNeverFullButARatedOneIs(t *testing.T) {
 	minShare = p.Ceiling
 	t.Cleanup(func() { minShare = 0 })
 
-	if e, refusal := chooseExit("NL", nil, time.Now()); e == nil || refusal != refuseNone {
+	if e, refusal := chooseExit("NL", nil, time.Now(), tierLimits{}); e == nil || refusal != refuseNone {
 		t.Errorf("an uncapped, UNRATED exit was refused under a raised share floor: (%v, %q); declared limits are opt-in", e, refusal)
 	}
-	if e, refusal := chooseExit("SE", nil, time.Now()); e != nil || refusal != refuseCountryBusy {
+	if e, refusal := chooseExit("SE", nil, time.Now(), tierLimits{}); e != nil || refusal != refuseCountryBusy {
 		t.Errorf("an uncapped but RATED exit survived a floor it cannot meet: (%v, %q); raising minShare DOES reach the measured fleet", e, refusal)
 	}
 }
@@ -688,7 +688,7 @@ func TestRankingDecaysUniformlyAcrossDispositions(t *testing.T) {
 	// decayed, so a relay-serving exit is not sunk beneath a direct-serving one.
 	seen := map[string]int{}
 	for i := 0; i < 300; i++ {
-		e, refusal := chooseExit("NL", nil, later)
+		e, refusal := chooseExit("NL", nil, later, tierLimits{})
 		if refusal != refuseNone {
 			t.Fatalf("chooseExit refused with %q", refusal)
 		}

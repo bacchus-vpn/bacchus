@@ -238,7 +238,7 @@ func TestFleetSurvivesTheFeedLanding(t *testing.T) {
 	// ceiling-clamped rating must not make chooseExit refuse. This is the #147 half of
 	// the same guard — a fed fleet must not read as "every country is busy".
 	for _, cc := range []string{"NL", "DE"} {
-		if e, refusal := chooseExit(cc, nil, time.Now()); e == nil || refusal != refuseNone {
+		if e, refusal := chooseExit(cc, nil, time.Now(), tierLimits{}); e == nil || refusal != refuseNone {
 			t.Errorf("chooseExit(%s) refused with %q after the feed landed; the fleet is stranded at the assignment surface", cc, refusal)
 		}
 	}
@@ -263,7 +263,7 @@ func TestServeFloorGateWouldExcludeIfEnabled(t *testing.T) {
 	// The country is still LISTED — that is #147's requirement — but with nothing
 	// available in it, which is how the withholding now shows up.
 	wantCountry(t, recvWire(t, client, time.Second), "NL", 1, 0)
-	if e, refusal := chooseExit("NL", nil, time.Now()); e != nil || refusal != refuseCountryBusy {
+	if e, refusal := chooseExit("NL", nil, time.Now(), tierLimits{}); e != nil || refusal != refuseCountryBusy {
 		t.Fatalf("chooseExit with the serve floor above the ceiling returned (%v, %q); want a country-busy refusal — the gate does not actually filter on measured", e, refusal)
 	}
 }
