@@ -187,7 +187,21 @@ func runNode(ctx context.Context, cfg core.Config, coords []string, mesh *meshRe
 			return nil
 		}
 
-		err = eng.Connect(ctx)
+		// The client half. On a node that ALSO serves, a client-connect failure is
+		// retried against the live engine rather than returned, so the relay/exit roles
+		// it donates survive its own consumer side wobbling instead of dying with it
+		// (issue #12) — see clientHalf.run. meshOn tracks whether the mesh-walk rebuild
+		// below is still available this pass, so once the recoveries are spent a serving
+		// node falls back to retrying in place rather than to the fatal return.
+		err = clientHalf{
+			eng:     eng,
+			serving: eng.HasRole(core.RoleRelay) || eng.HasRole(core.RoleExit),
+			meshOn:  mesh != nil && attempt < maxMeshRecoveries,
+			backoff: clientRetryBackoff,
+		}.run(ctx)
+		if errors.Is(err, errNodeStopped) {
+			return nil
+		}
 		if err == nil {
 			// Connected. Run until interrupted, or until a mid-session mesh-walk found a
 			// fresh directory and asked to be rebuilt against it (issue #115).

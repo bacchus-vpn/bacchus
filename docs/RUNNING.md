@@ -317,6 +317,93 @@ No payout, no tokens — this only proves the two sides agree on the count.
 [accounting-stub.md](design/accounting-stub.md) for why relay-mode isn't
 covered yet.
 
+## Volunteering your connection (issue #12)
+A node that uses the network can also donate itself to it. That used to be
+reachable only by knowing to write `-role client,relay,exit`, which nobody finds
+by accident; there are two flags for it now, and `bacchus-node -h` lists them.
+
+**Relay and exit are two separate choices, and neither turns on the other.** The
+two costs are not comparable:
+
+- **`-volunteer-relay`** carries other people's traffic **encrypted and
+  blind-forwarded**. A relay never learns the destination and never sees
+  plaintext. What it costs you is **bandwidth**.
+- **`-volunteer-exit`** egresses other people's traffic to the internet **under
+  your own IP and jurisdiction**. Your address is what every site they reach sees
+  in its logs, and abuse reports, provider notices, and legal process arrive at
+  **you**. What it costs you is **legal exposure**, and no quantity of spare
+  bandwidth is a substitute for having decided that on purpose.
+
+Both are off by default. There is deliberately no single `-volunteer` that turns
+on both: one switch spanning them means somebody who meant to donate bandwidth
+accepts liability they never read about. Relay-only is the option most home
+connections can safely take, and it has to be sayable on its own.
+
+The volunteer flags **add** serve roles to whatever `-role` names, so with the
+default `-role client` they make a node that uses the network and also donates to
+it. Both may be given together.
+
+### Relay only — what most home connections can take
+```sh
+bacchus-node -volunteer-relay \
+  -coordinators <COORD_HOST>:8080 \
+  -max-speed 20Mbit -monthly-quota 400GB -quota-cycle-day 17 \
+  -quota-state /var/lib/bacchus/quota.json
+```
+No port forwarding, no stable identity, nothing else to configure. Behind a home
+NAT you serve as a client's **first hop**, reached the way the client itself is —
+the coordinator uses the address your registration arrives from. Carrying somebody
+else's **middle** hop is a different job: it is reached by an inbound dial, so it
+needs a publicly reachable `-relay-ingress` (plus `-relay-directory` and a
+persistent `-exit-key`, which `-volunteer-relay` will insist on). Behind a home
+NAT, first hop and exit are realistic; middle hop is not.
+
+### Exit — a separate decision, with a legal cost attached
+This is the one where other people's traffic leaves the internet-facing side of
+**your** connection, under **your** address, in **your** jurisdiction.
+```sh
+bacchus-node -volunteer-exit \
+  -listen :20000 -advertise <YOUR_PUBLIC_IP>:20000 \
+  -exit-key <64-hex> \
+  -coordinators <COORD_HOST>:8080 \
+  -max-speed 20Mbit -monthly-quota 400GB -quota-cycle-day 17 \
+  -quota-state /var/lib/bacchus/quota.json
+```
+`-volunteer-exit` refuses to start without the two things an exit actually needs,
+rather than registering as an exit nothing can reach:
+
+- **`-advertise`** — the `host:port` a relay dials to reach you. It has to be the
+  address the internet reaches you at, with that port forwarded to this machine. A
+  wildcard, loopback, or link-local address is **refused**: none of them can be
+  dialed from another machine, so registering one is a node that serves nobody and
+  says nothing about it. A private or carrier-NAT address **warns and carries on**,
+  because a LAN, a lab, or a tunnelled uplink advertises one correctly. Behind
+  carrier-grade NAT (`100.64.0.0/10`) there is no port for you to forward at all —
+  relay-only works there, an exit will not.
+- **`-exit-key`** — a persistent X25519 private key. An exit's node id **is** its
+  public key, so a key generated afresh at each start is a new identity at each
+  start, while the signed directory clients cache still names the old one: the node
+  is unreachable until a new directory propagates, after every restart. Generate one
+  once and keep it: `openssl rand -hex 32`.
+
+You do **not** state your country. The coordinator derives it from the address your
+registration arrives from and, for an exit, cross-checks that against what you
+advertise — see
+[GeoIP country database](#geoip-country-database-issue-136-adr-0042). `-country` is
+only a hint, consulted when the observed address resolves to nothing.
+
+Bound what any of this costs you with the declared limits below. Volunteering
+without them warns at startup rather than silently serving uncapped.
+
+### Your client half can fail without taking your donation down
+A volunteer node runs two halves that fail for unrelated reasons: the **serve**
+side (relay/exit registrations and listeners) and its **own client** connection.
+"Every exit in the country I asked for is busy" says nothing about whether this node
+can still carry other people's traffic — so on a node that serves, a client-connect
+failure is logged and retried against the running engine (15s, doubling to a
+10-minute ceiling) while the serve roles keep serving throughout. It no longer ends
+the process. A node that only clients still exits on a failed connect, as before.
+
 ## Declared node limits (running a node from home)
 Off by default: a node with no declared limits is uncapped and unmetered, exactly
 as before. This exists so a **residential volunteer** can participate without

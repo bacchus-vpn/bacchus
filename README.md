@@ -24,6 +24,28 @@ client ──WebRTC (coordinator + STUN/TURN, NAT-traversal)──► [relay] �
   forwards ciphertext and the next hop only, never the destination or content.
 - **Reachability-aware** — the mesh routes around regional blocking.
 
+## Volunteering your connection
+
+Any client can also donate itself to the network — and **relay and exit are two
+separate choices**, because they cost completely different things:
+
+| Flag | What you carry | What it costs you |
+|---|---|---|
+| `-volunteer-relay` | other people's traffic, encrypted and blind-forwarded — a relay never learns the destination and never sees plaintext | **bandwidth** |
+| `-volunteer-exit` | other people's traffic on its way out to the internet | **your own IP and jurisdiction** — your address is what every site they reach sees, and abuse reports, provider notices, and legal process arrive at you |
+
+Both are off by default, and neither turns on the other: bundling them means
+somebody who meant to donate bandwidth accepts liability they never read about.
+Relay-only is the option most home connections can safely take, and it works
+behind NAT with no port forwarding:
+
+```sh
+bacchus-node -volunteer-relay -max-speed 20Mbit -monthly-quota 400GB -coordinators <host>:8080
+```
+
+Full setup — what an exit needs, and how to bound what either costs you — is in
+[docs/RUNNING.md](docs/RUNNING.md#volunteering-your-connection-issue-12).
+
 ## Repository layout
 
 | Path | What |
@@ -32,6 +54,7 @@ client ──WebRTC (coordinator + STUN/TURN, NAT-traversal)──► [relay] �
 | `bind/` | gomobile facade (Kotlin/Swift) over `core` |
 | `cmd/node/` | the volunteer node binary — a thin flag wrapper over `core` (client/relay/exit) |
 | `cmd/coordinator/` | rendezvous / directory + STUN/TURN (pion) + cold-start bootstrap, blended onto one port |
+| `clients/fyne/` | the cross-platform desktop client |
 | `clients/windows/` | Windows tray client |
 | `deploy/` | systemd units + config templates |
 | `docs/` | runbook + architecture decisions (`docs/adr/`) |
