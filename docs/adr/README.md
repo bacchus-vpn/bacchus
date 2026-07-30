@@ -4,6 +4,51 @@ Short records of significant decisions. Format: **Status, Context, Decision,
 Consequences**. Numbered sequentially; superseded records are kept and marked, not
 deleted. New significant decisions ship as an ADR in the same PR (see ADR-0007).
 
+## Reading the issue numbers in these records
+
+**ADR numbers are stable and mean one thing. Issue numbers do not.** This project moved
+trackers on **2026-07-28**, and every issue open on that day was re-filed with a new
+number. References written before the move were left as they were, so `#N` in this
+repository belongs to one of two schemes depending on when the sentence was written:
+
+- **Records 0001–0042** arrived in this repository's initial commit. They were written
+  against the **retired** tracker, and every bare `#N` in them is one of its numbers.
+- **Records 0043 onward**, and the amendments dated 2026-07-28 or later that were
+  appended to earlier records, use the **current** tracker.
+
+The two are not distinguishable by inspection, and a single paragraph can contain both —
+ADR-0038's last amendment cites `#26` in the current scheme alongside three numbers in
+the retired one. What tells them apart is the subject matter, not the number.
+
+**The practical consequence: a retired number below the current tracker's high-water
+mark will autolink, and it will point somewhere unrelated.** A record citing `#42` for
+admission gating produces a link to a relay-directory change; `#60` for end-to-end exit
+verification produces a link to a coordinator-hosting change. Treat a link from an
+older record as decoration and read the surrounding sentence for what was meant.
+
+Three things worth knowing before trying to "fix" a number:
+
+- **Most retired numbers have no current equivalent.** Only the issues still open on
+  2026-07-28 were re-filed. Anything already closed — which is most of what these
+  records cite — was not, so there is nothing to renumber it to.
+- **`#76` is a label, not just a number.** It was the relay-chaining epic, and the
+  current tracker's own issue titles still carry it: `[#76 §9-6] Chain-aware liveness
+  and rebuild`, `[#76 §9-9] NAT-traversed intermediate hops`. `#76 §9-N` reads as a
+  section of that design, and renumbering it here would desynchronize these records
+  from live issue titles.
+- **The retired tracker is gone, not merely private.** Its remotes are dead. The only
+  surviving record of it is a workspace-local archive that is deliberately never
+  published, so a retired number cannot be resolved by anyone outside the project — and
+  in many cases the ADR text is now the better record of what the issue said.
+
+The same two-scheme split runs through code comments and the rest of `docs/`, for the
+same reason and with the same reading. Comments are inert — nothing autolinks inside a
+`.go` file — but a number in one is no more resolvable than a number here.
+
+**Writing a new reference:** a current issue is cited bare, as #77, so it links.
+A retired one is cited as `` `old #157` `` — a code span, which GitHub cannot autolink,
+so it can never point at an unrelated issue. See CONVENTIONS.md.
+
 - [0001](0001-record-architecture-decisions.md) — Record architecture decisions
 - [0002](0002-open-monorepo-with-separate-private-payment-repo.md) — Open monorepo, private payment repo
 - [0003](0003-single-go-module.md) — Single Go module

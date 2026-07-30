@@ -33,3 +33,10 @@
 
 - Docs ship in the **same PR** as the change — "Done" includes docs.
 - Architecture decisions are recorded as ADRs in [docs/adr/](docs/adr/).
+- **Issue references.** Cite a current issue bare — #77 — so it links. Cite an issue
+  from the tracker retired on 2026-07-28 as `` `old #157` ``: a code span, which GitHub
+  cannot autolink, so it can never resolve to an unrelated current issue. A bare retired
+  number below the current high-water mark silently links to the wrong thing, which is
+  why the form matters. Do not renumber a retired reference in an existing record — most
+  have no current equivalent, and `#76 §9-N` survives as a label in live issue titles.
+  See [docs/adr/README.md](docs/adr/README.md).

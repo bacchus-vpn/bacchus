@@ -55,8 +55,13 @@ See [docs/RUNNING.md](docs/RUNNING.md) to run the stack and
 
 ## Contributing & security
 
-> Issue references of the form `#N` (or `bacchus#N` / `bacchus-payment#N`) in code
-> comments, docs and ADRs refer to the pre-migration tracker, which is private.
+> **Issue numbers come from two trackers.** This project moved trackers on 2026-07-28
+> and re-filed every open issue, so a `#N` in code comments, docs or ADRs may belong to
+> the current tracker or to the retired one, depending on when it was written. A retired
+> number below the current high-water mark still autolinks, and points somewhere
+> unrelated. The retired tracker is gone — not private — so those numbers resolve
+> nowhere; read the surrounding sentence instead. Full explanation, and the convention
+> for writing new references, in [docs/adr/README.md](docs/adr/README.md).
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) — workflow, branch/commit conventions.
 - [CONVENTIONS.md](CONVENTIONS.md) — code style, versioning, safety rules.
