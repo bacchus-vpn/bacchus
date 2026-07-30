@@ -35,6 +35,11 @@ import (
 func main() {
 	coords := flag.String("coordinators", "localhost:8080", "coordinator UDP host:port; comma-separated for a pool (issue #6)")
 	role := flag.String("role", "client", "comma list: client,relay,exit")
+	// Two switches rather than one, deliberately — see volunteer.go's package comment.
+	// A single -volunteer covering both would let somebody who meant to donate bandwidth
+	// accept legal exposure they never read about.
+	volunteerRelay := flag.Bool("volunteer-relay", false, "donate this connection as a RELAY alongside your own client use of it (issue #12). You carry other people's traffic encrypted and blind-forwarded: a relay never learns the destination and never sees plaintext, so what this costs you is BANDWIDTH, not exposure. Off by default, and entirely independent of -volunteer-exit — this does NOT make you an exit. Behind a home NAT you serve as a client's FIRST hop, which works without any port forwarding; carrying somebody's MIDDLE hop additionally needs a publicly reachable -relay-ingress. Pair it with -max-speed / -monthly-quota so it costs what you chose")
+	volunteerExit := flag.Bool("volunteer-exit", false, "donate this connection as an EXIT alongside your own client use of it (issue #12). Other people's traffic egresses to the internet UNDER YOUR OWN IP AND JURISDICTION: it is your address that appears in the logs of every site they reach, and abuse reports, provider notices, and legal process arrive at you. That is LEGAL EXPOSURE, not bandwidth, and it is why this is a separate switch from -volunteer-relay rather than half of one. Off by default. Requires -advertise (the host:port relays dial) and a persistent -exit-key, both checked at startup")
 	socksAddr := flag.String("socks", "127.0.0.1:1080", "client SOCKS5 listen")
 	listenAddr := flag.String("listen", ":20000", "exit TCP listen (relay path)")
 	advertise := flag.String("advertise", "", "exit: host:port relays dial, e.g. 203.0.113.4:20000")
@@ -82,12 +87,28 @@ func main() {
 	relayDirectory := flag.String("relay-directory", "", "path to a coordinator-signed snapshot (e.g. cmd/coldstart-bootstrap -cache) used for relay chaining: a client picks its hops out of it, a -relay-ingress hop admits a forward only to an address in it. Verified against -mesh-pubkey and must be unexpired. Required by -relay-hops 2+ and by -relay-ingress. Re-read from this same path on an interval (issue #27), so an operator rotating the file in place is picked up without a restart — a bad, expired, or unreadable reload leaves the previous directory enforcing unchanged")
 	flag.Parse()
 
-	var roles []string
-	for _, r := range strings.Split(*role, ",") {
-		if r = strings.TrimSpace(r); r != "" {
-			roles = append(roles, r)
-		}
+	// The volunteer opt-ins (issue #12) add serve roles to whatever -role names, and
+	// are checked before anything registers: a donation that cannot work must stop the
+	// node here, not register as an exit no client can ever be routed to.
+	volunteer := volunteerRoles{relay: *volunteerRelay, exit: *volunteerExit}
+	limits := parseLimits(*maxSpeed, *monthlyQuota, *quotaCycleDay)
+	warnings, err := validateVolunteer(volunteerCheck{
+		roles:          volunteer,
+		advertise:      *advertise,
+		exitKeyHex:     *exitKey,
+		relayIngress:   *relayIngress,
+		limitsDeclared: limits.SpeedCap != 0 || limits.MonthlyQuota != 0,
+	})
+	if err != nil {
+		log.Fatal(err)
 	}
+	for _, w := range warnings {
+		log.Printf("warning: %s", w)
+	}
+	if volunteer.any() {
+		log.Printf("volunteering: %s", volunteer)
+	}
+	roles := resolveRoles(*role, volunteer)
 
 	// Load the admission credential once, up front, so a bad path fails loudly
 	// here rather than being silently rejected by the coordinator later.
@@ -124,7 +145,6 @@ func main() {
 	// fails inside core.New below rather than silently falling open on a
 	// typo.
 
-	limits := parseLimits(*maxSpeed, *monthlyQuota, *quotaCycleDay)
 	relayFwdRate := parseForwardPeerRate(*relayFwdPeerRate)
 
 	cfg := core.Config{
