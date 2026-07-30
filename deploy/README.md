@@ -34,6 +34,11 @@ Secrets and host-specific values live in **env files** under `/etc/bacchus/`
    systemctl enable --now bacchus-coordinator bacchus-exit
    systemctl status bacchus-coordinator bacchus-exit
    ```
+6. On a **coordinator** host only, install the country-database refresh script and its
+   timer as well (`bacchus-geoip-refresh.{sh,service,timer}`) — see
+   [Keeping it fresh](../docs/RUNNING.md#keeping-it-fresh-issue-85). It is a separate
+   step because it is what makes each node's country *derived* rather than
+   *self-reported*, and until it runs the coordinator has no database to derive from.
 
 ## Manage
 ```bash
@@ -83,7 +88,10 @@ address it observes the node register from, using a local GeoIP database
 `COUNTRY=` in `node.env` is consulted only when that address resolves to nothing,
 and not at all under `-geoip-required`. So a typo there no longer silently
 corrupts selection — a malformed tag becomes "unknown" rather than a country no
-client will ever match.
+client will ever match. Staging that database, and keeping it from going stale
+afterwards, is `bacchus-geoip-refresh.timer` on the coordinator host (issue #85) —
+[Keeping it fresh](../docs/RUNNING.md#keeping-it-fresh-issue-85). Until it has run, the
+first row of the table below is the row you are on.
 
 **How far that goes depends on how the coordinator is run**, and it is worth
 being precise, because the flag names do not make it obvious:
