@@ -59,8 +59,9 @@ jobs:
       # rules before the default flips to Block, nothing left half-armed on a
       # failure, a crashed session's prior state restored from the marker
       # rule. What they deliberately do NOT assert is that Windows honours
-      # those cmdlets; that is an OS guarantee, confirmed by a live elevated
-      # run and recorded in ADR-0039's 2026-07-30 amendment.
+      # those cmdlets; that is an OS guarantee, it needs an elevated machine,
+      # and ADR-0039's 2026-07-30 amendment records that run as OUTSTANDING —
+      # a green job here is not evidence it has been done.
       - name: vet
         run: go vet ./clients/windows ./clients/internal/...
       - name: test
