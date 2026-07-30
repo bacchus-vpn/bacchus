@@ -350,6 +350,11 @@ not "compiles," not "connects," but every guarantee `clients/windows` ships toda
    plus a leak check with the kill-switch armed and the tunnel process killed out from
    under it.
 
+> **These eight are the ENFORCEMENT axis, and that is all they are.** Items 9–12
+> (the 2026-07-30 `#93` amendment) are the configuration axis, added after all eight
+> here were met in full while `clients/fyne` still could not configure six of the
+> `core.Config` fields the walk client exposed. Read both lists, or repeat that.
+
 Until a platform clears all eight, `clients/windows` is that platform's answer, full
 stop — a partial `Enforcer` shipped as if it were parity is this ADR's Scope-section
 lie ("the state was true; the sentence about it was not") wearing a new platform.
@@ -725,3 +730,104 @@ not to do.
   linux-client runs only `./clients/fyne/...`, and windows-client built a
   single package. Both now vet and test it, which is what makes the eight
   items above a standing claim rather than a one-time one.
+
+## Amendment (2026-07-30): the parity bar had only one axis (#93)
+
+The bar above has eight items. Every one of them is about **enforcement**:
+routing, kill-switch, crash recovery, live allowlist refresh, pool-underlay
+exclusion, IPv6, elevated execution, and a traffic-level test. #59 met all
+eight, honestly and completely, and this document said so.
+
+It was still possible, at that moment, for `clients/fyne` to be unable to
+configure half of what `core` supports — and it was. Six `core.Config` fields
+the walk client exposed could not be reached from the client replacing it:
+`RelayHops`, `RelayDirectoryPath`, `RelayDirectoryKey`, `TransportPool` had no
+field in `appstate.Config` at all, and `AdmissionPubKey` / `AdmissionCRLPath`
+were read from the config file with no way to set them.
+
+**The bar did not omit an item. It never covered this axis.** That is the
+finding, and it is worth more than the six fields, which are only its symptom.
+A bar with the word "parity" in its name was read — by this document, by #35's
+ruling, and by #59's implementation — as *the* definition of parity, so a gap
+lying entirely outside its axis could survive a decision, an ADR and an
+implementation without any of the three being wrong on its own terms. Nothing
+was skipped; the question was never asked.
+
+Two things follow, and only the first is about `clients/fyne`.
+
+### Configuration-parity bar
+
+Alongside the eight enforcement items, `clients/windows` retires only once:
+
+9. **Every `core.Config` field either client can set, the surviving client can
+   set** — or the field is recorded here as deliberately dropped, with the
+   reason. The comparison is between what each settings dialog actually
+   *writes*, not what either README says it offers; #93's table was built that
+   way and found six fields precisely because it was.
+10. **A field that no longer does anything is deleted, not ported.** The walk
+    client offered a disabled exit-ID pin with a label explaining that it did
+    nothing — `core` emits *"Config.ExitID is set but has NO EFFECT"* for a
+    value that reaches it (ADR-0042, `old #146`). #93 deleted the control.
+    Carrying it across by pattern-matching would have been the easier move and
+    would have reproduced a dead control in a new client. The persisted field
+    stays: an old settings file still carries one, and connecting logging that
+    the saved pin is ignored beats a dialog silently rewriting the file.
+11. **Configuration is verified where it can be asserted.** Validation and
+    normalization live in `internal/appstate`, which needs no GUI toolchain to
+    test, and the widget layer is wiring over it — the split this ADR already
+    draws for `Controller`, applied to settings. A rule enforced only inside an
+    `OnSubmit` closure is a rule no test can reach.
+12. **A UI string with no translation fails a build.** Fyne's `lang.L` falls
+    back to the key itself, so a missing translation renders as English and
+    passes every other check — including, before #93, every check in this
+    repo. `clients/fyne/translations_test.go` walks the package's own AST for
+    `lang.L` keys and fails on any the catalogue is missing. This is the one
+    item on either bar whose failure mode is invisible rather than loud, which
+    is exactly why it needs a test rather than a review habit.
+
+Items 9–12 are gates on retirement in the same way items 1–8 are. #93 satisfies
+9, 10, 11 and 12 for Windows and Linux; nothing here is platform-specific, so
+`[E9]`/`[E10]` inherit them satisfied rather than owing them.
+
+### What #93 also surfaced, and did not leave alone
+
+Wiring `TransportPool` made a latent divergence load-bearing. `clients/windows`
+sets `core.Config.ForceRelay`; `clients/fyne` did not. That is the mechanism
+pinning every WebRTC candidate to the configured TURN server — an address
+`enforcement.Policy` already excludes — and it is *why* webrtc qualifies for
+the pool's allow-list at all. reality qualifies by the other route, the late
+`OnUnderlayDial` exclusion, which this client has wired since #59.
+
+Unset, a WebRTC underlay on the one platform where this client enforces
+follows the split-default back into the tunnel it is carrying: a loop, and a
+Block once the kill-switch arms. Not a plaintext leak — the failure is that it
+stops working, not that it escapes — but it was a real defect in the #59 fold
+that no item on the eight-point bar asks about, and it went unnoticed for the
+same structural reason as the six fields: item 5 asks whether the
+underlay-exclusion *hook* is wired, which it was.
+
+`Controller` now sets `ForceRelay` whenever an `Enforcer` exists, and only
+then. `clients/windows` sets it unconditionally, which is right for a client
+that always routes the device; this one is proxy-only where there is no
+`Enforcer`, has no tunnel to loop into, and forcing every session through TURN
+there would spend an operator's relay bandwidth and a round trip to fix a
+problem that platform does not have.
+
+### Consequences
+
+- **The bar is now two bars, and the second one is the general lesson.** A
+  parity bar states what was compared; anything outside it is not "met", it is
+  unexamined. Item 9's rule — compare what the code *writes*, not what the
+  docs claim — is the part that generalizes past this client pair.
+- **#88 (retire `clients/windows`) gained four gate items.** It was already
+  blocked on the hardware run for items 2 and 3; it is now also blocked on
+  9–12, which #93 satisfies. Recorded before retirement rather than after, so
+  these controls do not leave with the client that used to be their only home.
+- **`docs/design/relay-chaining.md` §9 row 5 is closed.** It named the
+  `RelayHops` remainder and said nothing on the board tracked it. #93 did, and
+  the row now says so.
+- **This amendment is the second time this ADR has recorded a true statement
+  that was not the whole truth** — the Scope section's original form was the
+  first. Both were accurate about what had been checked, and both let a reader
+  conclude something broader. That pattern, not either instance, is the thing
+  to watch for in the next bar this project writes.
