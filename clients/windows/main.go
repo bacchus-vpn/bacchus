@@ -6,9 +6,17 @@
 //
 // Lists exits from the coordinator, lets you pick one, and Connect runs the
 // core engine in-process (client role, forced through the TURN relay — see
-// tunnel.go for why) and then routes the whole device through it: a wintun
-// adapter + userspace netstack (tun2socks.go) replace the old browser-only
-// PAC proxy.
+// clients/internal/enforcement/tunnel.go for why) and then routes the whole
+// device through it: a wintun adapter + userspace netstack replace the old
+// browser-only PAC proxy.
+//
+// That routing layer used to live in this package, in six files. It now lives
+// in clients/internal/enforcement behind enforcement.Enforcer (bacchus#59), so
+// clients/fyne gets the identical implementation rather than a second one —
+// the same code, the same hardening, one caller more. This client is
+// unchanged in behaviour and stays maintained; ADR-0039's 2026-07-30
+// amendment records the parity bar it now shares with Fyne, and retirement
+// remains a decision the owner takes, not something this re-point performs.
 //
 // Build:  go mod tidy && go build -ldflags "-H=windowsgui" -o bacchus.exe .
 // Needs:  bacchus.config.json alongside (see config.example.json), and
@@ -34,6 +42,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bacchus-vpn/bacchus/clients/internal/enforcement"
 	"github.com/bacchus-vpn/bacchus/core"
 	"github.com/getlantern/systray"
 )
@@ -49,6 +58,22 @@ var (
 	cfg     Config
 	cfgPath string // where cfg was loaded from (loadConfig's 2nd return); saveConfig writes back here
 )
+
+// enforcer is this client's OS enforcement, for the whole process lifetime
+// rather than per connect. It has to outlive a single session for two
+// reasons the seam's own docs spell out: Recover runs at launch, before any
+// connect, and OnUnderlayDial fires during the initial pooled Connect, before
+// the tunnel exists. On Windows enforcement.New never fails (the
+// implementation is present), so the error is dropped here rather than
+// carried into every call site — the honest-refusal path it exists for
+// belongs to the platforms that have no implementation yet.
+var enforcer = func() enforcement.Enforcer {
+	e, err := enforcement.New()
+	if err != nil {
+		panic("windows enforcement missing: " + err.Error())
+	}
+	return e
+}()
 
 // countryItem is one entry of the tray's country picker. A client picks a COUNTRY and
 // the coordinator picks the exit inside it (issue #146, ADR-0042), so the picker offers
@@ -73,7 +98,7 @@ var (
 	mu           sync.Mutex
 	engine       *core.Engine
 	engineCancel context.CancelFunc
-	activeTunnel *tunnel
+	activeTunnel enforcement.Session
 	mStatus      *systray.MenuItem
 	mSelected    *systray.MenuItem
 	mConn        *systray.MenuItem
@@ -92,9 +117,12 @@ func onReady() {
 		cfgPath = p
 	}
 	// Undo any fail-closed lockdown left behind by a crashed prior session, so
-	// the user isn't stuck offline after a hard exit.
+	// the user isn't stuck offline after a hard exit. Parity item 3, and the
+	// reason Enforcer has a Recover of its own rather than folding this into
+	// Start: a user whose last session was killed is offline before they
+	// touch anything, so waiting until they next press Connect is too late.
 	if !cfg.DisableKillSwitch {
-		recoverKillSwitch()
+		enforcer.Recover()
 	}
 	systray.SetIcon(grapeIcon())
 	systray.SetTitle("Bacchus")
@@ -364,15 +392,6 @@ func connect() {
 		selectionDir = defaultSelectionDir()
 	}
 
-	// poolExcluder keeps the pool's dynamically-dialled reality underlay
-	// addresses excluded from the full-device tunnel (issue #109). Wired as
-	// OnUnderlayDial below so the excluder learns each address on the dial path,
-	// before its connection is opened; startTunnel activates it (poolroutes.go).
-	// Always created even when the pool is off or webrtc-only — it stays inert
-	// (no reality dial ever calls reserve), which keeps startTunnel's signature
-	// unconditional.
-	pe := newPoolExcluder()
-
 	// Relay chaining (issue #142, GUI issue #28): only meaningful at 2+ hops —
 	// core/relaychain.go's chainDepth normalizes 0/1 to "today's single relay,
 	// no directory needed" — so a directory is read here only when the user
@@ -432,15 +451,20 @@ func connect() {
 		TURNPass:      snap.TURNPass,
 		// Full-device routing needs each session's underlay endpoint excluded
 		// from the tunnel's default route before that route flips (see
-		// tunnel.go). ForceRelay pins every WebRTC candidate to the one
+		// enforcement/tunnel.go). ForceRelay pins every WebRTC candidate to the one
 		// configured TURN server — a fixed, already-excluded address —
 		// regardless of which candidate.Mode the ladder picks, so a "direct"
 		// P2P path's post-ICE address never races the route setup. Reality's
 		// exit address isn't known until Dial time and so can't be pinned this
 		// way; it is excluded late instead, via OnUnderlayDial (issue #109),
 		// which is what now lets reality ride this client's pool at all.
+		//
+		// Wired to the Enforcer rather than to a per-connect excluder: this
+		// fires during the initial pooled Connect, before the tunnel exists,
+		// so there is no Session to hand it to yet. The Enforcer records it
+		// now and bring-up installs it (issue #109).
 		ForceRelay:     true,
-		OnUnderlayDial: pe.reserve,
+		OnUnderlayDial: enforcer.ReserveUnderlay,
 		OnEvent:        onEngineEvent(sessionLbl),
 		// Exit admission (issue #116): both no-ops (fail-open, pre-#116
 		// behavior) when left unconfigured in Settings.
@@ -508,8 +532,16 @@ func connect() {
 	if dns == "" {
 		dns = defaultDNSUpstream
 	}
-	policy := newBypassPolicy(snap.BypassMode, snap.Bypass)
-	t, err := startTunnel(snap.Coordinators, snap.STUN, snap.TURN, dns, socksAddr, policy, pe, !snap.DisableKillSwitch)
+	t, err := enforcer.Start(enforcement.Policy{
+		Coordinators: snap.Coordinators,
+		STUNURL:      snap.STUN,
+		TURNURL:      snap.TURN,
+		DNSUpstream:  dns,
+		Bypass:       snap.Bypass,
+		BypassMode:   snap.BypassMode,
+		KillSwitch:   !snap.DisableKillSwitch,
+		Logf:         logLine,
+	}, socksAddr)
 	if err != nil {
 		mu.Lock()
 		stillActive := engine == eng

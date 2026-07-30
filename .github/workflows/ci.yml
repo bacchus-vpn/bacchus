@@ -15,8 +15,15 @@ jobs:
           go-version: stable
       - name: gofmt
         run: test -z "$(gofmt -l .)"
+      # clients/internal/... is in this job rather than one of the two client
+      # jobs on purpose: it is the OS enforcement layer (ADR-0039's seam), it
+      # needs no GUI toolchain and no cgo, and until bacchus#59 moved
+      # ~1,300 lines into it, it was covered by NO job at all — this one
+      # excluded ./clients/..., the linux-client job runs only
+      # ./clients/fyne/..., and windows-client only built ./clients/windows.
+      # Its Windows-tagged half is covered by the windows-client job below.
       - name: vet
-        run: go vet ./core/... ./bind/... ./cmd/...
+        run: go vet ./core/... ./bind/... ./cmd/... ./clients/internal/...
       - name: build
         run: go build ./cmd/...
       # Deliberately no -short: a few real-transport integration tests are
@@ -29,7 +36,7 @@ jobs:
       # split those into their own non-short job instead of short-circuiting
       # this one.
       - name: test
-        run: go test ./core/... ./bind/... ./cmd/...
+        run: go test ./core/... ./bind/... ./cmd/... ./clients/internal/...
 
   windows-client:
     runs-on: windows-latest
@@ -40,6 +47,25 @@ jobs:
           go-version: stable
       - name: build
         run: go build ./clients/windows
+      # The enforcement layer's Windows half (routes_windows.go,
+      # killswitch_windows.go, enforcement_windows.go) exists only under this
+      # GOOS, so this is the only runner that can compile — let alone run —
+      # its tests. Until bacchus#59 this job did neither: it built one package
+      # and stopped, which meant every Windows-only guarantee in the routing
+      # and kill-switch code was checked by nothing on any push.
+      #
+      # None of these need Administrator. They drive the real cmdlet sequences
+      # through an injected runner (winOS.run) and assert ordering — allow
+      # rules before the default flips to Block, nothing left half-armed on a
+      # failure, a crashed session's prior state restored from the marker
+      # rule. What they deliberately do NOT assert is that Windows honours
+      # those cmdlets; that is an OS guarantee, it needs an elevated machine,
+      # and ADR-0039's 2026-07-30 amendment records that run as OUTSTANDING —
+      # a green job here is not evidence it has been done.
+      - name: vet
+        run: go vet ./clients/windows ./clients/internal/...
+      - name: test
+        run: go test ./clients/internal/...
 
   linux-client:
     # The Linux GUI build target (issue #153): clients/fyne is the first

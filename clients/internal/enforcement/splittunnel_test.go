@@ -1,6 +1,4 @@
-//go:build windows
-
-package main
+package enforcement
 
 import (
 	"fmt"

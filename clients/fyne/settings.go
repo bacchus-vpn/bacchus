@@ -4,12 +4,18 @@
 // attention - see ui.go's doc on the state indicator being the one thing a
 // stressed user needs to read at a glance.
 //
-// Split-tunnel/kill-switch/DNS are saved but NOT YET ENFORCED by this client
-// (see appstate.Config's doc and ADR-0039's Scope: no TUN device here yet).
-// This window says so plainly. A settings screen that implies a kill-switch
-// is armed when it cannot possibly be is exactly the failure mode ui.go's
-// state indicator exists to prevent, and this window must not reintroduce it
-// by a different door.
+// Whether split-tunnel/kill-switch/DNS actually DO anything depends on the
+// platform: they are enforced wherever there is an enforcement.Enforcer
+// (Windows, bacchus#59) and saved-but-inert where there is not ([E9] macOS,
+// [E10] Linux). This window says which, by asking
+// appstate.Controller.DeviceEnforced rather than assuming either answer.
+//
+// Getting that wrong in either direction is a real failure. A settings screen
+// that implies a kill-switch is armed when it cannot possibly be is exactly
+// the failure mode ui.go's state indicator exists to prevent. The inverse —
+// telling a Windows user their kill-switch does nothing while it is in fact
+// holding their machine fail-closed — is how someone concludes the setting is
+// decorative and stops thinking about it.
 package main
 
 import (
@@ -36,7 +42,7 @@ var splitTunnelModes = []string{appstate.BypassModeExclude, appstate.BypassModeI
 // showSettings opens the settings window seeded from cfg. onSaved is called
 // with the new config and the path it was written to after a successful
 // save, so main.go can update the config it holds for the next connect.
-func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, onSaved func(appstate.Config, string)) {
+func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool, onSaved func(appstate.Config, string)) {
 	if settingsOpen {
 		return
 	}
@@ -45,7 +51,11 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, onSaved func(
 	w := a.NewWindow(lang.L("Bacchus — Settings"))
 	w.SetOnClosed(func() { settingsOpen = false })
 
-	notice := widget.NewLabel(lang.L("Split-tunnel, kill-switch, and DNS below are saved for later use - this client has no device-wide tunnel yet, so they do not change traffic today."))
+	noticeText := lang.L("Split-tunnel, kill-switch, and DNS below are saved for later use - this client has no device-wide tunnel yet, so they do not change traffic today.")
+	if enforced {
+		noticeText = lang.L("Split-tunnel, kill-switch, and DNS below take effect on the next connect. Bacchus routes this whole device, so these change what leaves it.")
+	}
+	notice := widget.NewLabel(noticeText)
 	notice.Wrapping = fyne.TextWrapWord
 
 	bypassEntry := widget.NewMultiLineEntry()

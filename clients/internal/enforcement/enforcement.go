@@ -14,19 +14,21 @@
 // as well as OS-neutral, so whichever client eventually calls it does so
 // without pulling a GUI toolchain into a routing decision.
 //
-// It exists to be implemented, not to be complete. New returns an honest
-// NotImplementedError on every platform today (see enforcement_linux.go,
-// enforcement_darwin.go) — writing a real implementation is [E9] (macOS,
-// bacchus-vpn/bacchus#36) and [E10] (Linux, bacchus-vpn/bacchus#37), each
-// its own card, not this package. See docs/adr/0039-cross-platform-fyne-
-// client-in-process-core.md's 2026-07-28 amendment for the parity bar an
-// implementation has to clear before clients/windows retires in favor of
-// one, if it ever does — that is still an open question this package does
-// not answer, and Windows deliberately has no stub here: clients/windows
-// already has a complete, hardened, working implementation of this shape
-// outside this interface, so "not implemented" would be false for it, and
-// which of Fyne's two options folds it in behind this seam or leaves it
-// exactly where it is is the amendment's decision to make, not this file's.
+// Windows is implemented (enforcement_windows.go, routes_windows.go,
+// killswitch_windows.go): bacchus#35 chose "Fyne everywhere", and bacchus#59
+// folded clients/windows's working, hardened enforcement in behind this
+// interface. It clears all eight of ADR-0039's parity items — see that ADR's
+// 2026-07-30 amendment, which records them one by one. Linux and macOS are
+// still honest NotImplementedErrors (enforcement_linux.go,
+// enforcement_darwin.go); writing them is [E10] (bacchus-vpn/bacchus#37) and
+// [E9] (bacchus-vpn/bacchus#36), each its own card against the same bar.
+//
+// The bulk of what a new platform needs is already here and portable: the
+// bring-up/teardown sequencing (tunnel.go), the underlay-exclusion state
+// machine (poolroutes.go), split-tunnel matching and DNS learning
+// (splittunnel.go), the netstack/SOCKS bridge (tun2socks.go, udprelay.go),
+// address handling (addrs.go) and log redaction (redact.go). What is left is
+// osNet (osnet.go) — read that file first.
 package enforcement
 
 import "fmt"
@@ -47,6 +49,30 @@ type Enforcer interface {
 	// beats a silent no-op" rule NotImplementedError follows at the package
 	// level, applied to one policy field instead of the whole package.
 	Start(policy Policy, socksAddr string) (Session, error)
+
+	// Recover lifts a fail-closed lockdown left behind by a *crashed prior
+	// session*, and is safe to call when there is none. This is parity item 3,
+	// and it is a separate call rather than something Start does because the
+	// bar says "detected and lifted on next launch" — a user whose last
+	// session was killed is offline before they touch anything, so waiting
+	// until they next press Connect (which is all Start could do) leaves them
+	// with no network and no way to discover why. Callers run it at startup;
+	// Start also runs it defensively before arming, which is a different
+	// moment and does not replace this one.
+	Recover()
+
+	// ReserveUnderlay is Session.ReserveUnderlay's pre-Start half, and it
+	// exists because of when core actually calls it. The transport pool dials
+	// its first reality underlay during the initial Connect — before the
+	// tunnel is up, so before there is a Session to hand it to (see
+	// poolroutes.go: "the initial pooled Connect dials reality before
+	// startTunnel runs"). A caller that wired core.Config.OnUnderlayDial to
+	// the Session it does not have yet would silently drop that first
+	// address, which is precisely the leak issue #109 closed. So the wiring
+	// point is the Enforcer, once, for the whole session lifetime: addresses
+	// reserved before Start are recorded and installed by bring-up, and
+	// addresses reserved after it install live.
+	ReserveUnderlay(addr string)
 }
 
 // Session is one running enforcement session: one TUN device, one set of OS
@@ -118,8 +144,20 @@ type Policy struct {
 
 	// KillSwitch requests a fail-closed lockdown (ADR-0014): if the tunnel —
 	// or the whole process — dies, nothing egresses in the clear until it is
-	// explicitly restored. See clients/windows/killswitch.go.
+	// explicitly restored. See killswitch_windows.go.
 	KillSwitch bool
+
+	// Logf, if set, receives this package's own bring-up/teardown progress
+	// and any OS-command failure. Injected rather than called by name because
+	// the two clients log to different places — clients/windows to
+	// bacchus.log (eventlog.go), clients/fyne to its own sink — and neither
+	// is importable from here. Nil is fine and means "discard".
+	//
+	// Whatever this points at, an implementation must redact addresses out of
+	// what it passes (redact.go): a client's log is a disk file a user may
+	// hand over for support, and this package's messages carry coordinator,
+	// exit and relay addresses as literal command arguments (issue #140).
+	Logf func(format string, args ...any)
 }
 
 // BypassMode values — see Policy.BypassMode.

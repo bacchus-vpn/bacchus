@@ -41,7 +41,7 @@ func newStateIndicator() *stateIndicator {
 		description: description,
 		content:     container.NewStack(bg, container.NewPadded(container.NewPadded(container.NewCenter(text)))),
 	}
-	s.update(appstate.Disconnected)
+	s.update(appstate.Disconnected, false)
 	return s
 }
 
@@ -49,13 +49,18 @@ func newStateIndicator() *stateIndicator {
 // come from the same (stateColorName, stateForegroundName) pair the theme
 // defines (theme.go), so the indicator and the rest of the app's palette can
 // never disagree about what "safe" looks like.
-func (s *stateIndicator) update(state appstate.ConnState) {
+//
+// enforced is Controller.DeviceEnforced: whether a Protected session on this
+// build routes the whole device or only what is pointed at the proxy. It
+// changes the two words a user reads first, so it is passed in rather than
+// inferred here.
+func (s *stateIndicator) update(state appstate.ConnState, enforced bool) {
 	fg := theme.Color(stateForegroundName(state))
 	s.bg.FillColor = theme.Color(stateColorName(state))
 	s.headline.Color = fg
 	s.description.Color = fg
-	s.headline.Text = stateHeadline(state)
-	s.description.Text = stateDescription(state)
+	s.headline.Text = stateHeadline(state, enforced)
+	s.description.Text = stateDescription(state, enforced)
 	s.bg.Refresh()
 	s.headline.Refresh()
 	s.description.Refresh()
@@ -63,19 +68,30 @@ func (s *stateIndicator) update(state appstate.ConnState) {
 
 // stateHeadline is the one or two words a user sees first. Plain language
 // only - never protocol jargon (no "tunnel", "ICE", "handshake").
-func stateHeadline(s appstate.ConnState) string {
+func stateHeadline(s appstate.ConnState, enforced bool) string {
 	switch s {
 	case appstate.Connecting:
 		return lang.L("Connecting…")
 	case appstate.Protected:
-		// NOT "Protected". The headline is the glanceable layer — 28px, bold, on a
-		// success-green band — and it is what a stressed user reads and acts on. This
-		// client routes nothing on its own (ADR-0039's Scope), so a device-wide
-		// "Protected" at 28px with the scope in 14px underneath is a false claim
-		// wearing a true footnote: the qualifier loses to the colour and the type
-		// size, every time. It says what is actually true instead, and the day
-		// tun2socks lands and the app really does protect the device, this earns the
-		// stronger word back.
+		// The headline is the glanceable layer — 28px, bold, on a success-green
+		// band — and it is what a stressed user reads and acts on. A qualifier
+		// at 14px underneath does not repair it: the colour and the type size
+		// win, every time. So this word has to be true on its own.
+		//
+		// Which it is depends on the platform, not on the mood of the app. With
+		// an Enforcer (Windows, bacchus#59) the device really is routed — TUN,
+		// routes, kill-switch, the same code clients/windows ships — and a
+		// connect that could not do that aborts rather than arriving here, so
+		// reaching Protected on such a build means it worked. That earns
+		// "Protected", the word ADR-0039 said this would take back "the day
+		// tun2socks lands and the app really does protect the device".
+		//
+		// Without one ([E9] macOS, [E10] Linux), nothing is routed and the
+		// SOCKS port is the entire interface between the tunnel and the user's
+		// traffic — so it keeps saying exactly that.
+		if enforced {
+			return lang.L("Protected")
+		}
 		return lang.L("Proxy ready")
 	case appstate.Blocked:
 		return lang.L("Blocked")
@@ -96,16 +112,25 @@ func stateHeadline(s appstate.ConnState) string {
 // this says, address included — the address is not jargon here, it is the only
 // instruction that makes the tunnel usable at all.
 //
-// "Nothing is exposed" described a kill switch. There is no kill switch in this
-// client (ADR-0014 is the Windows client's). The state is named Blocked for the
-// posture it will eventually enforce; today it reports that the path died, and it
-// no longer tells the user what is or is not leaving their machine, because it has
-// no way to know.
-func stateDescription(s appstate.ConnState) string {
+// "Nothing is exposed" described a kill switch. This client now has one on any
+// platform with an Enforcer (bacchus#59) — ADR-0014's, the same code
+// clients/windows arms — but the Blocked copy below still does not make that
+// claim, deliberately. The kill-switch is a setting a user can turn off
+// (Config.DisableKillSwitch), so "nothing is exposed" is true of an armed
+// lockdown and false of a disabled one, and this function is handed the
+// platform's capability, not that session's policy. Telling a user their
+// traffic is contained when they themselves turned containment off is the
+// same class of error as the two above. It reports that the path died, which
+// is true either way, and leaves the stronger sentence to whoever is willing
+// to plumb the actual armed state to it.
+func stateDescription(s appstate.ConnState, enforced bool) string {
 	switch s {
 	case appstate.Connecting:
 		return lang.L("Finding the safest way to connect…")
 	case appstate.Protected:
+		if enforced {
+			return lang.L("All of this device's traffic goes through Bacchus.")
+		}
 		return lang.L("Apps set to use the proxy at 127.0.0.1:1080 are protected. Other apps are not.")
 	case appstate.Blocked:
 		return lang.L("The connection dropped — trying to reconnect…")

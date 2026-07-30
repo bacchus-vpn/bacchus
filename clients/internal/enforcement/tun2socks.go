@@ -1,5 +1,3 @@
-//go:build windows
-
 // Bridges a raw IP packet device (the wintun adapter) to a userspace network
 // stack (gVisor's netstack — pure Go, Apache-2.0, no GPL dependency) and
 // forwards each intercepted flow into the client's own local SOCKS5 listener,
@@ -19,7 +17,7 @@
 // never a fallback to a direct dial for a destination that was supposed to
 // be tunnelled (see splittunnel.go's policy.direct and the kill-switch,
 // killswitch.go). See udprelay_test.go for the test proving this.
-package main
+package enforcement
 
 import (
 	"context"

@@ -5,18 +5,25 @@ the `core` engine **in-process** — no FFI bridge, one language, one binary per
 platform, **no bundled webview** (Fyne renders its own widgets — the smallest attack
 surface a security tool can have).
 
-> Skeleton — this is the app shell, the connection-state indicator, and a settings
-> window, not the full client. See ADR-0039's Scope section (and its 2026-07-22
-> amendment) for what's deliberately not here yet: a country picker, and any
-> OS-level enforcement of split-tunnel/kill-switch/DNS or this client's own
-> kill-switch. `clients/windows` remains the full-featured client until those land
-> here.
+> **What this client protects depends on the platform you run it on.**
+> On **Windows** it routes the whole device — TUN adapter, route table,
+> fail-closed kill-switch, split tunnelling — through the same enforcement code
+> `clients/windows` ships (`clients/internal/enforcement`, bacchus#59).
+> On **Linux and macOS** it does none of that yet and is a SOCKS5 proxy only;
+> those are `[E10]` (bacchus#37) and `[E9]` (bacchus#36).
+>
+> The app tells you which one you are getting rather than making you read this:
+> the headline says **Protected** where the device is really routed and **Proxy
+> ready** where it is not. Still missing everywhere: a country picker (bacchus#16).
+> `clients/windows` remains maintained and shipping until the owner takes the
+> retirement decision ADR-0039's 2026-07-30 amendment describes.
 
 ## What it does
 A single window: a full-width color band showing one of four states —
-**Disconnected / Connecting… / Proxy ready / Blocked** — in plain language (Russian or
-English, following the OS locale; see i18n below), plus one button that's always
-"the one thing you can do right now" (Connect, wait, or Disconnect).
+**Disconnected / Connecting… / Protected (or Proxy ready) / Blocked** — in plain
+language (Russian or English, following the OS locale; see i18n below), plus one
+button that's always "the one thing you can do right now" (Connect, wait, or
+Disconnect).
 
 **Connect** names nothing: not an exit, and not a country. Naming an exit is not a
 thing any client can do — country-only assignment (issue #146, ADR-0042) removed it
@@ -44,29 +51,43 @@ contract between the two.
 |---|---|---|
 | Disconnected | No tunnel. Not protected. | Initial state; after Disconnect or a failed connect attempt |
 | Connecting… | Resolving a country and negotiating a session. | Set the moment Connect is pressed |
-| Proxy ready | A session is up and the SOCKS5 proxy is listening on `127.0.0.1:1080`. **Not** device-wide protection — see below. | `core.Engine.Connect` returned successfully |
-| Blocked | The proxy was ready and the live path just died. | A transport-level ICE disconnect/failed/closed while the session was up — the same signal `clients/windows`'s tray status line already uses for this state (see ADR-0039) |
+| Protected | **Windows only.** A session is up and this device's traffic is routed through it: TUN adapter, routes, kill-switch. | `core.Engine.Connect` succeeded *and* `enforcement.Enforcer.Start` succeeded |
+| Proxy ready | **Linux/macOS.** A session is up and the SOCKS5 proxy is listening on `127.0.0.1:1080`. **Not** device-wide protection — see below. | `core.Engine.Connect` returned successfully, with no enforcement backend on this platform |
+| Blocked | The session was up and the live path just died. | A transport-level ICE disconnect/failed/closed while the session was up — the same signal `clients/windows`'s tray status line already uses for this state (see ADR-0039) |
 
-`Blocked` is named after the kill-switch's fail-closed posture (ADR-0014), but this
-client does not yet enforce an OS-level kill-switch of its own — that's a separate,
-platform-specific card. The state reflects a real transport drop, not a firewall
-check.
+`Blocked` is named after the kill-switch's fail-closed posture (ADR-0014). On
+Windows an armed kill-switch really is holding the machine closed at that point
+(unless you turned it off in Settings); on the other platforms the state reflects
+a transport drop and nothing more. The banner deliberately does not claim
+"nothing is leaking" either way, because the kill-switch is a setting you can
+disable and the banner does not know which you chose.
 
-### What "Proxy ready" means — read this before trusting the banner
-This client does **no OS-level routing**: no TUN device, no route table changes, no
-system proxy configuration. It brings up the tunnel and exposes it as a **SOCKS5 proxy
-on `127.0.0.1:1080`**, and that is the whole interface between the tunnel and your
-traffic. So the headline says **Proxy ready**, not "Protected", and that wording is deliberate:
-the tunnel is up and the proxy is listening, and an application is protected if, and
-only if, you have pointed it at that proxy. Anything
-else on the machine is unaffected and unprotected, exactly as before you pressed
-Connect.
+### What the headline means — read this before trusting it
+There are two different promises here and the app shows you which one applies.
+
+**Windows — "Protected".** The whole device is routed: a wintun adapter, a
+split-default route, the coordinator/STUN/TURN endpoints excluded so the tunnel's
+own signalling survives, split tunnelling honoured, and a fail-closed kill-switch
+armed by default. This is the same code `clients/windows` has shipped for as long
+as it has existed, not a reimplementation.
+
+If that enforcement cannot be brought up — most commonly **because the app is not
+running as Administrator** — the connect **fails** and tells you why. It does not
+quietly fall back to leaving you with a working proxy: you asked to be protected,
+and a green banner over traffic that is still in the clear is the exact failure
+ADR-0039 exists to prevent.
+
+**Linux/macOS — "Proxy ready".** No OS-level routing: no TUN device, no route
+table changes, no system proxy configuration. The tunnel is exposed as a **SOCKS5
+proxy on `127.0.0.1:1080`** and that is the whole interface between it and your
+traffic — an application is protected if, and only if, you have pointed it at that
+proxy. Everything else on the machine is exactly as unprotected as before you
+pressed Connect.
 
 Point your browser (or whatever you want protected) at SOCKS5 `127.0.0.1:1080`. The
 port is fixed rather than OS-assigned precisely so it can be pointed at; it listens on
-loopback only, so nothing off the machine can reach it. `clients/windows` uses the same
-number and additionally routes the whole device through it via tun2socks — that
-device-wide step is what this client does not have yet.
+loopback only, so nothing off the machine can reach it. `clients/windows` uses the
+same number.
 
 ### i18n (Russian-first)
 UI strings go through Fyne's `lang` package (`lang.L("English string")`); the English
@@ -112,23 +133,28 @@ file yet, to this OS's per-user config directory — see Config above):
 
 | Field | Config key | Live today? |
 |---|---|---|
-| Split-tunnel bypass list (one IP/CIDR/domain per line) | `bypass` | No — see below |
-| Split-tunnel mode (`exclude` or `include`) | `bypassMode` | No — see below |
-| Kill-switch, **default on** | `disableKillSwitch` (inverted) | No — see below |
-| DNS upstream (`host:port`) | `dns` | No — see below |
+| Split-tunnel bypass list (one IP/CIDR/domain per line) | `bypass` | **Windows only** — see below |
+| Split-tunnel mode (`exclude` or `include`) | `bypassMode` | **Windows only** — see below |
+| Kill-switch, **default on** | `disableKillSwitch` (inverted) | **Windows only** — see below |
+| DNS upstream (`host:port`) | `dns` | **Windows only** — see below |
 | Connect automatically when Bacchus starts | `autoConnect` | **Yes** |
 | Start Bacchus when you log in | `launchOnBoot` | **Yes** |
 
-**Split-tunnel, kill-switch, and DNS are saved but not enforced.** The window says so
-in its own body text. This client has no TUN device (see "What 'Proxy ready' means"
-above); there is no route table and no OS firewall for these settings to act on yet.
-They exist now so the config format doesn't have to change again when a TUN device
-lands (`clients/windows`'s `tunnel.go`/`splittunnel.go`/`killswitch.go` are the
-implementations to port). Turning the kill-switch checkbox off is safe to do today for
-exactly the same reason turning it on does nothing: neither changes what leaves the
-machine.
+**Split-tunnel, kill-switch, and DNS are enforced on Windows and saved-but-inert
+elsewhere.** On Windows they are passed straight into `enforcement.Policy` and
+honoured by the same code `clients/windows` uses — the bypass list carves
+destinations out of the tunnel (or, in `include` mode, is the only thing pulled
+into it), the kill-switch arms a fail-closed OS firewall lockdown, and DNS is the
+upstream queried over DNS-over-TCP through the tunnel. On Linux and macOS there is
+still no TUN device, no route table change and no OS firewall for them to act on,
+so they are saved and nothing more, exactly as before (`[E10]` bacchus#37, `[E9]`
+bacchus#36).
 
-Auto-connect and launch-on-boot need no TUN device and are fully functional: the
+On those platforms, turning the kill-switch checkbox off remains safe for the same
+reason turning it on does nothing: neither changes what leaves the machine. On
+Windows, turning it off genuinely disables the lockdown.
+
+Auto-connect and launch-on-boot are fully functional everywhere: the
 former calls `Controller.Connect` once at startup instead of waiting for the button;
 the latter registers this binary with the OS's native per-user autostart mechanism
 (a `Run` registry value on Windows, an XDG `~/.config/autostart/*.desktop` file on
@@ -165,20 +191,24 @@ just compiled) as part of proving this seam — see ADR-0039. The Linux build (i
 #153) is now also proven on every push: CI's `linux-client` job installs the same
 package list above, builds, `go vet`/`go test`, then launches the binary under
 `xvfb-run` and confirms it is still alive five seconds later — see
-`.github/workflows/ci.yml`. Windows CI (`windows-client`) currently builds only, not
-run, matching `clients/windows`'s own CI job.
+`.github/workflows/ci.yml`. Windows CI (`windows-client`) builds `clients/windows`
+and additionally vets and runs the tests for `clients/internal/...` — the shared
+enforcement layer, whose Windows half compiles on no other runner. It does not
+launch a GUI binary, matching `clients/windows`'s own job.
 
-## Known limits (skeleton)
+## Known limits
 - No country picker (#150; `bacchus-vpn/bacchus#16` `[E3]` in the current tracker).
-- **Carries no device traffic on its own.** No TUN, no route flip, no system proxy —
-  only apps you point at SOCKS5 `127.0.0.1:1080` go through the tunnel. See "What
-  'Proxy ready' means" above; this is the biggest gap between this client and
-  `clients/windows`, and it is the one to read before trusting the banner.
-- Settings (#152) exist for split-tunnel/kill-switch/DNS but enforce nothing yet —
-  same root cause as the point above (no TUN device). See Settings above.
-- No kill-switch enforcement in this client yet — see the Connection states table
-  above. Nothing here prevents a leak; `Blocked` reports that the path died, and does
-  not claim anything about what is or is not leaving the machine.
+- **Carries no device traffic on Linux or macOS.** No TUN, no route flip, no system
+  proxy — only apps you point at SOCKS5 `127.0.0.1:1080` go through the tunnel.
+  This is the biggest remaining gap between those platforms and `clients/windows`,
+  and it is the one to read before trusting the banner. Windows does route the
+  device (bacchus#59); Linux is `[E10]` (bacchus#37) and macOS `[E9]` (bacchus#36).
+- Settings (#152) for split-tunnel/kill-switch/DNS enforce nothing on Linux/macOS —
+  same root cause as the point above. Live on Windows. See Settings above.
+- `Blocked` makes no claim about leakage on any platform. On Windows an armed
+  kill-switch is holding the machine closed; the banner still does not say so,
+  because the kill-switch is a setting you can turn off and the banner does not
+  know which you chose.
 - Connect always takes the first country the coordinator reports as assignable, and
   the coordinator picks the exit inside it. Nothing here chooses a jurisdiction, so
   a user who needs a specific one cannot express that yet — see "What it does" above.

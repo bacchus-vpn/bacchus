@@ -4,14 +4,13 @@
 // attack surface a security tool can have). See docs/adr for the seam this
 // was spiked to prove.
 //
-// Skeleton scope only (see the ADR): app shell, calm/trustworthy theme,
-// Russian-first i18n, and the connection-state indicator. Settings (#152)
-// covers split-tunnel/kill-switch/DNS/auto-connect/launch-on-boot, but they
-// are config surface only until a TUN device lands - see settings.go's doc.
-// Still no country picker (#150, blocked on #146) and no kill-switch
-// enforcement of its own yet - Connect auto-selects the first advertised
-// exit, exactly like clients/windows's own tray picker does before a user
-// chooses one.
+// App shell, calm/trustworthy theme, Russian-first i18n, and the
+// connection-state indicator. Settings (#152) covers
+// split-tunnel/kill-switch/DNS/auto-connect/launch-on-boot; whether the first
+// three do anything depends on the platform having an enforcement.Enforcer
+// (Windows does, bacchus#59) - see settings.go's doc. Still no country picker
+// (#150, blocked on #146): Connect auto-selects, exactly like
+// clients/windows's own tray picker does before a user chooses.
 //
 // Build: go build -o bacchus-fyne .  (needs a C toolchain - see README.md)
 package main
@@ -60,6 +59,12 @@ func main() {
 	w := a.NewWindow(appName)
 
 	ctrl := appstate.NewController(cfg)
+	// The enforcement layer's diagnostics (a route install that failed, the
+	// kill-switch arming) go to the log, not to the detail line: that line is
+	// one calm user-facing sentence, and a PowerShell error is neither calm
+	// nor actionable by a user. Addresses are redacted before they get here
+	// (issue #140).
+	ctrl.Logf = log.Printf
 	indicator := newStateIndicator()
 
 	detail := widget.NewLabel("")
@@ -70,7 +75,7 @@ func main() {
 
 	ctrl.OnState = func(s appstate.ConnState) {
 		fyne.Do(func() {
-			indicator.update(s)
+			indicator.update(s, ctrl.DeviceEnforced())
 			applyButtonState(action, ctrl, s)
 		})
 	}
@@ -113,7 +118,7 @@ func main() {
 		cfgPath = path
 	}
 	settingsItem := fyne.NewMenuItem(lang.L("Settings…"), func() {
-		showSettings(a, cfg, cfgPath, onConfigSaved)
+		showSettings(a, cfg, cfgPath, ctrl.DeviceEnforced(), onConfigSaved)
 	})
 	w.SetMainMenu(fyne.NewMainMenu(fyne.NewMenu(lang.L("File"), settingsItem)))
 

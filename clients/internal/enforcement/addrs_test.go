@@ -1,6 +1,4 @@
-//go:build windows
-
-package main
+package enforcement
 
 import (
 	"reflect"
@@ -26,16 +24,6 @@ func TestHostOf(t *testing.T) {
 		if got := hostOf(in); got != want {
 			t.Errorf("hostOf(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-// TestNewPSCmdRunsWindowless guards the console-window fix: every powershell.exe
-// the client spawns must carry CREATE_NO_WINDOW, or a -H=windowsgui process
-// flashes a console window on each of the many calls runPS makes.
-func TestNewPSCmdRunsWindowless(t *testing.T) {
-	cmd := newPSCmd("Write-Output hi")
-	if cmd.SysProcAttr == nil || cmd.SysProcAttr.CreationFlags&createNoWindow == 0 {
-		t.Fatalf("newPSCmd must set CREATE_NO_WINDOW (%#x); got SysProcAttr=%+v", createNoWindow, cmd.SysProcAttr)
 	}
 }
 

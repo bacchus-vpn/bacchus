@@ -513,3 +513,215 @@ amendment above is what a port has to preserve, not merely the behaviour.
   plan with a written end condition.
 - **Two Windows clients exist for a while, deliberately.** That is the cost of
   retiring one safely rather than switching over and discovering the bar was not met.
+
+## Amendment (2026-07-30): Windows has cleared the parity bar (#59)
+
+The amendment above made the eight-point bar binding and named the fold of
+`clients/windows`'s enforcement behind `Enforcer` as the card that gates
+retirement — "the bar is cleared on Windows first or it is never cleared
+anywhere." #59 is that card, and this section is its record.
+
+**Windows meets all eight items in code, with one caveat that belongs in the
+first paragraph rather than a footnote: two of the guarantees are OS
+behaviours that no Go test can assert, and they were not confirmed on an
+elevated Windows machine as part of this work.** See "what these tests do not
+cover" below — it is the section that decides whether the trigger has really
+fired, and the honest answer is "everything that can be automated, yes; the
+hardware run, not yet".
+
+That framing is the point of writing this down at all. The bar's own trigger
+clause is that retirement is "an event with a written trigger", so a record
+that says "all eight met" and nothing else would leave the owner taking a
+retirement decision on this document's assurance rather than on evidence. Each
+item below therefore says what satisfies it, where, and — where it matters —
+what it does *not* cover.
+
+### What was actually built
+
+`clients/internal/enforcement` went from a named seam with no implementation
+to the single implementation both desktop clients use. The 2026-07-28 costing
+held up: the four portable files moved once and needed no logic changes,
+`tunnel.go` needed re-pointing rather than rewriting, and `routes.go` +
+`killswitch.go` moved behind the seam near-verbatim as `winOS` methods.
+
+Three things the costing did not name, found while doing it:
+
+- **`udprelay.go` (290 lines) had to move too.** It is not in the six-file
+  table, but `tun2socks.go` depends on it for the entire general-UDP path
+  (issue #41). The table's 1,969 lines were the enforcement layer as ADR-0036
+  drew it; the actual portable unit is 2,259.
+- **Two more pieces turned out to be portable**, and moving them was worth
+  more than leaving them: the address handling (`addrs.go` — `hostOf`'s
+  bracketed-IPv6 case, `ensureCIDR`'s `/128`, the IPv4/IPv6 split of issue
+  #117) and the log redaction (`redact.go`, issue #140). Both are pure Go,
+  both are obligations every platform has, and both were fixes made once after
+  the original shipped — exactly the class the amendment above warns a port
+  re-derives badly. `routes.go`'s Windows-total row is 414 lines; the part
+  that is genuinely PowerShell is smaller than that.
+- **`Enforcer` needed two methods the seam did not name**, both because a
+  parity item cannot be met without them. `Recover()` is item 3: the bar says
+  a crashed session's lockdown is lifted "on next launch", and `Start` runs on
+  next *connect*, which is too late for a user who is already offline and does
+  not know why. `ReserveUnderlay(addr)` is item 5: the pool dials its first
+  reality underlay inside `core`'s `Connect`, before the tunnel exists and so
+  before there is a `Session` to hand it to — wiring `OnUnderlayDial` to a
+  `Session` would silently drop precisely the address issue #109 exists to
+  catch.
+
+`clients/windows` calls this package now too. There is one implementation with
+two callers, not two implementations — which is what makes "the walk client
+stays maintained" cost nothing and mean something: a fix to either client's
+routing is a fix to both.
+
+### The eight items
+
+1. **Full-device routing, both split-tunnel modes.** Exclude mode installs the
+   split-default and carves the bypass set back out; include mode installs no
+   split-default at all and routes the include set into the adapter
+   (`TestIncludeModeNeverInstallsASplitDefault` asserts the absence, which is
+   the actual content of issue #64). The DNS-driven learning path ports
+   unchanged, as predicted, and `TestObserveDNSLearnsBypassDomainAnswers` and
+   the rest of `splittunnel_test.go` came with it. Bypass-goes-direct is also
+   proven at traffic level
+   (`TestEnforcedPathSendsBypassDestinationsDirect`), not only by asking
+   `bypassPolicy` what it thinks.
+2. **Fail-closed kill-switch.** `enableKillSwitch` unchanged: default-deny
+   plus tunnel adapter, control plane, bypass set, loopback and DHCP, no
+   plaintext-DNS allowance. `TestEnableKillSwitchAllowsBeforeItBlocks` pins
+   that every allow rule exists before the default flips to Block, and
+   `TestEnableKillSwitchLeavesNothingHalfArmed` that a failure part-way
+   removes the group rather than leaving the machine locked down with a
+   partial allowlist. `TestBringUpArmsTheKillSwitchLast` pins it as the final
+   step of bring-up. It is an OS-level filter, so it survives the process —
+   see "what these tests do not cover" below.
+3. **Crash recovery.** `recoverKillSwitch` unchanged, now reachable through
+   `Enforcer.Recover()` and called at launch by both clients.
+   `TestRecoverKillSwitchRestoresACrashedSession` checks the exact prior
+   per-profile state is restored from the marker rule's Description, and
+   `TestRecoverKillSwitchIsANoopWithoutAMarker` that a clean launch touches
+   the firewall not at all — restoring "Allow" unconditionally would silently
+   undo an outbound-block policy an administrator set themselves.
+4. **Live kill-switch allowlist refresh.** `refreshKillSwitchAllowIP`
+   unchanged. `TestRefreshKillSwitchAllowIPAddsToTheLiveRule` checks the
+   existing addresses survive the remove-and-recreate (NetSecurity has no
+   in-place edit) and that the removal precedes the recreation;
+   `TestRefreshKillSwitchAllowIPIsANoopWhenUnarmed` that an unarmed session
+   does not leave an allow rule behind.
+5. **Pool-underlay exclusion on the dial path.** `poolExcluder` moved with its
+   state machine and all fourteen of its tests intact — the #109/#117/#123b/
+   #123c orderings are asserted by exactly the code that asserted them before.
+   Only its wiring changed: the four injected primitives now come from
+   `osNet`. The ordering constraint the issue singles out is covered from both
+   ends: `TestReserveBeforeStartSurvivesIntoBringUp` for the pre-tunnel dial
+   (the one a `Session`-only hook would have dropped),
+   `TestReserveAfterStartInstallsLive` for failover, and
+   `TestFailedBringUpOrphansNothing` for "never orphaned if bring-up fails
+   mid-flight" — every route installed comes back out, IPv6 is re-enabled, the
+   device is closed, and the kill-switch is never left armed over a tunnel
+   that failed to come up.
+6. **IPv6 handled.** `disablePhysicalIPv6` blocks it on the physical adapter
+   for the tunnel's lifetime, the netstack has no IPv6 route as a second line,
+   and `resolveExclusionsV6`/`addExclusionRoutesV6` handle an IPv6 reality
+   exit address as defense in depth. Unchanged from what shipped;
+   `TestFailedBringUpOrphansNothing` additionally pins that a failed bring-up
+   never leaves IPv6 disabled with nothing owning its restoration.
+7. **Elevated execution is real and documented.** Administrator, for TUN
+   creation and every routing/firewall cmdlet; `createTUN`'s error names it,
+   because unelevated is overwhelmingly the reason this fails in the field.
+   The part that needed building was the *consequence*: `clients/fyne` now
+   aborts the whole connect when enforcement fails rather than leaving the
+   engine up as a working SOCKS proxy. That fallback is the friendlier
+   outcome and it is exactly the failure this bar exists to rule out — a green
+   banner over a proxy the user never configured is this ADR's Scope-section
+   lie in its original form. `Controller.DeviceEnforced` is what the UI asks,
+   so the headline reads "Protected" only where a device really is routed and
+   stays "Proxy ready" on the platforms that still route nothing.
+8. **A traffic-level test, not a state-level one.** `traffic_test.go`. A byte
+   enters at the TUN device as a real IP packet from a real TCP stack that
+   knows nothing about Bacchus, and has to come back having been to a real
+   exit: real gVisor netstack, real split-tunnel decision, real SOCKS5, real
+   `core.Engine` on both ends, real transport handshake, real egress
+   (`TestEnforcedPathCarriesRealTraffic`). The leak half is
+   `TestEnforcedPathDropsRatherThanLeakingWhenTheTunnelDies`: with the tunnel
+   gone, a destination the policy routes through it must be dropped, never
+   re-dialled on the physical interface because that path still works — and
+   the assertion is against a listener that records arrivals, so the failure
+   being ruled out is "the byte arrives anyway, by another route" rather than
+   "an error was returned". Item 1's control test doubles as this one's
+   sensitivity control: a leak check whose listener is unreachable passes
+   forever, including on the day the code starts leaking.
+
+### What these tests do not cover, and how that half was checked
+
+The TUN device in the traffic test is in-memory (`memtun_test.go`). That is
+what lets it run unelevated, on every push, on both CI runners — but it means
+these tests prove everything from the IP packet inward and nothing about
+whether the OS hands the device those packets in the first place. That is the
+route table's job, it lives behind PowerShell, and it needs Administrator.
+
+Likewise, the kill-switch tests drive the real cmdlet sequence through an
+injected runner and assert ordering. They cannot prove Windows *honours* those
+cmdlets — that a `DefaultOutboundAction Block` really does keep blocking after
+this process is killed. That is an OS guarantee, and asserting it in Go would
+only be asserting that we called the right function.
+
+**Neither of those was verified on hardware as part of #59, and this section
+will not pretend otherwise.** The work was done on a Linux host with no
+elevated Windows machine attached; every test above was run, and nothing
+beyond them was.
+
+That gap is narrower than it looks, and it is worth being precise about why,
+because the answer is not "trust us":
+
+- The PowerShell layer is **unchanged code**. `routes.go` and `killswitch.go`
+  moved behind the seam as `winOS` methods; the cmdlet strings, their
+  arguments, their error handling and their ordering are the same ones
+  `clients/windows` has been shipping to real users since ADR-0036, through
+  six rounds of hardening. What #59 changed is who calls them, and that is
+  precisely the part the tests above do cover.
+- What is genuinely new and unproven on hardware is therefore not "does
+  `New-NetRoute` work" but "does this package call it in the same order the
+  old code did" — which `tunnel_test.go` asserts directly, against the same
+  sequence, on every push.
+
+Still, "the same code, called the same way" is an argument, not a run, and the
+two guarantees at the top of this section are the two a user's safety actually
+rests on. **The bar is met to the limit of what can be automated; the
+on-hardware confirmation is outstanding.** Whoever takes the retirement
+decision should do that run first — bring the tunnel up elevated, confirm
+`Get-NetRoute` shows the split-default and the control-plane exclusions,
+confirm real device traffic egresses via the exit, kill the process outright,
+confirm the machine is still fail-closed, and confirm the next launch
+recovers. Retiring `clients/windows` on the strength of this document alone
+would be taking the one step this ADR has twice now written down as the thing
+not to do.
+
+### Consequences
+
+- **Retirement is now a decision the owner can take, once the hardware run
+  above is done.** The code half of the trigger has fired; the on-hardware
+  half is the outstanding piece, and it is small and well-specified rather
+  than open-ended. This amendment does not retire `clients/windows`, and #59
+  explicitly did not: that is a separate call, and until it is taken, the walk
+  client stays maintained and shipping. It is now maintained on top of the
+  same enforcement code as Fyne, so "both ship for a while" costs one
+  implementation rather than two.
+- **`clients/fyne` carries device traffic on Windows.** The Scope section's
+  "**Out, and the one that matters: this client does not carry device
+  traffic**" is now false on one platform and still true on the other two. So
+  is the sentence about the settings window's split-tunnel/kill-switch/DNS
+  fields being "config surface only": on Windows they are live.
+- **`[E9]` (#36) and `[E10]` (#37) got smaller.** They implement `osNet`, not
+  `Enforcer` — around a dozen primitives — and inherit the orchestration, the
+  underlay-exclusion state machine, the split-tunnel logic, the netstack
+  bridge, the address handling and the redaction. `tunnel_test.go` runs
+  against any `osNet`, so the ordering guarantees they have to satisfy are
+  executable rather than prose. What does not get smaller is the part the
+  2026-07-28 amendment already said was the real cost: nftables/iptables and
+  `pf` are still from-scratch implementations against unrelated OS APIs, and
+  each still carries item 8 as an acceptance criterion.
+- **CI covers this code for the first time.** `clients/internal/...` was
+  vetted and tested by no job — the server job excluded `./clients/...`,
+  linux-client runs only `./clients/fyne/...`, and windows-client built a
+  single package. Both now vet and test it, which is what makes the eight
+  items above a standing claim rather than a one-time one.

@@ -1,5 +1,3 @@
-//go:build windows
-
 // Destination-based split tunnelling: decides, per flow, whether a
 // destination should egress the physical interface instead of the tunnel.
 //
@@ -47,7 +45,7 @@
 // snapshot taken before it existed), and not live-refreshed either (armed
 // still read as false at the moment onLearn fired). arm() below and learn()
 // share one lock for exactly this reason — see arm()'s doc comment.
-package main
+package enforcement
 
 import (
 	"net"
