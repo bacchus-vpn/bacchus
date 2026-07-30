@@ -900,16 +900,17 @@ func handle(m wire, src *net.UDPAddr) {
 		if chained {
 			exitID = ""
 		}
-		// The tier's speed cap rides the assignment to the party that can enforce it
-		// (issue #58, ADR-0048): the exit shapes the session, so the coordinator stays
-		// out of the data path (ADR-0009/0033) and never sees a byte of it.
+		// The tier's speed cap rides the assignment to whichever party moves the bytes
+		// (issue #58/#74, ADR-0048): the exit shapes a direct session and the relay
+		// shapes a peer-relayed one, so the coordinator stays out of the data path
+		// (ADR-0009/0033) and never sees a byte of it either way.
 		//
 		// Zero on a CHAINED connect, for the same reason exitID is empty above: the
 		// client assembled its own onion and this coordinator does not know the
-		// terminating exit (ADR-0042 §9). The node it pairs is a peeling hop, which
-		// forwards ciphertext and terminates nothing, so there is no session for it to
-		// shape — stamping a cap there would be a number sent to a party that cannot
-		// apply it and should not learn it.
+		// terminating exit (ADR-0042 §9), so it does not stamp a cap for a path it
+		// cannot account for. That leaves a chained connect unshaped by tier — a
+		// SEPARATE gap from the peer-relay one #74 closed, with a separate reason, and
+		// recorded as such in ADR-0048 §5 rather than folded into it.
 		sessionCap := limits.SpeedCapBps
 		if chained {
 			sessionCap = 0
@@ -947,25 +948,34 @@ func handle(m wire, src *net.UDPAddr) {
 			// verifyChainDisjoint). pickRelay already excludes the node it paired — the
 			// chain's head — but not the client's later hops, which it cannot see.
 			//
-			// No SessionCapBps here (issue #58, ADR-0048 §5): this assign goes to the
-			// RELAY, which splices ciphertext and terminates nothing, so it could not
-			// shape the session even if it wanted to — and the exit on the far side is
-			// reached through its bare TCP listener with no session id, so it has
-			// nothing to key a per-session limiter by. A peer-relayed session is
-			// therefore unshaped by tier; the node's own declared cap still paces it
-			// (ADR-0040). This is the gap ADR-0048 §5 names and files a follow-up for,
-			// not one to close by handing a forwarder a tier signal it cannot act on.
+			// SessionCapBps rides this assign too (issue #74, ADR-0048 §5): the RELAY
+			// shapes a peer-relayed session. It terminates nothing, but it moves every
+			// byte, so it can pace them — which is what makes this enforceable at a
+			// party that never learns the destination or the plaintext.
+			//
+			// The EXIT is not involved and learns nothing new: no session identity, no
+			// token, no credential reaches it, so ADR-0048 §4's linkability property is
+			// untouched. And what the relay learns is a coarse number it could already
+			// derive by measuring the throughput it forwards, which is why this is a
+			// materially smaller disclosure than the credential-to-exit design §4
+			// rejected. The splice stays transparent either way — the limiter wraps the
+			// copies, never the bytes' meaning (TestPeerRelaySplicePreservesE2E).
+			//
+			// Zero for a chained connect, via sessionCap above: that gap is separate and
+			// stays open.
 			pairAndReply(src, m.Nonce, r.addr,
-				wire{Type: "assign", Session: sid, ExitAddr: e.tcpAddr},
+				wire{Type: "assign", Session: sid, ExitAddr: e.tcpAddr, SessionCapBps: sessionCap},
 				wire{Type: "session", Session: sid, ExitID: exitID, Relay: relayPeer, RelayTag: relayTag(r.id), Release: coordRelease}, now)
 			if chained {
 				// Deliberately not the shape of the line below it. There is no exit to
 				// name, and printing e.id under an "exit" heading would record a hop as a
 				// terminator in the operator's log — the same misattribution §9 keeps out
 				// of the session table, arriving by the back door.
+				// No capNote: sessionCap is zero here by construction (see above), so a
+				// chained line carries no cap to report.
 				log.Printf("session %s PEER-RELAY (chained): client %s <-> relay %s -> first hop %s(%s); terminating exit not known to this coordinator", sid, src, r.addr, e.id, e.country)
 			} else {
-				log.Printf("session %s PEER-RELAY: client %s <-> relay %s -> exit %s(%s)", sid, src, r.addr, e.id, e.country)
+				log.Printf("session %s PEER-RELAY: client %s <-> relay %s -> exit %s(%s)%s", sid, src, r.addr, e.id, e.country, capNote(sessionCap))
 			}
 		} else if e.udp != nil {
 			// TURN fallback (issue #17): no peer relay is available, so wire the

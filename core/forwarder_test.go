@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
@@ -105,7 +106,10 @@ func TestPeerRelaySplicePreservesE2E(t *testing.T) {
 	clientConn, relayEnd := net.Pipe()
 	deadline(t, clientConn, relayEnd)
 	var relay Engine // relayPipe uses no engine state (see its doc)
-	go relay.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, exitAddr)
+	// nil pace: this test is about transparency, not shaping, and must stay that way
+	// — it is the regression barrier issue #74's relay-side pacing is checked against
+	// (a nil *Limiter is inert, so the splice is byte-for-byte what it was).
+	go relay.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, nil, exitAddr)
 
 	nc, err := clientHandshake(clientConn, key.Public, target, verifierBoundTo(rootPub, key.Public))
 	if err != nil {
@@ -160,7 +164,7 @@ func TestPeerRelaySpliceRejectsUnauthorizedExitE2E(t *testing.T) {
 	clientConn, relayEnd := net.Pipe()
 	deadline(t, clientConn, relayEnd)
 	var relay Engine
-	go relay.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, exitAddr)
+	go relay.relayPipe(pipeStream{Conn: relayEnd, label: e2eLabel}, nil, exitAddr)
 
 	nc, err := clientHandshake(clientConn, key.Public, "example.com:443", verifierBoundTo(rootPub, key.Public))
 	_ = clientConn.Close() // unblock the splice + exit goroutine
@@ -169,4 +173,101 @@ func TestPeerRelaySpliceRejectsUnauthorizedExitE2E(t *testing.T) {
 		t.Fatal("client accepted an exit with no valid credential through the peer-relay splice; want abort")
 	}
 	<-exitDone // drain so the goroutine can't outlive the test
+}
+
+// ---------------------------------------------------------------------------
+// Relay-side tier shaping (issue #74, ADR-0048 §5).
+// ---------------------------------------------------------------------------
+
+// blastingUpstream binds a loopback TCP listener that answers one connection by
+// writing n bytes as fast as it can, then closing. It stands in for whatever the
+// relay splices to — relayPipe forwards ciphertext blindly and never completes a
+// handshake of its own, so a bare listener is indistinguishable from a real exit
+// as far as the splice is concerned. What is under test is the PACING of that
+// splice, which is why these tests deliberately do not build a Noise channel.
+func blastingUpstream(t *testing.T, n int) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("upstream listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = conn.Write(make([]byte, n))
+	}()
+	return ln.Addr().String()
+}
+
+// TestPeerRelaySpliceShapesToTheTierCap is issue #74's ruling actually DENYING
+// throughput, which is the bar #58 set for the exit's own cap: a tier system whose
+// tests have never been seen to deny anything is not testing enforcement.
+//
+// It drives handlerFor rather than relayPipe directly, so it covers the production
+// wiring end to end — the assign's cap becoming a limiter (handlerFor's ExitAddr
+// branch) and that limiter reaching both copies (relayPipe). A mutation in either
+// one goes red here.
+//
+// The bucket starts full at burstBytes, so the assertion is on the bytes BEYOND the
+// burst: at 512 kbit/s (64 KB/s) a 64 KB overshoot cannot cross in under a second
+// however fast the machine is, because a token bucket's rate is not a property of
+// the hardware.
+//
+// MUTATION: drop sessionPace from handlerFor's ExitAddr branch, or the
+// pace.LimitReads wraps from relayPipe's copies, and this goes red — the transfer
+// completes immediately.
+func TestPeerRelaySpliceShapesToTheTierCap(t *testing.T) {
+	const capBps = 512_000     // 64 KB/s
+	const payload = 128 * 1024 // two bursts' worth
+	const wantAtLeast = 900 * time.Millisecond
+
+	upstream := blastingUpstream(t, payload)
+	clientConn, relayEnd := net.Pipe()
+	deadline(t, clientConn, relayEnd)
+
+	e := &Engine{limiterCtx: context.Background()}
+	handle := e.handlerFor(wire{Type: "assign", Session: "s1", ExitAddr: upstream, SessionCapBps: capBps})
+	go handle(pipeStream{Conn: relayEnd, label: e2eLabel})
+
+	start := time.Now()
+	n, err := io.ReadFull(clientConn, make([]byte, payload))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("read %d of %d bytes through the shaped splice: %v", n, payload, err)
+	}
+	if elapsed < wantAtLeast {
+		t.Errorf("%d bytes crossed a %d bps relay cap in %s; want at least %s — a peer-relayed session is NOT shaped to its tier",
+			payload, capBps, elapsed.Truncate(time.Millisecond), wantAtLeast)
+	}
+}
+
+// TestUncappedPeerRelaySpliceIsNotShaped is the control for the test above, and the
+// regression guard for every relay assign that carries no cap — an unpoliced
+// coordinator's, and a CHAINED connect's, which the coordinator deliberately leaves
+// uncapped (ADR-0042 §9, cmd/coordinator's
+// TestChainedPeerRelayAssignCarriesNoSessionCap). Without it the timing assertion
+// above could be satisfied by any accidental stall and would keep passing while
+// proving nothing about the cap.
+func TestUncappedPeerRelaySpliceIsNotShaped(t *testing.T) {
+	const payload = 128 * 1024
+
+	upstream := blastingUpstream(t, payload)
+	clientConn, relayEnd := net.Pipe()
+	deadline(t, clientConn, relayEnd)
+
+	e := &Engine{limiterCtx: context.Background()}
+	handle := e.handlerFor(wire{Type: "assign", Session: "s1", ExitAddr: upstream})
+	go handle(pipeStream{Conn: relayEnd, label: e2eLabel})
+
+	start := time.Now()
+	if _, err := io.ReadFull(clientConn, make([]byte, payload)); err != nil {
+		t.Fatalf("ReadFull through the unshaped splice: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("an UNCAPPED peer relay took %s to move %d bytes — a relay assign carrying no cap is being shaped anyway", elapsed, payload)
+	}
 }
