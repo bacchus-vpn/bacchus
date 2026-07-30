@@ -125,7 +125,11 @@ func startForwardNodeWithCred(t *testing.T, key noise.DHKey, dir *relayDirectory
 				return
 			}
 			_ = c.SetDeadline(time.Now().Add(hopTestDeadline))
-			go e.exitTerminate("", c)
+			// No session cap: a hop is reached through its own ingress listener,
+			// which the coordinator assigned no session and therefore no tier
+			// (issue #58, ADR-0048 §5) — the same nil startForwardNodeCapped
+			// above passes, and what a real relay-forwarded connection gets.
+			go e.exitTerminate("", nil, c)
 		}
 	}()
 	return ln.Addr().String()
