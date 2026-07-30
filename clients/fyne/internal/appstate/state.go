@@ -75,11 +75,15 @@ func StateFor(cur ConnState, ev core.Event) ConnState {
 // same name: core's one genuinely diagnostic signal for a relay chain that
 // failed to build (docs/design/relay-chaining.md §10.4; core/relaychain.go's
 // file doc — chaining is fail-closed, never silently downgraded to fewer
-// hops). This client has no Settings UI for RelayHops/RelayDirectory yet
-// (issue #28 wired the Windows client only), so nothing produces this
-// message today, but DetailFor already discriminates EventError generically
-// and there's no reason the two clients should recognize different signals
-// from the same core the day this one grows the same control.
+// hops).
+//
+// This used to say that nothing in this client could produce the message,
+// because there was no Settings UI for RelayHops/RelayDirectory (issue #28
+// wired the walk client only) — it was written against the day one arrived.
+// Issue #93 is that day: the hop count is settable here now, so a user who
+// raises it past what their directory can satisfy reaches this branch, and
+// what they are told is that their relay-hops setting is why, rather than a
+// generic connection error they would retry into the same directory gap.
 const relayChainFailedPrefix = "[relay] chain not built: "
 
 func DetailFor(ev core.Event, cur ConnState) (text string, show bool) {
