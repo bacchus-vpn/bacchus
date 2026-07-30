@@ -1,12 +1,23 @@
 //go:build windows
 
 // Connection settings window (issue #75, ADR-0036): the client-side surface
-// over core's transport pool / per-user failover (ADR-0028) — a geo picker, a
-// manual exit pin, transport-ladder reordering, a node-count control, and a
-// "reset learned paths" button. It edits the package-level cfg (config.go)
-// and calls only core's existing exported config API (Config.Geo/ExitID/
-// TransportPool/SelectionDir, Engine.ResetSelection) — no selection logic is
-// reimplemented here.
+// over core's transport pool / per-user failover (ADR-0028) — transport-ladder
+// reordering, a relay hop-count control with its directory pair, an
+// exit-admission anchor, and a "reset learned paths" button. It edits the
+// package-level cfg (config.go) and calls only core's existing exported config
+// API (Config.TransportPool/SelectionDir, Engine.ResetSelection) — no
+// selection logic is reimplemented here.
+//
+// It used to offer a manual exit pin as well, disabled, alongside a label
+// explaining that it did nothing. Issue #93 deleted the control: ADR-0042 /
+// issue #146 removed the client's ability to name an exit, and core emits
+// "Config.ExitID is set but has NO EFFECT" for a value that reaches it, so
+// what was on screen was a text box whose entire content was an apology for
+// itself. Config.ExitID (config.go) is deliberately KEPT — a settings file
+// written before #146 still carries one, and connect() logging that the saved
+// pin is ignored is more honest than this window silently clearing it. The
+// field is legacy; the control was clutter that invited being ported into the
+// client replacing this one.
 //
 // allowedPoolTransports vs. knownPoolTransports: the full-device tunnel
 // (tunnel.go) can only carry a transport whose underlay address it can exclude
@@ -214,7 +225,6 @@ func openSettingsDialog() {
 
 	var dlg *walk.Dialog
 	var poolCheck *walk.CheckBox
-	var exitEdit *walk.LineEdit
 	var ladderBox *walk.ListBox
 	var relayHopsEdit *walk.NumberEdit
 	var relayDirPathEdit, relayDirKeyEdit *walk.LineEdit
@@ -243,12 +253,7 @@ func openSettingsDialog() {
 				Layout: VBox{},
 				Children: []Widget{
 					Label{Text: "The country you exit in is chosen from the tray menu (issue #6) — there is only ever one country picker, so it isn't repeated here."},
-					Label{Text: "Manual exit ID (legacy, ignored): naming a specific exit was removed — the coordinator picks the exit inside your chosen country (issue #146). A value saved here from an older config has no effect."},
-					LineEdit{
-						AssignTo: &exitEdit,
-						Text:     snap.ExitID,
-						Enabled:  false,
-					},
+					Label{Text: "Naming a specific exit was removed for everyone (issue #146): the coordinator picks the exit inside the country you chose. A pin saved by an older version has no effect, and connecting says so in the log."},
 				},
 			},
 			GroupBox{
@@ -364,7 +369,9 @@ func openSettingsDialog() {
 		} else {
 			next.TransportPool = nil
 		}
-		next.ExitID = exitEdit.Text()
+		// next.ExitID is deliberately not assigned: `next := snap` carries any
+		// value an older version saved through unchanged, so removing the
+		// control does not quietly rewrite the file. See this file's doc.
 
 		dirPath, dirKey, err := validateRelayChainConfig(int(relayHopsEdit.Value()), relayDirPathEdit.Text(), relayDirKeyEdit.Text())
 		if err != nil {
