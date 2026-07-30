@@ -12,8 +12,8 @@
 
 ## Context
 
-Relay chaining (#142, ADR-0038) spreads a chain's hops across operators using the
-coordinator-signed `Entry.Operator` tag (#124). ADR-0038's #124 amendment already
+Relay chaining (`old #142`, ADR-0038) spreads a chain's hops across operators using the
+coordinator-signed `Entry.Operator` tag (`old #124`). ADR-0038's `old #124` amendment already
 says that is the advisory half, and that real network diversity is **AS diversity**,
 derived client-side from each hop's **observed IP** against an independent routing
 table — never from a tag in the snapshot, because neither a node nor a coordinator
@@ -30,7 +30,7 @@ masks an attester's observed IP to a /24 or /48 as a "same-network" proxy, and s
 in its own comment that a real ASN lookup is required before the TRUSTED capacity
 stream is fed, because the ~4:1 AS bound is denominated in autonomous systems.
 ADR-0041 line 173 records the same follow-up. The trusted stream is what B3's serve
-floor (#15), B6's share-based backpressure and B2's two-rating design (#157) wait
+floor (#15), B6's share-based backpressure and B2's two-rating design (`old #157`) wait
 on. Four things, one missing component.
 
 Before this change the repository contained **no ASN machinery of any kind** (the
@@ -140,7 +140,7 @@ Both middle rungs are load-bearing:
 - **Without pass 2**, the no-table case is worse than useless. Every hop pools into
   unknown, so no pass demanding AS distinctness can place anything, and the fill
   falls straight through to unconstrained — **silently switching off the operator
-  diversity that has run since #124**. Adding a control must not remove one.
+  diversity that has run since `old #124`**. Adding a control must not remove one.
 
 The order between them is the ranking #23 states: operator is advisory and is dropped
 first, AS is load-bearing and is dropped last.
@@ -325,7 +325,7 @@ The seam is in place and both consumers use it; what is missing is bytes on a cl
   today is the coordinator side, which can be pointed at a file now.
 - **ADR-0041's follow-up is closed on the coordinator side.** `observedAS` resolves a
   real AS when `-asn-table` is staged, which is the prerequisite ADR-0041 line 173
-  named for feeding the TRUSTED stream. Feeding it remains #157's decision; this only
+  named for feeding the TRUSTED stream. Feeding it remains `old #157`'s decision; this only
   removes the blocker.
 - **A configured-but-unusable table is fatal at startup.** An operator who passed
   `-asn-table` believes AS resolution is running; starting anyway would hand them the

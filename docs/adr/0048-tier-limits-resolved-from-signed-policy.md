@@ -102,7 +102,7 @@ mechanism is real, exactly as `TestServeFloorGateWouldExcludeIfEnabled` flips
 
 The endpoint-class oracle (`exitClass`) ships **nil**, and an exit with no known class
 is **not** withheld. That looks like a hole and is the opposite. An endpoint class is a
-quality judgement — latency, jitter, loss, the feed issue #161 describes — and
+quality judgement — latency, jitter, loss, the feed issue #21 describes — and
 ADR-0040 §8.4 is explicit that capacity is not quality, so deriving a class from
 measured throughput would be inventing the number rather than reading it. A *declared*
 class is worse: ADR-0040 accepts a self-reported speed cap because that claim only ever
@@ -197,7 +197,7 @@ nil-safe, so "no cap" needs no branch anywhere.
 ### 5. Per-session shaping covers the direct data plane only
 
 `sessionCapBps` rides only assignments an **exit** receives — a direct connect or a
-relay-mode TURN fallback, which the exit correctly cannot tell apart (issue #97). It is
+relay-mode TURN fallback, which the exit correctly cannot tell apart (`old #97`). It is
 absent from:
 
 - **A peer-relay assign**, which goes to the *relay* (it carries `ExitAddr`). A relay
@@ -235,7 +235,7 @@ paths; what is missing is the per-tier limit.
   holds.
 - **A tier-driven refusal reports `country-busy`, not a distinct reason.** A distinct
   one would let a client count the exits above and below its own class, one connect at
-  a time — the per-tier network map #146 removed the exit list to prevent.
+  a time — the per-tier network map `old #146` removed the exit list to prevent.
 - **`admit` now returns the verified credential.** Re-verifying to read a field the
   gate already parsed would spend a second ed25519 verification per connect and leave
   two call sites that could disagree about which credential they read.
