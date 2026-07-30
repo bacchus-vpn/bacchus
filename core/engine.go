@@ -897,11 +897,38 @@ type wire struct {
 	// which does not terminate the session and could not shape it; stamping it
 	// there would hand a forwarder a tier signal about a client it is only
 	// splicing, for no enforcement in return. See ADR-0048 §5.
-	SessionCapBps uint64              `json:"sessionCapBps,omitempty"`
-	QuotaState    string              `json:"quotaState,omitempty"`  // quotaOK | quotaExhausted (issue #143, ADR-0040): whether this forwarder's declared monthly traffic quota — its operator's own ISP data cap — is spent for the current billing cycle. One BIT, not the byte counts: the coordinator needs only "may I assign to you", and a per-node monthly usage curve would hand a hostile coordinator (ADR-0020, #60) a linkability signal about a residential operator's household for no matchmaking benefit. Empty = no declared quota; additive/optional.
-	Receipt       *accounting.Receipt `json:"receipt,omitempty"`     // capacity-report payload (issue #158): a co-signed usage receipt (ADR-0021) the CLIENT sends to the coordinator to feed the capacity estimator. Not a node self-report — the node cannot move this number (both parties co-sign the throughput, and SignReport binds the client-asserted Saturated bit), which is exactly why it can ride the wire where a self-reported capacity could not. Absent on every other message.
-	ReportSig     []byte              `json:"reportSig,omitempty"`   // client signature over the capacity-report receipt + its saturation bit (accounting.SignReport, issue #158): proves the un-co-signed Saturated bit came from the client that co-signed the receipt.
-	IngressPort   int                 `json:"ingressPort,omitempty"` // a relay's onion-forward TCP listener port (issue #124/#142, ADR-0038): the port an upstream hop dials to hand this node a layer to peel. Self-reported on register — a coordinator cannot observe a TCP listener from a UDP register — but only the PORT is trusted: the coordinator advertises the ingress as its OWN observed source IP joined to this port (buildSnapshot), so a relay cannot assert an ingress IP and therefore cannot claim to sit in an AS it does not occupy. Contrast SpeedCap, where a self-report is safe because it only binds downward; here the self-report is exactly what an attacker would profit from, so only the unforgeable half is taken. Zero/absent => this relay advertises no ingress and is not relay-eligible.
+	SessionCapBps uint64 `json:"sessionCapBps,omitempty"`
+	QuotaState    string `json:"quotaState,omitempty"` // quotaOK | quotaExhausted (issue #143, ADR-0040): whether this forwarder's declared monthly traffic quota — its operator's own ISP data cap — is spent for the current billing cycle. One BIT, not a usage series: the coordinator needs only "may I assign to you", and a per-node monthly usage CURVE would hand a hostile coordinator (ADR-0020, #60) a linkability signal about a residential operator's household for no matchmaking benefit. That refusal is about observed usage and still stands — see DeclaredQuotaBytes below, which is the operator's static configured cap and a different kind of claim. Empty = no declared quota; additive/optional.
+	// DeclaredQuotaBytes is the monthly traffic quota this operator DECLARED, in
+	// BYTES (issue #49, ADR-0040 amendment) — Limits.MonthlyQuota, the number they
+	// typed, matching capacity.Bytes and the unit an ISP writes a cap in.
+	//
+	// Note the unit split against SpeedCap on this same wire: that one is a RATE in
+	// bits/s, this one is a VOLUME in bytes. Neither is convertible into the other
+	// and they are never compared, so the unit rides in both field names rather than
+	// being left to a reader's memory. The policy's serve floor splits the same way
+	// and for the same reason (policy.ServeFloor.MinDeclaredQuotaBytes).
+	//
+	// It is the CONFIGURED CAP, never the counter and never usage over time. The
+	// distinction is the whole reason this field is allowed to exist where the byte
+	// counts are not: a cap is a constant its operator chose and could publish on a
+	// forum without telling anyone anything about their household, while a usage
+	// series is a measurement OF that household — when they stream, when they are
+	// away — which is the linkability signal ADR-0040 refused and still refuses.
+	//
+	// Self-reported and trusted on exactly SpeedCap's argument: the claim only ever
+	// binds DOWNWARD. The coordinator uses it to withhold serve eligibility from a
+	// node declaring too little, so under-declaring lies a node out of traffic and
+	// over-declaring buys nothing the node's own quota accounting will honour — it
+	// still stops forwarding when its real cap is spent, and says so through
+	// QuotaState.
+	//
+	// Zero/absent = no declared quota; additive/optional, so a node predating #49
+	// omits it and is treated exactly as it is today.
+	DeclaredQuotaBytes uint64              `json:"declaredQuotaBytes,omitempty"`
+	Receipt            *accounting.Receipt `json:"receipt,omitempty"`     // capacity-report payload (issue #158): a co-signed usage receipt (ADR-0021) the CLIENT sends to the coordinator to feed the capacity estimator. Not a node self-report — the node cannot move this number (both parties co-sign the throughput, and SignReport binds the client-asserted Saturated bit), which is exactly why it can ride the wire where a self-reported capacity could not. Absent on every other message.
+	ReportSig          []byte              `json:"reportSig,omitempty"`   // client signature over the capacity-report receipt + its saturation bit (accounting.SignReport, issue #158): proves the un-co-signed Saturated bit came from the client that co-signed the receipt.
+	IngressPort        int                 `json:"ingressPort,omitempty"` // a relay's onion-forward TCP listener port (issue #124/#142, ADR-0038): the port an upstream hop dials to hand this node a layer to peel. Self-reported on register — a coordinator cannot observe a TCP listener from a UDP register — but only the PORT is trusted: the coordinator advertises the ingress as its OWN observed source IP joined to this port (buildSnapshot), so a relay cannot assert an ingress IP and therefore cannot claim to sit in an AS it does not occupy. Contrast SpeedCap, where a self-report is safe because it only binds downward; here the self-report is exactly what an attacker would profit from, so only the unforgeable half is taken. Zero/absent => this relay advertises no ingress and is not relay-eligible.
 
 	// Connect-time device-credential verification (issue #50/#51, ADR-0045).
 	// These four carry the account service's two-tier entitlement chain
@@ -1306,22 +1333,27 @@ func (e *Engine) Start(ctx context.Context) error {
 	// ADR-0015) so a coordinator enforcing a minimum serving version can fence it
 	// when it falls behind. Computed once here — the loop re-sends the same regs.
 	release := version.Current().String()
-	// The declared speed cap (issue #143) is static for the process's life, so it
-	// rides the template. The quota's spent/unspent bit is NOT — registerLoop stamps
-	// it fresh on every send, because the coordinator's register handler REPLACES
-	// its registry entry wholesale, so any field absent from a given register is
-	// zeroed for the next 10s.
+	// The declared speed cap (issue #143) and the declared monthly quota (issue #49)
+	// are both static for the process's life, so they ride the template. The quota's
+	// spent/unspent BIT is NOT — registerLoop stamps it fresh on every send, because
+	// the coordinator's register handler REPLACES its registry entry wholesale, so any
+	// field absent from a given register is zeroed for the next 10s.
+	//
+	// declaredQuota is the configured cap, not the counter: it is read once from the
+	// config here and never from the live Quota, which is what keeps a usage series
+	// off this wire by construction rather than by care (ADR-0040 amendment, #49).
 	speedCap := uint64(e.cfg.Limits.SpeedCap)
+	declaredQuota := uint64(e.cfg.Limits.MonthlyQuota)
 	var regs []wire
 	if e.roles[RoleExit] {
-		regs = append(regs, wire{Type: "register", Role: "exit", ID: e.cfg.ID, Country: e.cfg.Country, Addr: e.cfg.Advertise, Cred: e.cfg.AdmissionCred, Release: release, SpeedCap: speedCap})
+		regs = append(regs, wire{Type: "register", Role: "exit", ID: e.cfg.ID, Country: e.cfg.Country, Addr: e.cfg.Advertise, Cred: e.cfg.AdmissionCred, Release: release, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota})
 	}
 	if e.roles[RoleRelay] {
 		// IngressPort is this relay's onion-forward listener port (issue #142). The
 		// coordinator joins it to the source ip it OBSERVES on this register to form
 		// the ingress it advertises, so only the port is ours to state. Zero when this
 		// relay serves no ingress, which leaves it simply not relay-eligible as a hop.
-		regs = append(regs, wire{Type: "register", Role: "relay", ID: e.cfg.ID, Country: e.cfg.Country, Cred: e.cfg.AdmissionCred, Release: release, SpeedCap: speedCap, IngressPort: ingressPort})
+		regs = append(regs, wire{Type: "register", Role: "relay", ID: e.cfg.ID, Country: e.cfg.Country, Cred: e.cfg.AdmissionCred, Release: release, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota, IngressPort: ingressPort})
 	}
 
 	// One read loop per pool member: a forwarder can be assigned a session by
