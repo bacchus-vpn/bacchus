@@ -11,20 +11,26 @@ trackers on **2026-07-28**, and every issue open on that day was re-filed with a
 number. References written before the move were left as they were, so `#N` in this
 repository belongs to one of two schemes depending on when the sentence was written:
 
-- **Records 0001–0042** arrived in this repository's initial commit. They were written
-  against the **retired** tracker, and every bare `#N` in them is one of its numbers.
-- **Records 0043 onward**, and the amendments dated 2026-07-28 or later that were
-  appended to earlier records, use the **current** tracker.
+- **Records 0001–0042** arrived in this repository's initial commit. Their original
+  bodies were written against the **retired** tracker, so a bare `#N` there is one of
+  its numbers.
+- **Records 0043 onward** were written here, against the **current** tracker.
+- **Amendments appended to an earlier record** are the awkward case, and the reason the
+  split is not simply "which file". An amendment introduces current numbers while still
+  citing retired ones for the history it builds on, so one record — and sometimes one
+  paragraph — carries both. ADR-0038's last amendment cites `#26` in the current scheme
+  alongside three numbers in the retired one.
 
-The two are not distinguishable by inspection, and a single paragraph can contain both —
-ADR-0038's last amendment cites `#26` in the current scheme alongside three numbers in
-the retired one. What tells them apart is the subject matter, not the number.
+So the boundary runs between passages, not between files, and the two schemes are not
+distinguishable by inspection. What tells them apart is the subject matter, not the
+number.
 
 **The practical consequence: a retired number below the current tracker's high-water
 mark will autolink, and it will point somewhere unrelated.** A record citing `#42` for
 admission gating produces a link to a relay-directory change; `#60` for end-to-end exit
-verification produces a link to a coordinator-hosting change. Treat a link from an
-older record as decoration and read the surrounding sentence for what was meant.
+verification produces a link to a coordinator-hosting change. So a link in these records
+is only as trustworthy as the passage it sits in: where the link and the sentence
+disagree, the sentence is right.
 
 Three things worth knowing before trying to "fix" a number:
 
@@ -47,7 +53,7 @@ same reason and with the same reading. Comments are inert — nothing autolinks 
 
 **Writing a new reference:** a current issue is cited bare, as #77, so it links.
 A retired one is cited as `` `old #157` `` — a code span, which GitHub cannot autolink,
-so it can never point at an unrelated issue. See CONVENTIONS.md.
+so it can never point at an unrelated issue. See [CONVENTIONS.md](../../CONVENTIONS.md).
 
 - [0001](0001-record-architecture-decisions.md) — Record architecture decisions
 - [0002](0002-open-monorepo-with-separate-private-payment-repo.md) — Open monorepo, private payment repo
