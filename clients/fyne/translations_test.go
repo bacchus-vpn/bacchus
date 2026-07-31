@@ -128,11 +128,20 @@ func TestEveryUIStringIsTranslated(t *testing.T) {
 		}
 	}
 
-	// Two dynamic call sites exist today, both lang.L(err.Error()) in
-	// settings.go's save handler, both covered by the test below. If this
-	// number moves, a call site was added whose key this test cannot see:
-	// cover it there (or make it a literal) rather than raising the number.
-	const knownDynamicCallSites = 2
+	// Five dynamic call sites exist today, all in settings.go, and every key
+	// any of them can produce is covered by one of the two tests below:
+	//
+	//   - three lang.L(err.Error()) in the save handler (relay chaining,
+	//     admission, volunteering)
+	//   - lang.L(appstate.ErrVolunteerWhileRouted.Error()) on the notice shown
+	//     when the volunteer section is disabled, which is the same sentinel the
+	//     save handler can return, so it adds no new key
+	//   - lang.L(w) over PlanVolunteer's warn-and-serve findings
+	//
+	// If this number moves, a call site was added whose key this test cannot
+	// see: cover it below (or make it a literal) rather than only raising the
+	// number.
+	const knownDynamicCallSites = 5
 	if dynamic != knownDynamicCallSites {
 		t.Errorf("found %d lang.L calls with a non-literal key, expected %d — a new one is invisible to this test; see this test's doc",
 			dynamic, knownDynamicCallSites)
@@ -155,6 +164,47 @@ func TestValidationErrorsAreTranslated(t *testing.T) {
 	} {
 		if _, ok := tr[err.Error()]; !ok {
 			t.Errorf("no Russian translation for the error text %q — settings.go passes it to lang.L, so it is a UI string", err.Error())
+		}
+	}
+}
+
+// TestVolunteerMessagesAreTranslated is the same contract for issue #12's
+// section, kept as its own test because its stake is different from every other
+// string in this window.
+//
+// The exit disclosure and its refusals are where a user decides whether to
+// accept legal exposure. lang.L falling back to English there does not
+// inconvenience a Russian-speaking volunteer, it hands them a decision they
+// cannot read — and this client's whole reason to be translated is that audience.
+// So every sentence PlanVolunteer can put on screen is asserted, refusals and
+// warn-and-serve findings alike, rather than only the ones a checkbox label
+// happens to make static.
+//
+// Mutation check: drop any one of these entries from
+// translations/settings.ru.json, or reword the sentinel in
+// internal/appstate/volunteer.go without updating the catalogue, and this names
+// the exact text that would silently revert to English.
+func TestVolunteerMessagesAreTranslated(t *testing.T) {
+	tr := loadTranslations(t)
+	for _, err := range []error{
+		appstate.ErrVolunteerWhileRouted,
+		appstate.ErrVolunteerExitNeedsAddress,
+		appstate.ErrVolunteerAddressForm,
+		appstate.ErrVolunteerAddressUnreachable,
+		appstate.ErrVolunteerExitNeedsKey,
+		appstate.ErrVolunteerExitKeyForm,
+	} {
+		if _, ok := tr[err.Error()]; !ok {
+			t.Errorf("no Russian translation for the volunteer refusal %q — settings.go passes it to lang.L, so it is a UI string", err.Error())
+		}
+	}
+	for _, warning := range []string{
+		appstate.WarnVolunteerAddressPrivate,
+		appstate.WarnVolunteerAddressCGNAT,
+		appstate.WarnVolunteerAddressName,
+	} {
+		if _, ok := tr[warning]; !ok {
+			t.Errorf("no Russian translation for the volunteer warning %q — settings.go passes it to lang.L, so it is a UI string", warning)
 		}
 	}
 }

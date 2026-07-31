@@ -192,11 +192,52 @@ func (c *Controller) connectAsync(gen uint64) {
 		selectionDir = DefaultSelectionDir()
 	}
 
+	// Volunteering (issue #12). Re-validated here and not only on save
+	// (settings.go), for the reason SanitizePoolOrder is: a hand-edited config
+	// file must not reach core through a dialog it never opened. That matters
+	// more here than for the pool, because the check this repeats is the one
+	// that cannot be recovered from afterwards — a serving role on a build that
+	// routes the whole device would carry other people's traffic out through
+	// this machine's own tunnel while the settings window's disclosure claimed
+	// it left under this machine's address (ErrVolunteerWhileRouted).
+	//
+	// DeviceEnforced() is the same answer settings.go was given when the user
+	// ticked the box, so the two agree by construction rather than by comment.
+	// A refusal aborts the connect with its own sentence, exactly as
+	// LoadRelayDirectory's does, rather than surfacing later as one of core's
+	// construction errors naming a field the user never saw.
+	volunteer, err := PlanVolunteer(c.cfg, c.DeviceEnforced())
+	if err != nil {
+		c.abort(gen, err)
+		return
+	}
+	// Warn-and-serve findings go to the log, not to the detail line: the detail
+	// line is one calm user-facing sentence about the connection they are
+	// waiting on, and "your advertised address is carrier-NAT" is neither about
+	// that nor actionable in the moment. The settings window is where these are
+	// shown to the user, at the point of choosing.
+	for _, w := range volunteer.Warnings {
+		c.logf("volunteer: %s", w)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	eng, err := core.New(core.Config{
 		Coordinators: c.cfg.Coordinators,
-		Roles:        []string{core.RoleClient},
-		SocksAddr:    SocksAddr,
+		// The client role, plus whichever serve roles were volunteered (issue
+		// #12). Always includes RoleClient: a volunteer donates its connection
+		// ALONGSIDE using it, so the serve roles add to the client role rather
+		// than replacing it — the same shape cmd/node's volunteer flags have
+		// against -role. The default, all-off plan is []string{RoleClient}
+		// exactly, which is what this line said literally before #12.
+		Roles:     volunteer.Roles,
+		SocksAddr: SocksAddr,
+		// Advertise/ListenAddr/ExitKeyHex are empty unless the EXIT opt-in is
+		// on, and core reads all three only for the roles that need them.
+		// ListenAddr is derived from Advertise's port rather than separately
+		// configured, so the two cannot disagree; see VolunteerPlan.
+		Advertise:  volunteer.Advertise,
+		ListenAddr: volunteer.ListenAddr,
+		ExitKeyHex: volunteer.ExitKeyHex,
 		// No exit is named. Country-only assignment (issue #146, ADR-0042) means the
 		// coordinator picks the exit; leaving Geo unset lets core take the first
 		// country the coordinator reports as available, which is what the throwaway

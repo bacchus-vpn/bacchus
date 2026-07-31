@@ -146,6 +146,9 @@ config file yet, to this OS's per-user config directory — see Config above):
 | Relay directory file and its public key | `relayDirectoryPath`, `relayDirectoryKey` | **Yes** |
 | Admission authority public key | `admissionPubKey` | **Yes** |
 | Revocation list file | `admissionCrlPath` | **Yes** |
+| Carry other people's traffic as a relay | `volunteerRelay` | **Linux/macOS only** — see below |
+| Let other people's traffic reach the internet through your connection | `volunteerExit` | **Linux/macOS only** — see below |
+| Your address for exiting, and your exit identity key | `volunteerAdvertise`, `volunteerExitKey` | **Linux/macOS only** — see below |
 
 The lower five arrived with #93 and carry no platform caveat: they are `core` config,
 enforced by `core`, and so mean the same thing on every platform this client runs on.
@@ -194,6 +197,63 @@ neither implementation yet (nobody has built or verified a launchd `LaunchAgent`
 this client) — checking the box there surfaces an explicit
 `launch-on-boot is not supported on this platform yet` error rather than silently
 doing nothing, which is the one thing worse than an honest error.
+
+### Volunteering your connection (#12)
+
+The last three rows point the other way from everything above them: at what this
+client *gives* the network rather than what it takes. `bacchus-node` got the same
+switch as `-volunteer-relay` / `-volunteer-exit`; see
+[docs/RUNNING.md](../../docs/RUNNING.md) for the node side.
+
+**Relay and exit are two separate checkboxes, and neither one turns on the other.**
+Both off by default. The two costs are not comparable:
+
+- **Relay** carries other people's traffic **encrypted and blind-forwarded**. It never
+  learns the destination and never sees plaintext. What it costs you is **bandwidth**,
+  and it does not make you an exit.
+- **Exit** egresses other people's traffic **under your own IP and jurisdiction**. Your
+  address is what every site they reach records, and abuse reports, provider notices
+  and legal process arrive at **you**. What it costs you is **legal exposure**.
+
+There is deliberately no single control spanning both: one checkbox covering them
+would let somebody who meant to donate bandwidth accept liability they never read
+about. The exit's disclosure is printed next to the exit's own checkbox rather than in
+this file, because a cost you have to go looking for is one nobody read.
+
+Only the exit choice asks for anything else — the address relays dial to reach you
+(`volunteerAdvertise`, your public address with that port forwarded to this machine)
+and a permanent identity key (`volunteerExitKey`, which **Generate** produces so you
+are not sent to a terminal for `openssl rand -hex 32`). The relay choice needs neither:
+behind a home NAT a relay serves as a client's *first hop*, reached the way the client
+itself is. Asking a bandwidth-only donor for an exit's setup would put the exit's cost
+back on somebody who declined it.
+
+The advertised address is checked by class, not dialled — a node cannot usefully test
+its own public reachability from behind its own NAT, since hairpinning makes a self-dial
+answer yes where the internet answers no. A wildcard, loopback or link-local address is
+**refused** (nothing off this machine can ever dial it, so registering one is an exit
+that serves nobody and says nothing about it). Private space, carrier-grade NAT
+(`100.64.0.0/10`) and a name instead of an address **warn and save**, because a LAN, a
+lab or a tunnelled uplink advertises private space correctly. Behind carrier-grade NAT
+there is no port for you to forward at all, so an exit will not work there — relay does.
+
+**These are the one group that is available on Linux and macOS but refused on
+Windows**, which is the inverse of split-tunnel/kill-switch/DNS above, and it is not an
+oversight. Where this client routes the whole device it installs the OS default route
+into its own TUN and arms a fail-closed lockdown behind a small allowlist — and a
+relay or exit role in that same process has its forwarding caught by exactly that
+route. Other people's traffic would leave through *your own* Bacchus connection and
+egress at the upstream exit's address rather than yours, making the disclosure on the
+exit checkbox false in the direction that matters; and an advertised exit would be
+unreachable anyway, because the reply to an inbound dial follows the default route into
+the TUN. So the section is disabled there, with that reason on screen, instead of
+accepting a choice that would quietly mean something else. Teaching enforcement to
+carve the served roles' own egress out of the tunnel it installs is the work that would
+lift this, and it belongs in `clients/internal/enforcement`.
+
+The refusal is not only a disabled checkbox: `PlanVolunteer` re-checks it in
+`Controller.connectAsync` too, so a hand-edited config file cannot reach `core` through
+a dialog it never opened — the same double-check `transportPool` gets.
 
 ## Build
 

@@ -135,6 +135,52 @@ type Config struct {
 	RelayHops          int    `json:"relayHops"`
 	RelayDirectoryPath string `json:"relayDirectoryPath"`
 	RelayDirectoryKey  string `json:"relayDirectoryKey"`
+
+	// Volunteering this connection back to the network (issue #12) — the
+	// desktop half of the switch cmd/node got in 8cf741a, and the only field
+	// group here that makes this client SERVE rather than consume. See
+	// volunteer.go for the ruling these four implement and for every check
+	// they are put through; this comment is only what they are.
+	//
+	// VolunteerRelay and VolunteerExit are two independent opt-ins, both
+	// false by default, and there is deliberately no single field spanning
+	// them. That is the ruling, not an implementation detail: a relay carries
+	// other people's traffic encrypted and blind-forwarded, so it costs
+	// bandwidth, while an exit egresses their traffic under this machine's own
+	// IP and jurisdiction, which is legal exposure. One field covering both
+	// would let somebody who meant to donate bandwidth accept liability they
+	// never read about. Two booleans make the bundle unsayable rather than
+	// merely avoidable.
+	//
+	// VolunteerAdvertise and VolunteerExitKey are what the EXIT half cannot
+	// work without, and they carry the Volunteer prefix because that is the
+	// only reason they exist here: unlike Bypass/DNS/TransportPool above, they
+	// mirror no field this client already had, they are inert unless
+	// VolunteerExit is set, and grouping them under the opt-in that requires
+	// them is what makes that dependency legible in a config file somebody is
+	// hand-editing.
+	//
+	//   - VolunteerAdvertise is the host:port a relay dials to reach this
+	//     exit, mapping to core.Config.Advertise, which core.New REFUSES to
+	//     default (engine.go: "exit role requires Advertise host:port"). It
+	//     has to be the address the internet reaches this machine at, with
+	//     that port forwarded here. core.Config.ListenAddr is DERIVED from its
+	//     port rather than configured separately — see VolunteerPlan.
+	//   - VolunteerExitKey is a persistent X25519 private key, 64 hex chars,
+	//     mapping to core.Config.ExitKeyHex. An exit's node id IS its public
+	//     key, so a key generated afresh at every start is a new identity at
+	//     every start while the signed directory clients cache still names the
+	//     old one. Stored in this file, which SaveConfig writes 0600, on the
+	//     same footing as TURNPass above; NewExitKeyHex generates one so no
+	//     desktop user is sent to a command line for it.
+	//
+	// Nothing here is required by the RELAY opt-in, which is the ruling again
+	// on the configuration side: demanding an exit's setup of somebody who
+	// explicitly declined the exit would put the exit's cost back on them.
+	VolunteerRelay     bool   `json:"volunteerRelay"`
+	VolunteerExit      bool   `json:"volunteerExit"`
+	VolunteerAdvertise string `json:"volunteerAdvertise"`
+	VolunteerExitKey   string `json:"volunteerExitKey"`
 }
 
 // BypassModeInclude and BypassModeExclude are the two values BypassMode

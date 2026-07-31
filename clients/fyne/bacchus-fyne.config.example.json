@@ -29,5 +29,10 @@
   "transportPool": [],
   "relayHops": 1,
   "relayDirectoryPath": "",
-  "relayDirectoryKey": ""
+  "relayDirectoryKey": "",
+
+  "volunteerRelay": false,
+  "volunteerExit": false,
+  "volunteerAdvertise": "",
+  "volunteerExitKey": ""
 }
