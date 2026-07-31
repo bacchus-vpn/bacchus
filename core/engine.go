@@ -85,7 +85,15 @@ type Config struct {
 	// ExitKeyHex is an exit's X25519 static private key (64 hex chars). It fixes
 	// the exit's identity: the node id becomes the matching public key, which
 	// clients use to authenticate the exit's end-to-end handshake. When empty a
-	// fresh key is generated at startup (a new key means a new id).
+	// fresh key is generated at startup (a new key means a new id) — the throwaway
+	// lab exit the behaviour was built for, and tolerable for that role because a
+	// client picks its exit out of the same snapshot that names the key, so a
+	// mismatch fails admission loudly and at once.
+	//
+	// It is REQUIRED — refused, not generated — for a relay serving RelayIngress
+	// that does NOT also hold the exit role. That node's id is the key clients run
+	// Noise_NK against as a hop, and its version of the same mistake is silent and
+	// remote: see setupRelayChaining, which is where the refusal lives.
 	ExitKeyHex string
 
 	// Transport selects the session transport: "webrtc" (default, UDP/DTLS with
@@ -1027,6 +1035,22 @@ func New(cfg Config) (*Engine, error) {
 	// publishes as that hop's id, so a hop a hostile coordinator substituted cannot
 	// complete the handshake. A relay that is NOT an onion hop keeps its opaque
 	// random id, so no relay in today's fleet changes identity.
+	//
+	// The two roles part company over what an EMPTY ExitKeyHex means, and the split
+	// is deliberate rather than an oversight. Generating stays right for the exit
+	// role: an exit is chosen out of the same snapshot that publishes its key, so a
+	// regenerated identity fails that client's admission check immediately, in front
+	// of the operator who caused it. A relay serving RelayIngress and nothing else
+	// gets no such signal — it binds, registers, logs, and stays up while serving
+	// nobody, because every client holding the cached directory dials an id this
+	// process threw away at exit. That surfaces as an unbuildable chain on a
+	// stranger's machine, the hardest place there is to trace it back from, so for
+	// that one combination an absent key is REFUSED instead of generated.
+	//
+	// The refusal is not here: setupRelayChaining owns it, ~30 lines below, and runs
+	// after this block. So the key IS generated first for that combination and then
+	// discarded along with the whole construction. Reading this branch alone tells
+	// you an empty key is always acceptable, which is exactly the wrong conclusion.
 	var exitKey noise.DHKey
 	if roles[RoleExit] || (roles[RoleRelay] && cfg.RelayIngress != "") {
 		k, err := exitStaticKey(cfg.ExitKeyHex)
@@ -1088,6 +1112,12 @@ func New(cfg Config) (*Engine, error) {
 
 // exitStaticKey builds the exit's static keypair from the configured hex private
 // key, or generates a fresh one when none is set.
+//
+// Generating is not the last word for every caller. New calls this BEFORE
+// setupRelayChaining, so a relay serving RelayIngress without the exit role does
+// get a key minted here and then has the whole construction refused a moment
+// later — this function is not the place that decides an empty key is acceptable,
+// and read on its own it wrongly suggests one always is.
 func exitStaticKey(hexKey string) (noise.DHKey, error) {
 	if strings.TrimSpace(hexKey) == "" {
 		return generateExitKey()
