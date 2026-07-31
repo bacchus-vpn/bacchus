@@ -105,7 +105,7 @@ func (o *linuxOS) connect() error {
 		return fmt.Errorf("%w: %v", ErrHelperUnreachable, err)
 	}
 
-	rep, err := o.roundTripLocked(conn, "", &netdwire.Request{
+	rep, err := o.roundTrip(conn, &netdwire.Request{
 		Version: netdwire.Version,
 		Verb:    netdwire.VerbOpen,
 	})
@@ -132,7 +132,7 @@ func (o *linuxOS) close() {
 	if conn == nil {
 		return
 	}
-	_, _ = o.roundTripLocked(conn, token, &netdwire.Request{
+	_, _ = o.roundTrip(conn, &netdwire.Request{
 		Version: netdwire.Version,
 		Verb:    netdwire.VerbClose,
 		Token:   token,
@@ -150,15 +150,22 @@ func (o *linuxOS) do(req *netdwire.Request) (*netdwire.Reply, error) {
 	req.Version = netdwire.Version
 	req.Token = o.token
 
-	rep, err := o.roundTripLocked(o.conn, o.token, req)
+	rep, err := o.roundTrip(o.conn, req)
 	if err != nil {
 		return nil, err
 	}
 	return rep, rep.Err()
 }
 
-// roundTripLocked writes one request and reads one reply. Caller holds mu.
-func (o *linuxOS) roundTripLocked(conn *net.UnixConn, _ string, req *netdwire.Request) (*netdwire.Reply, error) {
+// roundTrip writes one request and reads one reply on conn.
+//
+// The invariant it needs is EXCLUSIVE USE OF conn, which is not the same as
+// "the caller holds mu", and the three callers satisfy it three different ways:
+// do() holds mu because o.conn is shared; connect() is working on a conn it has
+// not published yet; close() is working on one it has just unpublished. Naming
+// this after the mutex would have described only one of them, and wrongly
+// implied the other two were violating it.
+func (o *linuxOS) roundTrip(conn *net.UnixConn, req *netdwire.Request) (*netdwire.Reply, error) {
 	deadline := time.Now().Add(netdDeadline)
 	if err := conn.SetDeadline(deadline); err != nil {
 		return nil, err

@@ -48,7 +48,6 @@ package main
 import (
 	"fmt"
 	"net"
-	"os"
 
 	"golang.org/x/sys/unix"
 )
@@ -105,14 +104,11 @@ func createTUN(nl *netlinkPool) (fd int, ifIndex int, err error) {
 	return fd, ifIndex, nil
 }
 
-// tunExists reports whether our TUN device is currently present. Used by
-// orphan reaping: a persistent device would be a leak, but a TUN created this
-// way is owned by the descriptor, so it disappears when the last holder closes
-// it — including when the client is killed. This is the check that confirms it.
-func tunExists() bool {
-	_, err := net.InterfaceByName(tunName)
-	return err == nil
-}
+// Note there is deliberately no "is the TUN still there?" check. A TUN created
+// this way is owned by its descriptors, so it disappears when the last holder
+// closes one — including when the client is killed. There is no persistent
+// device to reap, which is the property ADR-0049 §5 chose this shape for over a
+// persistent uid-owned device.
 
 // closeFD is the cleanup path when a descriptor was created but could not be
 // handed over. Without it a failed handover leaves the device up with nothing
@@ -122,6 +118,3 @@ func closeFD(fd int) {
 		unix.Close(fd)
 	}
 }
-
-// fileFromFD wraps a descriptor for the rare paths that want an *os.File.
-func fileFromFD(fd int, name string) *os.File { return os.NewFile(uintptr(fd), name) }

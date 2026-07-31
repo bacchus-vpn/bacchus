@@ -46,11 +46,17 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@resources @mount @swap @reboot @obsolete
 
-# ProtectSystem=strict makes /proc/sys read-only, and disablePhysicalIPv6 has
-# to write one file under it. Granting just that subtree keeps parity item 6
-# working without opening the rest.
+# disablePhysicalIPv6 writes one file under /proc/sys, so the helper cannot have
+# the kernel tunables made read-only. ProtectSystem=strict leaves /proc alone by
+# design — ProtectKernelTunables= is the setting that would close it — so this
+# one "no" is what parity item 6 needs, and the rest of the hardening above is
+# unaffected.
 ProtectKernelTunables=no
-ReadWritePaths=/proc/sys/net/ipv6/conf
+# Belt and braces if that ever flips. Leading "-" so a missing path is ignored:
+# a kernel booted with ipv6.disable=1 has no /proc/sys/net/ipv6/conf at all, and
+# without the dash systemd would refuse to start the unit on exactly the
+# machines where there is no IPv6 to turn off in the first place.
+ReadWritePaths=-/proc/sys/net/ipv6/conf
 
 # Deliberately NOT Restart=always. The helper is socket-activated and may exit
 # when idle (ADR-0049 §8) — that is safe because its kill-switch state is

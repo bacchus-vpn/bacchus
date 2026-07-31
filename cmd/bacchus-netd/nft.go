@@ -644,9 +644,9 @@ func bePort(p uint16) []byte {
 
 func net4Mask(bits int) []byte {
 	var m [4]byte
+	// Go defines a shift wider than the operand as zero rather than leaving it
+	// undefined, so /0 needs no special case: the mask is all-zero and the rule
+	// matches everything — which is what a bypass entry of 0.0.0.0/0 asks for.
 	binary.BigEndian.PutUint32(m[:], ^uint32(0)<<(32-bits))
-	if bits == 0 {
-		return []byte{0, 0, 0, 0}
-	}
 	return m[:]
 }
