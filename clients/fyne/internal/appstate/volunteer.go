@@ -229,6 +229,36 @@ func (p VolunteerPlan) Serving() bool {
 	return false
 }
 
+// ClearVolunteeringIfRouted turns both volunteer opt-ins off when this build
+// routes the whole device, and reports whether it changed anything. Issue #101.
+//
+// It lives here rather than in settings.go for the reason ADR-0039 gives for
+// the split: a wrong answer here produces a config that cannot be saved, and
+// "cannot be saved" is a broken config. The window's controls are disabled on
+// an enforcing build, and Fyne's Disable() does not clear Checked — so without
+// this, a stored opt-in reads back ticked from a control the user cannot
+// untick, PlanVolunteer refuses, and the Settings window has no reachable state
+// from which any setting can be saved.
+//
+// What it deliberately does NOT touch is VolunteerAdvertise and
+// VolunteerExitKey. #100's argument holds: they are read only for the exit
+// role, so keeping them costs nothing, and discarding the identity key would
+// turn a volunteer who later returns to a non-enforcing machine into a new node
+// that nobody's cached directory can reach.
+//
+// This is the SAVE path's rule. It is not a relaxation of PlanVolunteer, which
+// Controller.connectAsync runs against whatever is on disk and which must keep
+// refusing — a hand-edited config saying "serve" on a build that routes the
+// device has to fail closed, not be quietly rewritten on the way to a connect.
+func ClearVolunteeringIfRouted(cfg Config, deviceRouted bool) (Config, bool) {
+	if !deviceRouted {
+		return cfg, false
+	}
+	cleared := cfg.VolunteerRelay || cfg.VolunteerExit
+	cfg.VolunteerRelay, cfg.VolunteerExit = false, false
+	return cfg, cleared
+}
+
 // PlanVolunteer validates cfg's four volunteer fields and returns what they
 // contribute to core.Config, or the first refusal.
 //
@@ -261,36 +291,6 @@ func (p VolunteerPlan) Serving() bool {
 // listener, no port forwarding and no stable identity; carrying somebody's
 // middle hop needs a publicly reachable ingress, and offering that here would
 // put an exit's setup burden back onto the relay-only choice.
-// ClearVolunteeringIfRouted turns both volunteer opt-ins off when this build
-// routes the whole device, and reports whether it changed anything. Issue #101.
-//
-// It lives here rather than in settings.go for the reason ADR-0039 gives for
-// the split: a wrong answer here produces a config that cannot be saved, and
-// "cannot be saved" is a broken config. The window's controls are disabled on
-// an enforcing build, and Fyne's Disable() does not clear Checked — so without
-// this, a stored opt-in reads back ticked from a control the user cannot
-// untick, PlanVolunteer refuses, and the Settings window has no reachable state
-// from which any setting can be saved.
-//
-// What it deliberately does NOT touch is VolunteerAdvertise and
-// VolunteerExitKey. #100's argument holds: they are read only for the exit
-// role, so keeping them costs nothing, and discarding the identity key would
-// turn a volunteer who later returns to a non-enforcing machine into a new node
-// that nobody's cached directory can reach.
-//
-// This is the SAVE path's rule. It is not a relaxation of PlanVolunteer, which
-// Controller.connectAsync runs against whatever is on disk and which must keep
-// refusing — a hand-edited config saying "serve" on a build that routes the
-// device has to fail closed, not be quietly rewritten on the way to a connect.
-func ClearVolunteeringIfRouted(cfg Config, deviceRouted bool) (Config, bool) {
-	if !deviceRouted {
-		return cfg, false
-	}
-	cleared := cfg.VolunteerRelay || cfg.VolunteerExit
-	cfg.VolunteerRelay, cfg.VolunteerExit = false, false
-	return cfg, cleared
-}
-
 func PlanVolunteer(cfg Config, deviceRouted bool) (VolunteerPlan, error) {
 	plan := VolunteerPlan{Roles: []string{core.RoleClient}}
 	if cfg.VolunteerRelay {
