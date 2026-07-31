@@ -59,11 +59,19 @@ func inNamespace(t *testing.T) bool {
 		return true
 	}
 
-	// -Ur: a user namespace with our uid mapped to root inside it, which is
-	// what grants CAP_NET_ADMIN over the netns below without any real
-	// privilege on the host.
-	cmd := exec.Command("unshare", "-Ur", "--net", os.Args[0],
-		"-test.run", "^"+t.Name()+"$", "-test.v", "-test.count=1")
+	// -Ur asks for a user namespace with our uid mapped to root inside it,
+	// which is what grants CAP_NET_ADMIN over the netns without any real
+	// privilege on the host. Already being root makes that step unnecessary,
+	// and on a host where unprivileged user namespaces are restricted (Ubuntu
+	// 24.04's kernel.apparmor_restrict_unprivileged_userns) it is also the only
+	// way these tests can run at all — so `sudo go test ./cmd/bacchus-netd/`
+	// stays a working fallback rather than failing on a flag it does not need.
+	args := []string{"-Ur", "--net"}
+	if os.Geteuid() == 0 {
+		args = []string{"--net"}
+	}
+	args = append(args, os.Args[0], "-test.run", "^"+t.Name()+"$", "-test.v", "-test.count=1")
+	cmd := exec.Command("unshare", args...)
 	cmd.Env = append(os.Environ(), nsEnvVar+"=1")
 	out, err := cmd.CombinedOutput()
 	text := string(out)

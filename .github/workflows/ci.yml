@@ -49,13 +49,27 @@ jobs:
       #     CAP_NET_ADMIN over an isolated stack.
       - name: install namespace test tooling
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends iproute2 nftables uidmap
+      # Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1, an
+      # AppArmor restriction that blocks unprivileged user namespaces for
+      # unconfined binaries — which is exactly what a `go test` process is. The
+      # runner is a disposable VM and this is the documented knob for it.
+      # Tolerant of the sysctl being absent: older images and non-Ubuntu bases
+      # do not have it, and there it is not needed.
+      - name: allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
       - name: confirm unprivileged user namespaces work
         run: |
-          unshare -Ur --net true || {
-            echo "this runner cannot create user+network namespaces;"
-            echo "the bacchus-netd kernel tests would all skip and the job would go green over nothing"
+          if ! unshare -Ur --net true; then
+            echo "::error::this runner cannot create user+network namespaces, so the"
+            echo "::error::bacchus-netd kernel tests would all skip and this job would go"
+            echo "::error::green over nothing. Relevant knobs:"
+            sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 || true
+            sysctl kernel.unprivileged_userns_clone 2>&1 || true
+            sysctl user.max_user_namespaces 2>&1 || true
             exit 1
-          }
+          fi
       # BACCHUS_NETD_REQUIRE_NS turns a missing-namespace SKIP into a failure.
       # Without it, a runner that lost this capability would report a green job
       # over the only real-kernel coverage this repo has, which reads as
