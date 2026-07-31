@@ -612,6 +612,102 @@ predating #50 connects exactly as it does today — but it does not perform the
 challenge exchange, so enabling the gate on a network with such clients refuses
 them.
 
+## Routing the whole device on Linux (issue #37, ADR-0049)
+
+Until now the Linux client was an honest SOCKS5 listener on `127.0.0.1:1080`: it
+routed nothing, and its settings window said so. It can now route the device —
+TUN, split-tunnel, kill-switch — but that needs `CAP_NET_ADMIN`, and running a
+GUI as root is not acceptable for a client aimed at ordinary users. Fyne links a
+GL stack, an X11/Wayland client and a font renderer, and none of that belongs in
+a process that can rewrite the route table.
+
+So enforcement is split across a process boundary
+([ADR-0049](adr/0049-linux-privilege-boundary.md)). `bacchus-fyne` keeps running
+as you, with no capabilities. A small helper, `bacchus-netd`, holds
+`CAP_NET_ADMIN` and owns every privileged operation. They speak over
+`/run/bacchus/netd.sock`, mode `0660`, group `bacchus`, and the helper checks
+`SO_PEERCRED` on every connection.
+
+**This is an installation step, and it is the main cost of the design.** The
+Linux client stops being "download a binary and run it". Install per
+[deploy/README.md](../deploy/README.md#the-one-unit-that-is-not-a-server-unit-bacchus-netd-issue-37):
+
+```sh
+go build -o bacchus-netd ./cmd/bacchus-netd
+sudo install -D -m 0755 bacchus-netd /usr/local/lib/bacchus/bacchus-netd
+sudo systemd-sysusers deploy/bacchus-netd.sysusers.conf
+sudo usermod -aG bacchus "$USER"          # then log out and back in
+sudo cp deploy/bacchus-netd.{service,socket} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now bacchus-netd.socket
+```
+
+Confirm it: `systemctl status bacchus-netd.socket`, and
+`journalctl -u bacchus-netd -f` while you connect.
+
+### What changes once it is installed
+
+The settings window stops saying split-tunnel, kill-switch and DNS are "saved
+for later use" and starts saying they take effect on the next connect, because
+they do. The state indicator earns the word "Protected" the same way the Windows
+client does.
+
+**If the helper is missing or unreachable, the connect fails.** It does not fall
+back to a working SOCKS proxy under a "Protected" banner — that failure is the
+one ADR-0039's parity bar exists to rule out, and a missing helper is the most
+likely way to meet it here. The error names the helper.
+
+**Keep the two binaries in step.** A `bacchus-netd` older or newer than the GUI
+refuses the connection outright rather than negotiating down to a subset; a
+client that silently lost its kill-switch to a version skew is the same failure
+wearing different clothes.
+
+### DNS is not finished here (issue #104)
+
+One field in that window carries an exception, and the window now says so next
+to it. DNS is intercepted inside the tunnel, which works for any program that
+queries a routable DNS server. It does **not** work for `systemd-resolved` — the
+default on Ubuntu, Fedora and Debian — whose stub listens on `127.0.0.53`. That
+is loopback, the kernel consults the `local` routing table before anything else,
+and no route Bacchus installs can override `127.0.0.0/8`. Those queries never
+reach the tunnel.
+
+With the kill-switch armed they are dropped (there is deliberately no
+plaintext-DNS allowance), so the machine has a tunnel and no working DNS. With
+it off, they leave in the clear. Closing this needs a new primitive on the shared
+`osNet` interface that Windows and macOS also implement, which is why it is its
+own card rather than part of this one.
+
+### If something goes wrong
+
+- **"bacchus-netd is not reachable"** — the socket unit is not enabled, or your
+  session predates `usermod -aG bacchus`. Supplementary groups are fixed at
+  login: log out and back in.
+- **"another Bacchus session already holds device-wide enforcement"** — one
+  session at a time, by design. The client that armed the kill-switch is the
+  only one that can lift it.
+- **No network after a crash** — an armed kill-switch is nftables state in the
+  kernel, so it deliberately survives the client being killed. Launching Bacchus
+  again lifts it; so does a reboot. To check by hand:
+  `sudo nft list table inet bacchus`.
+- **Non-systemd hosts** run the same binary under any supervisor, but have no
+  logind to answer "does this uid own an active local session". They need
+  `-allow-without-logind`, which drops that gate to the socket's group
+  permission alone — a real weakening, and opt-in for that reason.
+
+### What is verified, and what is not
+
+The helper is tested against a real kernel: CI drives it inside a user + network
+namespace and asserts actual kernel state — routes in the right table, the nft
+set holding the right elements, the TUN device up, a packet genuinely delivered
+into the tunnel, and traffic blocked with the kill-switch armed. That is
+verification the Windows implementation never had.
+
+What a namespace cannot prove is that a **real desktop** behaves as the
+synthetic one did: its `systemd-resolved`, its NetworkManager, its physical
+adapter and its driver are not there. That is hardware verification, no Go test
+can assert it, and it has not been done. The same gap is still open for Windows
+as issue #88.
+
 ## Verify
 On the client device:
 ```

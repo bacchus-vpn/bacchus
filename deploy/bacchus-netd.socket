@@ -1,0 +1,22 @@
+[Unit]
+Description=Bacchus device-routing helper socket
+Documentation=https://github.com/bacchus-vpn/bacchus/blob/main/docs/adr/0049-linux-privilege-boundary.md
+
+[Socket]
+# ADR-0049 §1's address. The socket is created by systemd rather than by the
+# helper, so it exists with the right owner and mode from boot: a client's
+# connect starts the helper, instead of failing because nothing is listening
+# yet.
+ListenStream=/run/bacchus/netd.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=bacchus
+
+# One connection at a time is NOT enforced here. The helper allows a single
+# enforcement SESSION and answers a second client with a refusal it can act on
+# (ADR-0049 §3.2); a queued or rejected connection at the socket layer would
+# leave that second client hanging in connect() with nothing to report.
+Accept=no
+
+[Install]
+WantedBy=sockets.target

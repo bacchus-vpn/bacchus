@@ -1,0 +1,61 @@
+[Unit]
+Description=Bacchus device-routing helper (privileged half of the Linux client)
+Documentation=https://github.com/bacchus-vpn/bacchus/blob/main/docs/adr/0049-linux-privilege-boundary.md
+Requires=bacchus-netd.socket
+After=bacchus-netd.socket
+
+[Service]
+Type=exec
+ExecStart=/usr/local/lib/bacchus/bacchus-netd
+
+# CAP_NET_ADMIN and nothing else. The helper needs to create a TUN device,
+# change routes and addresses, write one sysctl and drive nftables; it needs
+# none of root's other powers, and ADR-0049's whole claim is that a compromised
+# GUI costs the user their VPN protection rather than their machine. Narrowing
+# the capability set is what keeps that claim honest on this side of the socket
+# too.
+#
+# User=root with AmbientCapabilities rather than a dedicated user: the helper
+# writes /proc/sys/net/ipv6/conf/<if>/disable_ipv6, which is root-owned, and
+# CAP_NET_ADMIN alone does not grant write access to procfs.
+User=root
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE
+
+# Hardening. None of this is load bearing for the privilege boundary — that is
+# the socket's peer-credential gate and the protocol's validation — but a root
+# process reachable from an unprivileged local one should give up everything it
+# does not use.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateMounts=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@resources @mount @swap @reboot @obsolete
+
+# ProtectSystem=strict makes /proc/sys read-only, and disablePhysicalIPv6 has
+# to write one file under it. Granting just that subtree keeps parity item 6
+# working without opening the rest.
+ProtectKernelTunables=no
+ReadWritePaths=/proc/sys/net/ipv6/conf
+
+# Deliberately NOT Restart=always. The helper is socket-activated and may exit
+# when idle (ADR-0049 §8) — that is safe because its kill-switch state is
+# nftables state, which lives in the kernel and survives the helper exiting.
+# Restarting it on a schedule would just hold a process open for nothing.
+
+[Install]
+WantedBy=multi-user.target

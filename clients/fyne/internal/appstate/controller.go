@@ -77,8 +77,9 @@ func NewController(cfg Config) *Controller {
 	c := &Controller{cfg: cfg}
 	// A platform with no Enforcer yet returns a NotImplementedError, and that
 	// is not a failure to report — it is this client's pre-bacchus#59 posture,
-	// which is proxy-only and says so (see DeviceEnforced). Windows has one;
-	// [E9]/[E10] are what give Linux and macOS theirs.
+	// which is proxy-only and says so (see DeviceEnforced). Windows has one
+	// (bacchus#59); Linux has one as of bacchus#37; [E9] (macOS, bacchus#36) is
+	// what gives the last platform theirs.
 	if enf, err := enforcement.New(); err == nil {
 		c.enf = enf
 		// Parity item 3, at the only moment it works: a lockdown left behind by
@@ -87,6 +88,29 @@ func NewController(cfg Config) *Controller {
 		enf.Recover()
 	}
 	return c
+}
+
+// newProxyOnlyController is NewController with no Enforcer, which is the
+// posture of a platform that has none — macOS today ([E9], bacchus#36).
+//
+// It exists because the tests that assert what "Protected" MEANS have to reach
+// Protected, and on a platform with an Enforcer that now requires enforcement
+// to actually come up. Before bacchus#37 those tests got this posture on Linux
+// for free; the Linux Enforcer is exactly what took it away, so the seam that
+// replaces it belongs in the same change.
+//
+// It is a narrowing, and the honest statement of what it costs is: these tests
+// no longer exercise the enforced connect path on Linux. What they still
+// exercise is the half they were written for — that reaching Protected means
+// the SOCKS tunnel genuinely carries bytes — which is a real configuration on
+// every platform and the only one on macOS. The enforced path is covered
+// instead where it can be covered against a real kernel, in
+// cmd/bacchus-netd's namespace tests. A controller-level test of the FULL
+// enforced connect would need a live helper, a network namespace and a real
+// coordinator in one process; that is not built here and is named in the PR
+// rather than implied.
+func newProxyOnlyController(cfg Config) *Controller {
+	return &Controller{cfg: cfg}
 }
 
 // DeviceEnforced reports whether a Protected session on this build routes the

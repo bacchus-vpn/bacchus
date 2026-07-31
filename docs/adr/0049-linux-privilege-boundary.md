@@ -484,3 +484,69 @@ CI coverage it does not have.
   and `pf` rather than a helper and nftables — and gets its own record.
 - #37 itself, which stays open. This is its design half; the card's Exit criteria are
   unmet until the enforcement exists.
+
+## Amendment (2026-07-31): what building it corrected (#37's build half)
+
+The design above survived implementation intact — the helper, the socket, the
+peer-credential gate, the one-session rule, netlink-not-shelling-out, the fd
+handoff and the nftables kill-switch are all as decided. Three things needed
+correcting, and all three are mechanism rather than decision, so they are
+recorded here rather than in a new record.
+
+**§5's named entry point is wrong, though its argument is right.** The record
+says `CreateTUNFromFile` (`tun_linux.go:585`) "does only unprivileged work on a
+descriptor it is handed". It does not: its last step is `setMTU`, an
+`SIOCSIFMTU` ioctl needing `CAP_NET_ADMIN`, so an unprivileged client handed a
+descriptor gets `operation not permitted` and no device. The entry point that is
+genuinely unprivileged is **`CreateUnmonitoredTUNFromFD`** — `TUNGETIFF` and
+`TUNSETOFFLOAD` on the fd it was given, nothing else. What it gives up is the
+netlink link-event listener behind `Device.Events()`, which nothing in this repo
+calls. So the helper sets the MTU itself, which it was always better placed to
+do. The split is still exactly where §5 says it is, and the dependency is still
+not forked.
+
+**The device must not be created with `IFF_VNET_HDR`.** `CreateTUN` sets it, and
+with it set wireguard-go's `Write` requires an offset of at least
+`virtioNetHdrLen`. `tun2socks.go`'s `pumpOutbound` calls `dev.Write(bufs, 0)` —
+correct for wintun, which has no such header — so on a vnet-hdr device every
+outbound packet fails with "invalid offset" while every state-level check stays
+green. Creating it without the flag makes the Linux device honour offset 0
+exactly as the Windows one does, so the portable pump needs no change. The cost
+is GSO/GRO batching, which this architecture cannot use anyway: every flow is
+terminated in the netstack and re-dialled over SOCKS, so nothing large passes
+through end to end.
+
+**§3.1's session check applies to every uid, including root.** An early draft
+refused uid 0 outright. That is defensive rather than defensible: a root process
+can already replace the helper binary, ptrace the GUI, or make the same netlink
+calls itself, so refusing it protects nothing while breaking a root console
+login, which is a genuine active session. The rule is the one §3.1 states — does
+this uid own an active local session — and nothing else.
+
+Two things the record left open are now answered by the build half, as it said
+they would be:
+
+- **The wire encoding** is length-prefixed JSON with hard caps, decoded with
+  unknown fields refused; `cmd/bacchus-netd/netdwire` is the whole of it.
+- **No legacy-`iptables` fallback ships.** nftables only. Nothing in the
+  supported-distribution range needs it, and a second firewall backend is a
+  second thing that can be subtly wrong in the mechanism the kill-switch depends
+  on. Reopen it against a distribution that actually fails, not in advance.
+
+**DNS is not answered**, deliberately, and is now #104. The record's warning that
+"anyone estimating #37 from the current interface will under-count it by one
+method and its three-way distribution problem" is why it is a separate card: the
+new `osNet` method is a change to shared code Windows and macOS also implement,
+which does not belong in the change that wrote a helper, a protocol and a
+backend. #37 stays open on it.
+
+One property the record predicted is worth confirming, because it was the
+argument for hand-rolling netlink rather than taking two modules: driving the
+helper inside a user + network namespace catches encoding errors that a
+transaction-level check cannot. It found a required nftables attribute whose
+absence the kernel rejects, two `meta` keys that encode to a VALID comparison
+against the wrong field — so the rule installs, matches nothing, and every "did
+it arm?" check passes — an `rt_protocol` id that collided with `RTPROT_BGP`, and
+a buffer-aliasing bug that corrupted any netlink dump spanning more than one
+datagram. That is the verification §"How #37 gets tested" promised, and it is
+verification bacchus#59 never had.

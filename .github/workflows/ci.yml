@@ -35,7 +35,34 @@ jobs:
       # silently stop covering both; if CI runtime ever needs to come down,
       # split those into their own non-short job instead of short-circuiting
       # this one.
+      # cmd/bacchus-netd drives a REAL kernel: its tests re-exec themselves
+      # inside a user + network namespace and assert against actual routing,
+      # nftables and TUN state (ADR-0049's testing section). Two things it
+      # needs that a bare runner may not have:
+      #
+      #   - iproute2 and nftables, used only to BUILD fixtures and to READ the
+      #     results back. The helper itself never shells out — ADR-0049 §4
+      #     forbids it — but a test asserting against `nft list ruleset` is
+      #     checking its own encoding against nftables' own renderer, which is
+      #     a stronger check than re-reading its own bytes.
+      #   - unprivileged user namespaces, which is how an unelevated CI job gets
+      #     CAP_NET_ADMIN over an isolated stack.
+      - name: install namespace test tooling
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends iproute2 nftables uidmap
+      - name: confirm unprivileged user namespaces work
+        run: |
+          unshare -Ur --net true || {
+            echo "this runner cannot create user+network namespaces;"
+            echo "the bacchus-netd kernel tests would all skip and the job would go green over nothing"
+            exit 1
+          }
+      # BACCHUS_NETD_REQUIRE_NS turns a missing-namespace SKIP into a failure.
+      # Without it, a runner that lost this capability would report a green job
+      # over the only real-kernel coverage this repo has, which reads as
+      # "verified" while verifying nothing.
       - name: test
+        env:
+          BACCHUS_NETD_REQUIRE_NS: "1"
         run: go test ./core/... ./bind/... ./cmd/... ./clients/internal/...
 
   windows-client:

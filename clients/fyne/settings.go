@@ -10,9 +10,17 @@
 //
 // Whether split-tunnel/kill-switch/DNS actually DO anything depends on the
 // platform: they are enforced wherever there is an enforcement.Enforcer
-// (Windows, bacchus#59) and saved-but-inert where there is not ([E9] macOS,
-// [E10] Linux). This window says which, by asking
+// (Windows since bacchus#59, Linux since bacchus#37) and saved-but-inert where
+// there is not ([E9] macOS). This window says which, by asking
 // appstate.Controller.DeviceEnforced rather than assuming either answer.
+//
+// One of the three carries a platform exception rather than a flat yes: Linux
+// enforces split-tunnel and the kill-switch fully, but cannot yet capture DNS
+// queries a systemd-resolved machine sends to 127.0.0.53 (bacchus#104). The
+// enforced notice would otherwise claim all three "change what leaves it", so
+// the exception is stated on the DNS field itself — see DNSCaptureIsComplete.
+// Claiming more than is enforced is the same failure as claiming less, in the
+// direction that gets somebody hurt.
 //
 // Getting that wrong in either direction is a real failure. A settings screen
 // that implies a kill-switch is armed when it cannot possibly be is exactly
@@ -265,11 +273,22 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 	ladderItem := widget.NewFormItem(lang.L("Transport try-order"), ladderBox)
 	ladderItem.HintText = lang.L("Each is tried from the top down until one carries traffic, then remembered for this network. reality rides TCP :443, webrtc rides UDP — keeping both covers networks where one is blocked.")
 
+	// The top-of-window notice says the settings in this section "change what
+	// leaves" the device once there is an Enforcer. On Linux that is true of
+	// split-tunnel and the kill-switch and only partly true of DNS, so the
+	// exception is stated on the field itself rather than left to a paragraph
+	// that would have to be wrong about one of the three. Empty (and so absent)
+	// wherever the platform captures every query — see DNSCaptureCaveat.
+	dnsItem := widget.NewFormItem(lang.L("DNS upstream (host:port)"), dnsEntry)
+	if enforced && !appstate.DNSCaptureIsComplete() {
+		dnsItem.HintText = lang.L("This applies to programs that ask for DNS directly. If this system uses systemd-resolved (the default on Ubuntu, Fedora and Debian), its own lookups go to 127.0.0.53, which no route can capture — with the kill-switch on they are blocked, and with it off they leave in the clear.")
+	}
+
 	form := widget.NewForm(
 		widget.NewFormItem(lang.L("Split-tunnel bypass list (one per line: IP, CIDR, or domain)"), bypassEntry),
 		widget.NewFormItem(lang.L("Split-tunnel mode"), modeSelect),
 		widget.NewFormItem("", killSwitchCheck),
-		widget.NewFormItem(lang.L("DNS upstream (host:port)"), dnsEntry),
+		dnsItem,
 		widget.NewFormItem("", autoConnectCheck),
 		widget.NewFormItem("", launchOnBootCheck),
 		widget.NewFormItem("", widget.NewSeparator()),
@@ -337,6 +356,38 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 		next.VolunteerExit = volunteerExitCheck.Checked
 		next.VolunteerAdvertise = strings.TrimSpace(volunteerAdvertiseEntry.Text)
 		next.VolunteerExitKey = strings.TrimSpace(volunteerExitKeyEntry.Text)
+
+		// Issue #101. On an enforcing build the two volunteer controls above are
+		// disabled, and Disable() does not clear Checked — so a config that
+		// already said "serve" reads back ticked from a control the user cannot
+		// untick. PlanVolunteer then refuses, the save is blocked, and the only
+		// widget that could fix it is greyed out: the whole window becomes
+		// unsaveable, and every connect aborts with the same sentence, until
+		// somebody hand-edits the JSON.
+		//
+		// It is a scheduled regression rather than an edge case. bacchus#37
+		// gives Linux an Enforcer, so every Linux user who volunteered under the
+		// proxy-only build has exactly this config on the day it lands — which
+		// is this change. So the fix ships with it rather than after it.
+		//
+		// The disabled controls mean "this build cannot serve", so the save
+		// writes THAT instead of reading back a stale widget. Deliberately not a
+		// widget reset: the config is the thing being persisted, and clearing it
+		// here is what makes the next launch consistent no matter which machine
+		// the file came from.
+		var volunteeringCleared bool
+		next, volunteeringCleared = appstate.ClearVolunteeringIfRouted(next, enforced)
+		// VolunteerAdvertise and VolunteerExitKey are deliberately KEPT. #100's
+		// reasoning applies unchanged and is stronger here than for the toggles:
+		// they are read only for the exit role, so keeping them costs nothing,
+		// and discarding the identity key would make a volunteer who returns to
+		// a non-enforcing machine a NEW node that nobody's cached directory can
+		// reach.
+		//
+		// Controller.connectAsync's refusal is untouched by all of this. It runs
+		// PlanVolunteer against the config it loads from disk, which is the path
+		// that genuinely must fail closed — a hand-edited file saying "serve" on
+		// a build that routes the device must not connect.
 		volunteer, err := appstate.PlanVolunteer(next, enforced)
 		if err != nil {
 			status.SetText(lang.L(err.Error()))
@@ -380,12 +431,23 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 		// uses: the save succeeded and onSaved has run, but the user has been
 		// told something they would otherwise only discover as an exit nobody
 		// ever dials. Closing on a warning would put it on screen for one frame.
-		if len(volunteer.Warnings) > 0 {
-			warned := make([]string, 0, len(volunteer.Warnings))
-			for _, wn := range volunteer.Warnings {
-				warned = append(warned, lang.L(wn))
-			}
-			status.SetText(lang.L("Saved.") + " " + strings.Join(warned, "\n\n"))
+		//
+		// A cleared volunteer opt-in (#101) is announced through the same
+		// mechanism, and announced rather than silent because the user did opt
+		// in at some point on some machine. Turning a donation off without
+		// saying so would leave them believing they are still carrying traffic
+		// for other people. It is said only when something was actually
+		// cleared, so it never appears for the ordinary case of a user who
+		// never volunteered.
+		notices := make([]string, 0, len(volunteer.Warnings)+1)
+		if volunteeringCleared {
+			notices = append(notices, lang.L("Volunteering has been turned off: this build routes your whole device, and it cannot carry other people's traffic at the same time."))
+		}
+		for _, wn := range volunteer.Warnings {
+			notices = append(notices, lang.L(wn))
+		}
+		if len(notices) > 0 {
+			status.SetText(lang.L("Saved.") + " " + strings.Join(notices, "\n\n"))
 			onSaved(next, path)
 			return
 		}

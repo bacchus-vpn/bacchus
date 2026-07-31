@@ -6,6 +6,7 @@
     "Split-tunnel mode": "Режим раздельного туннелирования",
     "Kill-switch (block traffic if the tunnel drops)": "Аварийное отключение (блокировать трафик при обрыве туннеля)",
     "DNS upstream (host:port)": "Вышестоящий DNS (хост:порт)",
+    "This applies to programs that ask for DNS directly. If this system uses systemd-resolved (the default on Ubuntu, Fedora and Debian), its own lookups go to 127.0.0.53, which no route can capture — with the kill-switch on they are blocked, and with it off they leave in the clear.": "Это относится к программам, которые запрашивают DNS напрямую. Если в системе используется systemd-resolved (по умолчанию в Ubuntu, Fedora и Debian), её собственные запросы идут на 127.0.0.53, который не перехватывается маршрутизацией: при включённом аварийном отключении они блокируются, а при выключенном уходят в открытом виде.",
     "Connect automatically when Bacchus starts": "Подключаться автоматически при запуске Bacchus",
     "Start Bacchus when you log in": "Запускать Bacchus при входе в систему",
 
@@ -54,6 +55,7 @@
     "Your provider is sharing one public address between subscribers (carrier-grade NAT), so the address on your router is not the one the internet sees and there is no port for you to forward. An exit here is very unlikely to be reachable. Carrying traffic as a relay does work behind this, and is probably what you want.": "Ваш провайдер делит один публичный адрес между абонентами (carrier-grade NAT), поэтому адрес на вашем маршрутизаторе — не тот, который видит интернет, и перенаправить порт вам негде. Выход здесь почти наверняка будет недостижим. Передача трафика как ретранслятор за таким NAT работает и, скорее всего, подходит вам больше.",
     "That is a name rather than an address. The coordinator does not resolve it, so it cannot confirm your signalling and your traffic come from the same machine, and it may not offer your exit to anyone. Give the address itself if you can.": "Это имя, а не адрес. Координатор его не разрешает, поэтому он не может подтвердить, что ваша сигнализация и ваш трафик идут с одной машины, и может вообще не предлагать ваш выход никому. Укажите сам адрес, если можете.",
 
+    "Volunteering has been turned off: this build routes your whole device, and it cannot carry other people's traffic at the same time.": "Волонтёрство отключено: эта сборка маршрутизирует весь трафик вашего устройства и не может одновременно передавать трафик других людей.",
     "Saved.": "Сохранено.",
     "Save": "Сохранить",
     "Cancel": "Отмена",
