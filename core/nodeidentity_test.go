@@ -9,15 +9,15 @@ import (
 )
 
 // The tests below pin, at the New boundary, which node identities may be
-// GENERATED and which must be configured — the split issue #96 is about.
+// GENERATED and which must be configured — the split issue #96 opened and #103
+// finished. It now falls on one line: serving an ingress means the key is
+// configured, and nothing else does.
 //
-// Everything here was already true of the code; what was missing was any test
-// that said so at this level. setupRelayChaining's own table
-// (TestSetupRelayChainingRefusesHalfConfiguration) calls that function directly,
-// so it pins the check but not the WIRING: nothing failed if New stopped calling
-// it, and nothing failed if the exit role's generate path was tightened to match
-// the relay's. Both halves are load-bearing and both are now asserted through the
-// real constructor.
+// setupRelayChaining's own table (TestSetupRelayChainingRefusesHalfConfiguration)
+// calls that function directly, so it pins the check but not the WIRING: nothing
+// failed if New stopped calling it, and nothing failed if the exit role's generate
+// path was tightened to match the relay's. Both halves are load-bearing and both
+// are asserted here through the real constructor.
 
 // testHopDirectory returns a signed directory good enough for New to accept a
 // node that forwards, plus the key that verifies it. The hop set does not matter
@@ -57,8 +57,16 @@ func TestNewRefusesAForwardingRelayWithoutAStableKey(t *testing.T) {
 	// them. Asserting only "some error" is what would let this pass for an
 	// unrelated reason — an empty MeshPubKey, say, which the same config would
 	// also trip if the check above it were deleted.
+	//
+	// Both names are required, and neither on its own is enough. The person reading
+	// this on a terminal typed -relay-ingress and has to go type -exit-key, so the
+	// flag has to be in there; core is also reached from clients/fyne, where there is
+	// no flag at all and ExitKeyHex is the only handle the reader has.
 	if !strings.Contains(err.Error(), "ExitKeyHex") {
-		t.Errorf("refused with %q, want it to name ExitKeyHex — an operator who cannot tell which setting is missing has not been helped by the refusal", err)
+		t.Errorf("refused with %q, want it to name ExitKeyHex — core is reached from clients/fyne too, where there is no flag to name and the field is what a reader can act on", err)
+	}
+	if !strings.Contains(err.Error(), "-exit-key") {
+		t.Errorf("refused with %q, want it to name -exit-key — an operator who has to be told which Go field is unset, having typed a flag, has not been helped by the refusal", err)
 	}
 }
 
@@ -123,14 +131,13 @@ func TestNewAcceptsAForwardingRelayWithAStableKey(t *testing.T) {
 // deployment — one machine that both forwards other people's layers and terminates
 // its own sessions — and it constructs.
 //
-// The second half pins a REMAINING gap rather than a desired property. With the
-// exit role also set, an absent key is still generated, so this node's hop identity
-// does churn across restarts with none of the loudness that makes it tolerable for
-// a pure exit. Issue #96 deferred that on purpose: refusing it changes behaviour for
-// a role that has generated since it existed, which is a call with a real user
-// behind it and not one to fold into a fix for the relay case. The assertion is here
-// so the deferral is visible in the test suite instead of only in the issue —
-// tighten it, do not delete it, when that call is made.
+// The second half is that call, made. Issue #96 deferred it and #103 ruled on it:
+// an absent key is refused for anything serving an ingress, the exit role included.
+// What the exit role buys is a LOUD failure — a client selects an exit out of the
+// same snapshot that publishes its key, so a regenerated identity fails admission
+// at once. It buys the hop nothing: that half still binds, registers, logs, stays
+// up and serves nobody, and the symptom lands on a stranger's machine as a chain
+// that cannot be built. Holding both roles was removing the check, not earning it.
 func TestNewAcceptsARelayThatIsAlsoAnExit(t *testing.T) {
 	signed, dirKey := testHopDirectory(t)
 	base := Config{
@@ -156,9 +163,17 @@ func TestNewAcceptsARelayThatIsAlsoAnExit(t *testing.T) {
 		t.Errorf("relay-plus-exit id = %s, want %s", shortID(eng.cfg.ID), shortID(got))
 	}
 
-	// The deferred gap, pinned as it stands today.
-	if _, err := New(base); err != nil {
-		t.Fatalf("relay-plus-exit with no ExitKeyHex was refused: %v — that may well be the right end state, but it is a behaviour change issue #96 deliberately left out, so it needs its own ruling and its own release note rather than arriving as a side effect", err)
+	// The former gap, now closed. Asserted on the message and not on "some error":
+	// this config carries a valid RelayDirectory and its own RelayDirectoryKey, so it
+	// has no unrelated failure to fall through to, but its sibling above does — and a
+	// refusal test that passes because MeshPubKey was empty pins nothing. Naming the
+	// substring is what makes each of the two fail for its own reason.
+	_, err = New(base)
+	if err == nil {
+		t.Fatal("relay-plus-exit serving an ingress with no ExitKeyHex was constructed; want a refusal — its HOP identity churns across restarts with none of the loudness that makes churn tolerable for an exit, and adding the exit role to a working relay must not be a way to switch this check off")
+	}
+	if !strings.Contains(err.Error(), "ExitKeyHex") || !strings.Contains(err.Error(), "-exit-key") {
+		t.Errorf("refused with %q, want it to name both ExitKeyHex and -exit-key — the operator typed -relay-ingress and has to go type -exit-key, while core is also reached from clients/fyne, where there is no flag and the field name is the only handle the reader has", err)
 	}
 }
 

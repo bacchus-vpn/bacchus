@@ -525,11 +525,23 @@ func setupRelayChaining(cfg Config, roles map[string]bool, now time.Time) (*rela
 	// from a fresh random keypair every start would rotate that id on every restart,
 	// so every client holding a snapshot naming this node would fail its Noise_NK
 	// handshake against it until a new snapshot propagated — the node would look
-	// intermittently broken rather than misconfigured. An exit is already required to
-	// persist its key; a forwarding relay needs the same for the same reason, and
-	// nothing about -exit-key's name would tell a relay-only operator that.
-	if wantsForward && !roles[RoleExit] && strings.TrimSpace(cfg.ExitKeyHex) == "" {
-		return nil, errors.New("core: RelayIngress requires ExitKeyHex — a forwarding hop's node id IS its X25519 public key, and clients authenticate hops against the id published in the signed directory, so an identity regenerated on each restart makes this node unreachable as a hop until a fresh directory propagates")
+	// intermittently broken rather than misconfigured.
+	//
+	// This holds whatever else the node is (issue #103). The exit role used to exempt
+	// it, on the reasoning that an exit already tolerates a generated key; but that
+	// tolerance is earned by the exit's failure being LOUD — a client selects an exit
+	// out of the same snapshot that publishes its key, so a regenerated identity fails
+	// admission at once and in front of the operator. Holding the exit role does not
+	// make the HOP failure any louder. It only removed the check that was catching it,
+	// and it removed it for an operator who did nothing unusual: adding the exit role
+	// to a working relay silently dropped the protection. Serving an ingress is what
+	// the requirement attaches to, so that is what it is written against here.
+	//
+	// The message names the Go field and the cmd/node flag both (issue #102). core is
+	// reached from clients/fyne too, where there is no flag and the field name is the
+	// only handle the reader has; naming either one alone is wrong for somebody.
+	if wantsForward && strings.TrimSpace(cfg.ExitKeyHex) == "" {
+		return nil, errors.New("core: RelayIngress requires ExitKeyHex (-exit-key on cmd/node), and the exit role does not exempt it — a forwarding hop's node id IS its X25519 public key, and clients authenticate hops against the id published in the signed directory, so an identity regenerated on each restart makes this node unreachable as a hop until a fresh directory propagates. An exit's own key churn is caught loudly by admission; a hop's is not caught at all, and surfaces on a stranger's machine as a chain that cannot be built")
 	}
 	if wantsForward && len(cfg.RelayDirectory) == 0 {
 		// The listener would accept layers and refuse every one of them, since the
