@@ -51,8 +51,8 @@ contract between the two.
 |---|---|---|
 | Disconnected | No tunnel. Not protected. | Initial state; after Disconnect or a failed connect attempt |
 | Connecting… | Resolving a country and negotiating a session. | Set the moment Connect is pressed |
-| Protected | **Windows only.** A session is up and this device's traffic is routed through it: TUN adapter, routes, kill-switch. | `core.Engine.Connect` succeeded *and* `enforcement.Enforcer.Start` succeeded |
-| Proxy ready | **Linux/macOS.** A session is up and the SOCKS5 proxy is listening on `127.0.0.1:1080`. **Not** device-wide protection — see below. | `core.Engine.Connect` returned successfully, with no enforcement backend on this platform |
+| Protected | **Windows and Linux.** A session is up and this device's traffic is routed through it: TUN device, routes, kill-switch. On Linux this additionally requires `bacchus-netd` to be installed and reachable. | `core.Engine.Connect` succeeded *and* `enforcement.Enforcer.Start` succeeded |
+| Proxy ready | **macOS.** A session is up and the SOCKS5 proxy is listening on `127.0.0.1:1080`. **Not** device-wide protection — see below. | `core.Engine.Connect` returned successfully, with no enforcement backend on this platform |
 | Blocked | The session was up and the live path just died. | A transport-level ICE disconnect/failed/closed while the session was up — the same signal `clients/windows`'s tray status line already uses for this state (see ADR-0039) |
 
 `Blocked` is named after the kill-switch's fail-closed posture (ADR-0014). On
@@ -77,7 +77,28 @@ quietly fall back to leaving you with a working proxy: you asked to be protected
 and a green banner over traffic that is still in the clear is the exact failure
 ADR-0039 exists to prevent.
 
-**Linux/macOS — "Proxy ready".** No OS-level routing: no TUN device, no route
+**Linux — "Protected", but only with the helper installed (#37, ADR-0049).**
+Device-wide routing on Linux needs `CAP_NET_ADMIN`, and this GUI deliberately
+runs with none: a process that links a GL stack, an X11/Wayland client and a font
+renderer has no business rewriting the route table. The privileged half lives in
+a separate helper, `bacchus-netd`, reached over a peer-credential-gated unix
+socket — see
+[deploy/README.md](../../deploy/README.md#the-one-unit-that-is-not-a-server-unit-bacchus-netd-issue-37)
+to install it.
+
+If that helper is missing or unreachable, **the connect fails and says so**. It
+does not quietly leave you with a working proxy under a green banner; that is the
+same failure the paragraph above describes, and a missing helper is the most
+likely way to meet it on Linux.
+
+One caveat is real and is stated in the Settings window next to the field it
+affects: Linux cannot yet capture DNS queries that `systemd-resolved` sends to
+`127.0.0.53`. That address is loopback, the kernel consults the `local` routing
+table first, and no route can override `127.0.0.0/8`. With the kill-switch armed
+those queries are dropped; with it off they leave in the clear. Tracked as
+bacchus#104.
+
+**macOS — "Proxy ready".** No OS-level routing: no TUN device, no route
 table changes, no system proxy configuration. The tunnel is exposed as a **SOCKS5
 proxy on `127.0.0.1:1080`** and that is the whole interface between it and your
 traffic — an application is protected if, and only if, you have pointed it at that
@@ -135,10 +156,10 @@ config file yet, to this OS's per-user config directory — see Config above):
 
 | Field | Config key | Live today? |
 |---|---|---|
-| Split-tunnel bypass list (one IP/CIDR/domain per line) | `bypass` | **Windows only** — see below |
-| Split-tunnel mode (`exclude` or `include`) | `bypassMode` | **Windows only** — see below |
-| Kill-switch, **default on** | `disableKillSwitch` (inverted) | **Windows only** — see below |
-| DNS upstream (`host:port`) | `dns` | **Windows only** — see below |
+| Split-tunnel bypass list (one IP/CIDR/domain per line) | `bypass` | **Windows and Linux** — see below |
+| Split-tunnel mode (`exclude` or `include`) | `bypassMode` | **Windows and Linux** — see below |
+| Kill-switch, **default on** | `disableKillSwitch` (inverted) | **Windows and Linux** — see below |
+| DNS upstream (`host:port`) | `dns` | **Windows**; **partly on Linux** — see below |
 | Connect automatically when Bacchus starts | `autoConnect` | **Yes** |
 | Start Bacchus when you log in | `launchOnBoot` | **Yes** |
 | Automatically find the best path + transport try-order | `transportPool` | **Yes** |
@@ -146,9 +167,9 @@ config file yet, to this OS's per-user config directory — see Config above):
 | Relay directory file and its public key | `relayDirectoryPath`, `relayDirectoryKey` | **Yes** |
 | Admission authority public key | `admissionPubKey` | **Yes** |
 | Revocation list file | `admissionCrlPath` | **Yes** |
-| Carry other people's traffic as a relay | `volunteerRelay` | **Linux/macOS only** — see below |
-| Let other people's traffic reach the internet through your connection | `volunteerExit` | **Linux/macOS only** — see below |
-| Your address for exiting, and your exit identity key | `volunteerAdvertise`, `volunteerExitKey` | **Linux/macOS only** — see below |
+| Carry other people's traffic as a relay | `volunteerRelay` | **macOS only** — see below |
+| Let other people's traffic reach the internet through your connection | `volunteerExit` | **macOS only** — see below |
+| Your address for exiting, and your exit identity key | `volunteerAdvertise`, `volunteerExitKey` | **macOS only** — see below |
 
 The lower five arrived with #93 and carry no platform caveat: they are `core` config,
 enforced by `core`, and so mean the same thing on every platform this client runs on.
@@ -172,19 +193,26 @@ The transport try-order is only offered for transports this client can make
 tunnel-safe. A transport named in a hand-edited config that is not on that list is
 dropped rather than shown — what the window displays is what it will save.
 
-**Split-tunnel, kill-switch, and DNS are enforced on Windows and saved-but-inert
-elsewhere.** On Windows they are passed straight into `enforcement.Policy` and
-honoured by the same code `clients/windows` uses — the bypass list carves
-destinations out of the tunnel (or, in `include` mode, is the only thing pulled
-into it), the kill-switch arms a fail-closed OS firewall lockdown, and DNS is the
-upstream queried over DNS-over-TCP through the tunnel. On Linux and macOS there is
-still no TUN device, no route table change and no OS firewall for them to act on,
-so they are saved and nothing more, exactly as before (`[E10]` bacchus#37, `[E9]`
-bacchus#36).
+**Split-tunnel, kill-switch, and DNS are enforced on Windows and Linux, and
+saved-but-inert on macOS.** They are passed straight into `enforcement.Policy`
+and honoured by the same portable code on both enforcing platforms — the bypass
+list carves destinations out of the tunnel (or, in `include` mode, is the only
+thing pulled into it), the kill-switch arms a fail-closed OS lockdown
+(`NetSecurity` on Windows, nftables on Linux), and DNS is the upstream queried
+over DNS-over-TCP through the tunnel. On macOS there is still no TUN device, no
+route table change and no OS firewall for them to act on, so they are saved and
+nothing more (`[E9]` bacchus#36).
 
-On those platforms, turning the kill-switch checkbox off remains safe for the same
+Two Linux qualifications, both stated in the window itself rather than only here:
+enforcement requires `bacchus-netd` (above), and the DNS field does not cover
+`systemd-resolved`'s own lookups (bacchus#104). The window's notice would
+otherwise claim all three settings "change what leaves it", which for DNS on
+Linux is more than is true — and claiming more than is enforced is the same
+class of failure as claiming less.
+
+On macOS, turning the kill-switch checkbox off remains safe for the same
 reason turning it on does nothing: neither changes what leaves the machine. On
-Windows, turning it off genuinely disables the lockdown.
+Windows and Linux, turning it off genuinely disables the lockdown.
 
 Auto-connect and launch-on-boot are fully functional everywhere: the
 former calls `Controller.Connect` once at startup instead of waiting for the button;
@@ -287,13 +315,27 @@ launch a GUI binary, matching `clients/windows`'s own job.
 
 ## Known limits
 - No country picker (#150; `bacchus-vpn/bacchus#16` `[E3]` in the current tracker).
-- **Carries no device traffic on Linux or macOS.** No TUN, no route flip, no system
-  proxy — only apps you point at SOCKS5 `127.0.0.1:1080` go through the tunnel.
-  This is the biggest remaining gap between those platforms and `clients/windows`,
-  and it is the one to read before trusting the banner. Windows does route the
-  device (bacchus#59); Linux is `[E10]` (bacchus#37) and macOS `[E9]` (bacchus#36).
-- Settings (`old #152`) for split-tunnel/kill-switch/DNS enforce nothing on Linux/macOS —
-  same root cause as the point above. Live on Windows. See Settings above.
+- **Carries no device traffic on macOS.** No TUN, no route flip, no system proxy —
+  only apps you point at SOCKS5 `127.0.0.1:1080` go through the tunnel. This is now
+  the last platform gap against `clients/windows`, and it is the one to read before
+  trusting the banner there. Windows routes the device (bacchus#59) and so does
+  Linux (bacchus#37); macOS is `[E9]` (bacchus#36).
+- **Linux routing needs `bacchus-netd` installed**, and the connect fails without
+  it rather than degrading to a proxy. See the Linux paragraph under "What the
+  headline means".
+- **Linux DNS is incomplete**: `systemd-resolved`'s own lookups to `127.0.0.53`
+  are not captured (bacchus#104). The Settings window says so next to the field.
+- Settings (`old #152`) for split-tunnel/kill-switch/DNS enforce nothing on macOS —
+  same root cause as the first point. Live on Windows and Linux. See Settings above.
+- **Volunteering is refused on any build that routes the device, which now includes
+  every Linux build.** Serving and device-wide routing cannot share a process
+  (`ErrVolunteerWhileRouted`), and `DeviceEnforced()` is a property of the platform
+  rather than of whether the helper happens to be installed. A Linux user who had
+  volunteered under the proxy-only client has those opt-ins turned off on their
+  first save, with a message saying so (bacchus#101). To keep donating capacity
+  from a Linux machine, run `cmd/node` with `-volunteer-relay` / `-volunteer-exit`
+  instead — see
+  [docs/RUNNING.md](../../docs/RUNNING.md#volunteering-your-connection-issue-12).
 - `Blocked` makes no claim about leakage on any platform. On Windows an armed
   kill-switch is holding the machine closed; the banner still does not say so,
   because the kill-switch is a setting you can turn off and the banner does not

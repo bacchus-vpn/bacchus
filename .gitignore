@@ -17,6 +17,10 @@ secrets/
 /dist/
 /bin/
 *-linux
+# The device-routing helper, when built into the repo root the way
+# deploy/README.md's install steps do (issue #37). Has no extension, so none
+# of the patterns above catch it.
+/bacchus-netd
 *-darwin
 *-windows
 bacchus-node

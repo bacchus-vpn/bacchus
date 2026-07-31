@@ -831,3 +831,51 @@ problem that platform does not have.
   first. Both were accurate about what had been checked, and both let a reader
   conclude something broader. That pattern, not either instance, is the thing
   to watch for in the next bar this project writes.
+
+## Amendment (2026-07-31): Linux clears the bar, with one item qualified (#37)
+
+`[E10]` (bacchus#37) shipped the Linux `Enforcer`, against the privilege model
+ADR-0049 decided. Recorded item by item, because this bar's whole point is that a
+partial `Enforcer` shipped as if it were parity is this record's Scope-section lie
+wearing a new platform.
+
+| # | Item | Linux |
+|---|---|---|
+| 1 | Split tunnelling *wired correctly*, not reimplemented | Yes — `splittunnel.go` is inherited unchanged; only three route methods are new |
+| 2 | Kill-switch is an OS-level filter that survives a killed process | Yes — nftables state in the kernel, asserted surviving the client being killed |
+| 3 | A stale lockdown is detected and lifted on next launch | Yes — the helper reaps its own table by name, no heuristic needed |
+| 4 | Late-learned bypass addresses fold into the live allowlist | Yes — and with **no** fails-closed window, unlike Windows (ADR-0049 §8) |
+| 5 | Underlay exclusions installed before the dial, never orphaned | Yes — `poolroutes.go` inherited; ordering unchanged |
+| 6 | IPv6 on the physical adapter is closed for the tunnel's lifetime | Yes — and restored to its *captured prior value*, not a hardcoded 0 |
+| 7 | Elevated execution is real, documented, and fails loudly when missing | Yes — `bacchus-netd`, documented in `deploy/README.md` and `docs/RUNNING.md`; a missing helper **fails the connect** |
+| 8 | A traffic-level test, not a state-level one | Yes, and further than Windows reaches — see below |
+
+**Item 8 is cleared more strongly here than on Windows, and item 7's DNS half is
+not cleared at all.** Both deserve saying plainly.
+
+Item 8: a user namespace plus a network namespace gives CI a real kernel, so the
+Linux tests assert what `traffic_test.go` explicitly cannot — that the *kernel
+actually delivers* a packet into the tunnel device given the routes installed,
+and that an armed kill-switch actually stops one leaving. `traffic_test.go`'s own
+file doc names that gap ("Not covered: whether the OS actually hands this device
+the packets in the first place"). On Windows it is still open, as #88.
+
+The qualification: **Linux does not capture DNS queries `systemd-resolved` sends
+to `127.0.0.53`**. That is loopback, the kernel consults the `local` table before
+any route Bacchus installs, and closing it needs a new `osNet` method — a
+three-platform interface change, tracked as bacchus#104. It does not fail any of
+the eight items as written, because none of them names DNS; it is recorded here
+anyway, because a bar read as "all eight, therefore done" would otherwise cover
+a real hole. The Settings window states it next to the field rather than leaving
+the reader to find this table.
+
+- **`clients/windows`'s retirement (#88) is unaffected.** It was blocked on a
+  hardware run for items 2 and 3 on *Windows*; nothing here touches that.
+- **The same honesty gap applies to Linux.** A namespace is a synthetic network:
+  no real `systemd-resolved`, no NetworkManager, no physical adapter. Passing
+  these tests means the mechanism is right, not that a desktop is covered. That
+  run has not been done, and this amendment does not claim it has.
+- **Volunteering is now refused on Linux.** `ErrVolunteerWhileRouted` refuses to
+  serve from a build that routes the device, and `DeviceEnforced()` is a property
+  of the platform. bacchus#101 is the fix for the stored-opt-in trap this creates
+  on upgrade; `cmd/node` remains the way to donate capacity from a Linux machine.

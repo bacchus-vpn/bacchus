@@ -541,3 +541,70 @@ func TestNewExitKeyHexIsAcceptedByItsOwnValidator(t *testing.T) {
 		t.Error("two calls to NewExitKeyHex returned the same key")
 	}
 }
+
+// Issue #101. The trap this closes: PlanVolunteer refuses to serve on a build
+// that routes the whole device, and settings.go disables the two volunteer
+// controls there — but Fyne's Disable() does not clear Checked, so a stored
+// opt-in reaches submit still ticked. The save is refused, and the only control
+// that could clear it is greyed out.
+//
+// Asserted as the property that actually matters rather than as the assignment:
+// after clearing, the config must be one PlanVolunteer accepts. That is the
+// difference between "the window can be saved" and "the window is stuck".
+func TestClearVolunteeringUnsticksAnEnforcedSave(t *testing.T) {
+	stored := Config{VolunteerRelay: true, VolunteerExit: true,
+		VolunteerAdvertise: "203.0.113.4:20000",
+		VolunteerExitKey:   "aa" + strings.Repeat("bb", 31)}
+
+	// Before the fix, this is the state the Settings window could not leave.
+	if _, err := PlanVolunteer(stored, true); err == nil {
+		t.Fatal("PlanVolunteer accepted a serving config on a routed build; the premise of #101 no longer holds")
+	}
+
+	cleared, changed := ClearVolunteeringIfRouted(stored, true)
+	if !changed {
+		t.Error("ClearVolunteeringIfRouted reported no change for a config that had both opt-ins set")
+	}
+	if cleared.VolunteerRelay || cleared.VolunteerExit {
+		t.Errorf("opt-ins survived: relay=%v exit=%v", cleared.VolunteerRelay, cleared.VolunteerExit)
+	}
+	if _, err := PlanVolunteer(cleared, true); err != nil {
+		t.Errorf("the cleared config is still unsaveable: %v", err)
+	}
+
+	// The identity key and advertised address are KEPT (#100): discarding the
+	// key would make a volunteer who returns to a non-enforcing machine a new
+	// node nobody's cached directory can reach.
+	if cleared.VolunteerAdvertise != stored.VolunteerAdvertise {
+		t.Errorf("VolunteerAdvertise = %q, want it kept", cleared.VolunteerAdvertise)
+	}
+	if cleared.VolunteerExitKey != stored.VolunteerExitKey {
+		t.Errorf("VolunteerExitKey = %q, want it kept", cleared.VolunteerExitKey)
+	}
+}
+
+// On a build that does NOT route the device, volunteering is a real choice and
+// must be left exactly as the user set it.
+func TestClearVolunteeringLeavesAProxyOnlyBuildAlone(t *testing.T) {
+	stored := Config{VolunteerRelay: true, VolunteerExit: true,
+		VolunteerAdvertise: "203.0.113.4:20000",
+		VolunteerExitKey:   "aa" + strings.Repeat("bb", 31)}
+
+	got, changed := ClearVolunteeringIfRouted(stored, false)
+	if changed {
+		t.Error("ClearVolunteeringIfRouted reported a change on a proxy-only build")
+	}
+	if !reflect.DeepEqual(got, stored) {
+		t.Errorf("config was modified on a proxy-only build:\n got %+v\nwant %+v", got, stored)
+	}
+}
+
+// The ordinary case: a user who never volunteered must not be told anything was
+// turned off, on any build.
+func TestClearVolunteeringIsSilentWhenNothingWasSet(t *testing.T) {
+	for _, routed := range []bool{true, false} {
+		if _, changed := ClearVolunteeringIfRouted(Config{}, routed); changed {
+			t.Errorf("routed=%v: reported a change for a config with no opt-ins", routed)
+		}
+	}
+}

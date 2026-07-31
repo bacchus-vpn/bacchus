@@ -184,8 +184,70 @@ Hand the printed `bacchus1:...` invite string to the new user out of band
 (messenger, QR in person — never through a channel the app itself controls).
 See [docs/design/bootstrap-protocol.md](../docs/design/bootstrap-protocol.md).
 
+## The one unit that is not a server unit: `bacchus-netd` (issue #37)
+
+`bacchus-netd.service` / `.socket` are the odd pair in this directory. Everything
+else here runs on a **server** box; these run on a **desktop**, next to
+`clients/fyne`, and they are what make the Linux client route the device instead
+of offering a SOCKS port.
+
+The split is [ADR-0049](../docs/adr/0049-linux-privilege-boundary.md): the GUI
+keeps running as the desktop user with no capabilities, a small helper holds
+`CAP_NET_ADMIN`, and they speak over `/run/bacchus/netd.sock`, mode `0660`,
+group `bacchus`. Running the whole GUI as root is not acceptable for a client
+aimed at ordinary users — Fyne links a GL stack, an X11/Wayland client and a
+font renderer, and none of that belongs in a process that can rewrite the route
+table.
+
+```bash
+# 1. Build and install the helper (it is not in /usr/local/bin: it is a helper
+#    the user never runs by hand, not a command).
+go build -o bacchus-netd ./cmd/bacchus-netd
+sudo install -D -m 0755 bacchus-netd /usr/local/lib/bacchus/bacchus-netd
+
+# 2. Create the group and put yourself in it.
+sudo systemd-sysusers deploy/bacchus-netd.sysusers.conf
+sudo usermod -aG bacchus "$USER"        # log out and back in for this to apply
+
+# 3. Install and enable the socket. The SOCKET is what gets enabled, not the
+#    service — the helper is socket-activated and starts when the client first
+#    connects.
+sudo cp deploy/bacchus-netd.service deploy/bacchus-netd.socket /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now bacchus-netd.socket
+```
+
+Check it:
+```bash
+systemctl status bacchus-netd.socket
+journalctl -u bacchus-netd -f
+```
+
+Things worth knowing before the first support question:
+
+- **Group membership needs a fresh login.** Supplementary groups are fixed when
+  a session starts, so `usermod -aG` does nothing for the shell you typed it in.
+- **The client fails the connect if the helper is unreachable**, on purpose. It
+  does not fall back to a working SOCKS proxy under a "Protected" banner —
+  that failure mode is the one ADR-0039's parity item 7 exists to rule out, and
+  a missing helper is the most likely way to meet it on Linux.
+- **The helper and the client must be the same version.** They refuse each other
+  outright on a protocol mismatch rather than negotiating down to a subset; a
+  client that silently lost its kill-switch to a version skew is the same
+  failure wearing different clothes. Upgrade both together.
+- **An armed kill-switch survives everything except a reboot or the next
+  launch.** It is nftables state in the kernel, so it outlives the client being
+  killed (which is what a kill-switch is *for*) and the helper exiting when
+  idle. The next session lifts a stale one; so does a reboot.
+- **Non-systemd hosts** can run the binary under any supervisor — socket
+  activation is an optimization, not a requirement. Such a host has no logind to
+  answer "does this uid own an active local session", so it needs
+  `-allow-without-logind`, which drops the gate to the socket's group
+  permission alone. That is a real weakening and it is opt-in for that reason.
+
 ## Notes
 - These run on the server box(es). A **relay** or **client** node runs the same
-  `bacchus-node` binary with a different `-role`, not as these units.
+  `bacchus-node` binary with a different `-role`, not as these units. The
+  exception is `bacchus-netd` above, which is a desktop-side unit.
 - The TURN password (`TURN_PASS`) must match across the coordinator and every
   node/client.

@@ -53,7 +53,7 @@ func TestController_RealLoopback(t *testing.T) {
 		t.Fatal("exit never registered with the fake coordinator")
 	}
 
-	ctrl := NewController(Config{Coordinators: []string{coord.addr()}})
+	ctrl := newProxyOnlyController(Config{Coordinators: []string{coord.addr()}})
 	rec := newStateRecorderFor(ctrl)
 	ctrl.OnState, ctrl.OnDetail = rec.onState, rec.onDetail
 
@@ -320,7 +320,7 @@ func TestAdmissionAnchorRejectsAnUncredentialedExit(t *testing.T) {
 		t.Fatalf("generate anchor: %v", err)
 	}
 
-	ctrl := NewController(Config{
+	ctrl := newProxyOnlyController(Config{
 		Coordinators:    []string{coord.addr()},
 		AdmissionPubKey: hex.EncodeToString(anchorPub),
 	})
@@ -451,7 +451,7 @@ func TestProtectedMeansTrafficActuallyFlows(t *testing.T) {
 		t.Fatal("exit never registered with the fake coordinator")
 	}
 
-	ctrl := NewController(Config{Coordinators: []string{coord.addr()}})
+	ctrl := newProxyOnlyController(Config{Coordinators: []string{coord.addr()}})
 	rec := newStateRecorderFor(ctrl)
 	ctrl.OnState, ctrl.OnDetail = rec.onState, rec.onDetail
 	t.Cleanup(ctrl.Disconnect)
