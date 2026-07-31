@@ -385,8 +385,8 @@ NAT you serve as a client's **first hop**, reached the way the client itself is 
 the coordinator uses the address your registration arrives from. Carrying somebody
 else's **middle** hop is a different job: it is reached by an inbound dial, so it
 needs a publicly reachable `-relay-ingress` (plus `-relay-directory` and a
-persistent `-exit-key`, which `-volunteer-relay` will insist on). Behind a home
-NAT, first hop and exit are realistic; middle hop is not.
+persistent `-exit-key`, which the node insists on whatever roles it holds). Behind
+a home NAT, first hop and exit are realistic; middle hop is not.
 
 ### Exit — a separate decision, with a legal cost attached
 This is the one where other people's traffic leaves the internet-facing side of
