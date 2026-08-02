@@ -3,9 +3,66 @@ name: ci
 on:
   push:
     branches: [main]
+    # Tags are here for the release-stamp job below, which is the half of
+    # issue #128 that can only run on a tag: it asserts the tag and the VERSION
+    # file agree. Running the rest of CI on a tag as well is a deliberate
+    # side effect and not an accident — a tag is the one commit where a red
+    # build is most expensive to discover later.
+    tags: ['v*']
   pull_request:
 
 jobs:
+  # The release version, and the machinery that puts it into a binary
+  # (issue #128). Small and separate: it is the only job that has anything to
+  # say on a tag push, and folding it into `server` would bury a failure whose
+  # cause has nothing to do with the code under it.
+  release-stamp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      # The check that the -ldflags -X every build path passes actually LANDS,
+      # and the reason it cannot be a plain assertion that the flag was passed:
+      # a -X naming a symbol that does not resolve is IGNORED BY THE LINKER,
+      # silently, with a zero exit. A renamed var, a moved package or a typo'd
+      # module path therefore produces a green build, a successful install, and
+      # a binary reporting 0.0.0 for the life of the deployment.
+      #
+      # So this links the real symbol and reads the value back out of the linked
+      # binary. BACCHUS_REQUIRE_STAMP is what makes the check load-bearing:
+      # without it the test SKIPS when the stamp is absent, which is exactly the
+      # failure being tested and would report green over nothing. Same shape,
+      # and the same reason, as BACCHUS_NETD_REQUIRE_NS in the server job.
+      - name: the release stamp reaches the binary
+        env:
+          BACCHUS_REQUIRE_STAMP: "1"
+        run: |
+          go test -count=1 \
+            -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" \
+            -run 'TestStampMatchesTheVersionFile|TestCurrentIsParseable' \
+            ./core/version/
+      # VERSION itself is checked by core/version's own tests (they parse the
+      # file), which the server job runs. What only a tag can check is that the
+      # tag and the file agree — and they have to, because the file is what goes
+      # into the binary while the tag is what everything else names the release
+      # by. A v0.3.0 tag on a tree whose VERSION still says 0.2.0 ships binaries
+      # that report the wrong release to a fence built to believe them.
+      - name: a tagged build's tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          want="v$(cat VERSION)"
+          if [ "$tag" != "$want" ]; then
+            echo "::error::tag $tag does not match VERSION ($(cat VERSION))."
+            echo "::error::The convention is v<VERSION> — tag v$(cat VERSION), or bump VERSION"
+            echo "::error::in a commit of its own and tag that. They are the same release or"
+            echo "::error::neither of them means anything."
+            exit 1
+          fi
+          echo "tag $tag matches VERSION"
+
   server:
     runs-on: ubuntu-latest
     steps:
@@ -24,8 +81,14 @@ jobs:
       # Its Windows-tagged half is covered by the windows-enforcement job below.
       - name: vet
         run: go vet ./core/... ./bind/... ./cmd/... ./clients/internal/...
+      # Stamped, like every other build path that produces a binary anyone could
+      # run (issue #128): deploy/install.sh, the manual builds in
+      # docs/RUNNING.md, and here. A fence some builds participate in and others
+      # do not is worse than one that never fires, because it fences an
+      # arbitrary subset and reports success — so "CI does not ship artifacts"
+      # is not a reason for CI to build something other than what ships.
       - name: build
-        run: go build ./cmd/...
+        run: go build -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" ./cmd/...
       # Deliberately no -short: a few real-transport integration tests are
       # gated behind testing.Short() specifically so they still run here
       # while a local `go test -short ./...` skips them for a fast inner
@@ -219,8 +282,17 @@ jobs:
       # shipping binary (no console window behind the GUI). It sets one PE
       # header field and changes no compilation - but building something other
       # than what ships is how a green job stops describing the artifact.
+      #
+      # Which is also why the release stamp is here (issue #128): this job's
+      # artifact is the binary #115's hardware runs are driven from, and an
+      # unstamped one warns at every start and reports 0.0.0 to a coordinator.
+      # bash rather than this runner's default pwsh, for one line that reads the
+      # same as the other two build steps; VERSION is checked out with LF
+      # endings (.gitattributes pins it), so $(cat VERSION) carries no CR into
+      # the linker.
       - name: build
-        run: go build -ldflags "-H=windowsgui" -o bacchus-fyne.exe ./clients/fyne
+        shell: bash
+        run: go build -ldflags "-H=windowsgui -X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" -o bacchus-fyne.exe ./clients/fyne
       - name: confirm the build produced a real Windows binary
         shell: pwsh
         run: |
@@ -299,8 +371,12 @@ jobs:
         run: test -z "$(gofmt -l clients/fyne)"
       - name: vet
         run: go vet ./clients/fyne/...
+      # Stamped for the reason the other two build steps are (issue #128): the
+      # binary this job launches under Xvfb should be the binary an install
+      # produces, and deploy/install.sh builds this same package with the same
+      # -X on the machine it installs onto.
       - name: build
-        run: go build -o /tmp/bacchus-fyne ./clients/fyne
+        run: go build -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" -o /tmp/bacchus-fyne ./clients/fyne
       # internal/appstate is deliberately Fyne-free (ADR-0039) and needs no
       # display; the outer package (main.go/settings.go/ui.go) has no test
       # files of its own, so this compiles it under the real cgo/GL

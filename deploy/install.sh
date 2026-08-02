@@ -384,6 +384,67 @@ has_placeholders() { grep -qE 'CHANGE_ME|YOUR_[A-Z_]+' "$1"; }
 build_dir=''
 binaries_dir=''
 
+# release_version is the number every binary built here is stamped with, read
+# from the repository's VERSION file — the single source of truth for it
+# (issue #128). Empty until read_release_version runs, which prepare_build_dir
+# does before the first build and --binaries skips along with the toolchain.
+#
+# Until #128 nothing stamped anything, so every binary this project had ever
+# produced reported the same release into three mechanisms that compare one:
+# a coordinator's -min-serving-version fence, the client's force-update check,
+# and the coordinator's "this node is on a different build from me" warning.
+# This script is one of THREE build paths that had to start agreeing on the
+# number — the others are the manual builds in docs/RUNNING.md and CI — and the
+# agreement is the whole point. A fence that some builds participate in and
+# others do not is worse than one that never fires, because it fences an
+# arbitrary subset and reports success either way.
+release_version=''
+
+# version_symbol is the linker symbol the number lands on, spelled out in full
+# and in exactly one place because of HOW A WRONG ONE FAILS: `-X` naming a
+# symbol that does not resolve is ignored by the linker, silently, with no
+# warning and a zero exit. A typo here builds clean, installs clean, starts
+# clean, and reports 0.0.0 for the life of the deployment. CI links this same
+# string and reads the value back out of the linked binary
+# (core/version.TestStampMatchesTheVersionFile), which is what keeps a rename on
+# the Go side from quietly disabling this one.
+version_symbol='github.com/bacchus-vpn/bacchus/core/version.current'
+
+# version_valid accepts exactly what core/version.Parse accepts: three
+# non-negative decimal components and nothing else. Deliberately not lenient.
+# core/version.Current PANICS on a malformed stamp, so a "v0.2.0", a trailing
+# "-rc1" or an editor's stray second line waved through here is not a build
+# error to be fixed later — it is every binary from this install dying at
+# startup on the machine it was installed on.
+version_valid() {
+	case $1 in
+	*[!0-9.]* | .* | *. | *..* | *.*.*.*) return 1 ;;
+	*.*.*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+read_release_version() {
+	version_file="$repo_root/VERSION"
+	[ -f "$version_file" ] || refuse "no VERSION file at $version_file." \
+		"One line at the root of the repository, holding the release number every" \
+		"build is stamped with. This script will not build binaries that cannot say" \
+		"which release they are, because a coordinator's version fence and its" \
+		"build-skew warning both believe what a node reports." \
+		"" \
+		"Run from a complete checkout, or pass --binaries DIR with binaries built" \
+		"elsewhere."
+	# tr rather than `read`: a lone CR from a checkout that ignored .gitattributes
+	# would otherwise ride into the -ldflags, and a stamp that core/version.Parse
+	# rejects is a panic at startup rather than a failure here.
+	release_version=$(tr -d ' \t\r\n' <"$version_file")
+	version_valid "$release_version" || refuse "VERSION does not hold a release number." \
+		"$version_file contains: $release_version" \
+		"It must be a bare MAJOR.MINOR.PATCH — 0.2.0, not v0.2.0, not 0.2, and no" \
+		"pre-release suffix. It is stamped into the binary verbatim and parsed" \
+		"there by exactly this rule."
+}
+
 # prepare_build_dir makes the scratch directory in the CALLING shell, which is
 # not a stylistic preference: resolve_binary is used as `x=$(resolve_binary …)`,
 # and a variable assigned inside a command substitution is assigned in a
@@ -398,6 +459,7 @@ prepare_build_dir() {
 		"not look like one (no go.mod). Either run it from a clone, or pass" \
 		"--binaries DIR pointing at binaries you built elsewhere."
 	need_cmd go 'Install Go, or build elsewhere and pass --binaries DIR.'
+	read_release_version
 	build_dir=$(mktemp -d)
 }
 
@@ -413,8 +475,8 @@ resolve_binary() {
 		return 0
 	fi
 	if [ ! -f "$build_dir/$name" ]; then
-		log "building $name from source (this can take a minute)" >&2
-		( cd "$repo_root" && go build -o "$build_dir/$name" "$pkg" ) || build_failed "$name"
+		log "building $name $release_version from source (this can take a minute)" >&2
+		( cd "$repo_root" && go build -ldflags "-X $version_symbol=$release_version" -o "$build_dir/$name" "$pkg" ) || build_failed "$name"
 	fi
 	printf '%s' "$build_dir/$name"
 }
@@ -1049,8 +1111,17 @@ if [ "$mode" != 'uninstall' ]; then
 	repo_root=$(CDPATH='' cd -- "$deploy_dir/.." && pwd)
 fi
 
-if [ -n "$binaries_dir" ] && [ ! -d "$binaries_dir" ]; then
-	refuse "--binaries $binaries_dir is not a directory"
+if [ -n "$binaries_dir" ]; then
+	if [ ! -d "$binaries_dir" ]; then
+		refuse "--binaries $binaries_dir is not a directory"
+	fi
+	# Prebuilt binaries carry whatever release they were stamped with when they
+	# were linked. This script never links them, so it can neither stamp them nor
+	# read what they say — say so once rather than let the difference surface
+	# three weeks later as a version fence with nothing to compare (issue #128).
+	log "using prebuilt binaries from $binaries_dir: their release is whatever stamped them."
+	log "  Cross-build them the way docs/RUNNING.md documents; a bare \`go build\` leaves"
+	log "  a binary that reports 0.0.0 and warns at every start."
 fi
 
 cleanup() { [ -z "$build_dir" ] || rm -rf "$build_dir"; }
