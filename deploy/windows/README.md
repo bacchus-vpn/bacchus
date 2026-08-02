@@ -185,6 +185,34 @@ a client that dies at its first connect. An unstamped build would report the
 source default — `0.1.0` — to every coordinator it meets, and ADR-0015's node
 fence and client-update policy both turn on that number.
 
+### The `VERSION` gate, and why it is a job
+
+`release.yml`'s first job compares the tag against the repository's `VERSION`
+file and refuses if they differ. `ci.yml` asserts the same thing on a tag push;
+that copy stays, and it is deliberately not what this relies on. Two workflows
+triggered by one push run **in parallel**, and there is no native way to order
+them — `needs:` is intra-workflow, `workflow_run` solves a different problem. So
+`ci.yml`'s assertion can go red *beside* a release that has already been
+published. A check that cannot stop the thing it checks gates nothing.
+
+Ordering the jobs `verify-version → windows-bundle → publish` makes it a
+precondition instead: **a refusal happens before the build.** Nothing is
+compiled, no artifact is uploaded, and no release object is created — not even a
+draft.
+
+The two version checks are not the same check and neither covers the other. The
+gate asks whether the tag **equals** what the repository claims; the rule inside
+the build asks whether `MAJOR.MINOR.PATCH` can be **read out of** the tag at all.
+A `v1.5.0` pushed while `VERSION` still says `1.0.0` passes the second cleanly
+and builds a perfectly self-consistent 1.5.0 bundle that the repository knows
+nothing about.
+
+One consequence to know rather than discover: while `VERSION` is a bare
+`MAJOR.MINOR.PATCH`, a pre-release tag (`v1.0.0-rc1`) cannot pass the gate, so
+the `--prerelease` path is presently unreachable. That is the two checks
+agreeing rather than an oversight — `ci.yml`'s copy would refuse the same tag —
+and it is the thing to revisit if release candidates are ever wanted.
+
 ## Building it by hand
 
 On a Windows machine with Go, a mingw-w64 `gcc` on `PATH` (see

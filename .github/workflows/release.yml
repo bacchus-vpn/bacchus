@@ -23,6 +23,16 @@ name: release
 #
 # Removing --draft is a one-line change to make once a release has gone
 # through this end to end. Do not remove it before that.
+#
+# The order of the three jobs is the load-bearing part of the file:
+#
+#   verify-version  ->  windows-bundle  ->  publish
+#
+# so a refusal at the first one happens BEFORE the build. Nothing is compiled,
+# no artifact is uploaded, and no release object is created, not even a draft.
+# That is the difference between "the draft was created and then a check went
+# red" and "nothing was created", and it is why the version gate is a job here
+# rather than a step somewhere later.
 
 on:
   push:
@@ -53,7 +63,80 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The gate. Nothing else in this file runs until this passes.
+  #
+  # ci.yml asserts the same thing on a tag push, and that assertion is a
+  # BYSTANDER: two workflows triggered by one push start in parallel, and there
+  # is no native way to order them (needs: is intra-workflow, workflow_run is a
+  # different tool for a different problem). So its check can go red beside a
+  # bundle that has already been built and a release that has already been
+  # created. A check that cannot stop the thing it is checking gates nothing.
+  #
+  # Here it is a precondition instead, because windows-bundle needs: it and
+  # publish needs: windows-bundle. A refusal means nothing is built, no artifact
+  # exists, and no release object is created - not even a draft.
+  #
+  # This is NOT the same check as the version rule in windows-bundle below, and
+  # neither covers the other. That one validates the tag's SHAPE - that
+  # MAJOR.MINOR.PATCH can be read out of it at all, which is what
+  # core/version.current needs. This one validates that the tag EQUALS the
+  # version the repository claims. A tag v1.5.0 pushed while VERSION still says
+  # 1.0.0 passes the shape check cleanly, builds an internally consistent 1.5.0
+  # bundle, and publishes a release the repository does not know about.
+  #
+  # The duplication with ci.yml is deliberate and stays: its copy covers
+  # somebody tagging without cutting a release, which this file never sees.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: the tag must be the version this repository claims
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # A missing VERSION is a failure, never "nothing to check". The whole
+          # point of this job is to be the thing that cannot be skipped, and a
+          # gate that opens when its input disappears is not a gate.
+          if [ ! -f VERSION ]; then
+            echo "::error::VERSION is missing from the repository root. This job compares"
+            echo "::error::the release tag against it and refuses to guess when it is absent."
+            exit 1
+          fi
+
+          version="$(tr -d '[:space:]' < VERSION)"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION reads '$version', which is not MAJOR.MINOR.PATCH."
+            echo "::error::core/version.Parse takes exactly three numeric components and"
+            echo "::error::core/version.Current() panics on anything else."
+            exit 1
+          fi
+
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "VERSION is $version and well formed. Not a tag run, so there is no tag to compare it with."
+            exit 0
+          fi
+
+          # One leading v is tolerated on the tag and nothing else is: the
+          # comparison is exact against a file that is bare MAJOR.MINOR.PATCH.
+          #
+          # A consequence worth knowing rather than discovering: while VERSION
+          # is bare, a pre-release tag (v1.0.0-rc1) cannot pass this, so the
+          # --prerelease path in publish is presently unreachable. That is the
+          # two checks agreeing rather than an oversight - ci.yml's copy would
+          # refuse the same tag - and it is what to revisit if release
+          # candidates are ever wanted.
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} is not the version this repository claims."
+            echo "::error::VERSION says $version. Nothing was built and no release was created."
+            echo "::error::Either the tag is wrong, or VERSION was not bumped in the commit it points at."
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches VERSION ($version)"
+
   windows-bundle:
+    needs: verify-version
     runs-on: windows-latest
     # Read by the publish job below. A job's steps' outputs are not visible to
     # another job unless they are re-exported here.
