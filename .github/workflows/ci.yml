@@ -234,6 +234,27 @@ jobs:
       # its own AST and creates no fyne.App, so it needs no display.
       - name: test
         run: go test ./clients/fyne/...
+      # linux-client makes the point that compiling is not proof it runs, and
+      # quotes this ADR's own ephemeral-SOCKS-port bug for it. The same
+      # argument applies here with more force, since this is the platform the
+      # client is meant to take over. There is no Xvfb to reach for, so this
+      # is Start-Process against the real Windows session with the std handles
+      # redirected - a windowsgui binary allocates no console of its own, but
+      # inherited handles still carry, which is the only way a failure here
+      # says anything more useful than an exit code.
+      - name: smoke test (launch)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\bacchus-fyne.exe -PassThru `
+            -RedirectStandardOutput smoke-out.txt -RedirectStandardError smoke-err.txt
+          Start-Sleep -Seconds 10
+          if ($p.HasExited) {
+            "exit code: $($p.ExitCode)"
+            Get-Content smoke-out.txt, smoke-err.txt -ErrorAction SilentlyContinue
+            throw "bacchus-fyne.exe exited before the 10s mark"
+          }
+          "still running after 10s"
+          Stop-Process -Id $p.Id -Force
       # The binary #115's second item needs. That item is a hardware pass on
       # the owner's own machine, and without this it would begin by installing
       # a mingw toolchain to produce a binary CI already had. Unsigned - this
