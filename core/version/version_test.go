@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -158,6 +159,63 @@ func versionFile(t *testing.T) string {
 		t.Fatalf("reading the VERSION file: %v", err)
 	}
 	return strings.TrimSpace(string(raw))
+}
+
+// A build stamped with something that is not a release fails at startup, and
+// does NOT degrade the way an unstamped build does. The asymmetry is the point
+// of this test: unstamped is what an ordinary `go build` produces and it has a
+// representable answer (0.0.0, no release), while a malformed stamp has none,
+// and the only alternative to failing is inventing a release for a fence that
+// must never be handed one.
+//
+// A release candidate leads the table because it is the case that will actually
+// be attempted: `v1.0.0-rc1` is an ordinary tag to want, and under the
+// v<VERSION> convention it would put 1.0.0-rc1 in VERSION and stamp it. Three
+// validators reject it before a build can carry it (install.sh's version_valid,
+// TestVersionFileIsCanonical, and CI's shape checks on VERSION and the tag) —
+// this pins what happens if all three are bypassed.
+func TestMalformedStampFailsAtStartup(t *testing.T) {
+	for _, bad := range []string{"1.0.0-rc1", "1.0.0+build.7", "v1.0.0", "1.0", "0.1.0\n"} {
+		t.Run(bad, func(t *testing.T) {
+			restore := current
+			defer func() {
+				current = restore
+				r := recover()
+				if r == nil {
+					t.Fatalf("a build stamped %q must not start; Current() returned instead", bad)
+				}
+				msg, ok := r.(string)
+				if !ok {
+					t.Fatalf("panicked with %T, want the string message a release engineer can act on", r)
+				}
+				// Quoted, which is how the message carries it: a stamp with a
+				// stray newline in it has to be readable in a panic, and the
+				// raw bytes would put a line break through the middle of one.
+				for _, want := range []string{strconv.Quote(bad), "MAJOR.MINOR.PATCH", "VERSION"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("the panic must name %s, got:\n%s", want, msg)
+					}
+				}
+			}()
+			current = bad
+			_ = Current()
+		})
+	}
+}
+
+// The panic text names the pre-release case in the words someone tagging would
+// use, because that is the mistake this message exists to answer.
+func TestMalformedStampMessageNamesPreRelease(t *testing.T) {
+	_, err := Parse("1.0.0-rc1")
+	if err == nil {
+		t.Fatal("Parse accepted a pre-release version")
+	}
+	msg := malformedStampMessage("1.0.0-rc1", err)
+	for _, want := range []string{"pre-release", "1.0.0-rc1", "leading v"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the panic message must mention %q, got:\n%s", want, msg)
+		}
+	}
 }
 
 // An unstamped build says so — once, loudly — and keeps running. Both halves

@@ -77,9 +77,38 @@ type Version struct {
 // A stamped build returns what it was stamped with, and panics if that was
 // malformed: a build that cannot state its own version has no safe conduct in a
 // policy that fences on version, so failing loudly at startup beats
-// mis-comparing a zero Version silently forever. Malformed here means the
-// VERSION file was malformed, since that is what every build path stamps from —
-// which is why core/version's own tests parse that file (version_test.go).
+// mis-comparing a zero Version silently forever.
+//
+// The two build-time errors therefore have OPPOSITE failure modes, and that is
+// deliberate rather than inherited. Unstamped is the default state of an
+// ordinary `go build`: every developer produces one every day, and the binary is
+// fully functional — it simply has no release to name, which 0.0.0 represents
+// exactly. Malformed is not a state a build falls into; it takes someone passing
+// a -X whose value is not a version, and there is nothing to fall back to,
+// because the only alternative to failing is inventing a release for a fence
+// (ADR-0015) that must never be handed one. "No answer" is representable; "an
+// answer that is not a version" is not.
+//
+// That asymmetry is only defensible while a malformed stamp cannot reach a
+// shipped binary, so three things reject one before it can be linked:
+// deploy/install.sh validates VERSION and refuses to build (version_valid), the
+// tests below parse that file on every push (TestVersionFileIsCanonical), and CI
+// checks the shape of VERSION and of the tag on a tagged build.
+//
+// All three are front-loaded because NOTHING DOWNSTREAM WOULD CATCH IT. No CI
+// job runs a coordinator or a node binary, and the two that do launch the GUI
+// smoke-test it without connecting — clients/fyne reaches this function from
+// connectAsync (appstate/controller.go), not from startup. A client stamped
+// 1.0.0-rc1 therefore builds, installs, launches and sits there looking healthy,
+// and panics the first time its user presses Connect. That is the worst shape
+// this failure could have, and it is the reason the validation is at the front
+// rather than anywhere later. The case worth
+// naming outright is a release candidate, because `v1.0.0-rc1` is an entirely
+// ordinary tag to want and this package cannot carry it: Version models three
+// integers and nothing else, on purpose (see its doc comment), so a pre-release
+// or build-metadata suffix is not a release this project has at any layer. If
+// that is ever wanted, it is a change to the model here and to the policy
+// predicates that order on it — not a tag someone can simply push.
 //
 // An UNSTAMPED build returns the zero version, 0.0.0, and warns once, loudly.
 // It does not refuse: a development build must work and every bare `go build`
@@ -105,9 +134,24 @@ func Current() Version {
 	}
 	v, err := Parse(current)
 	if err != nil {
-		panic("version: malformed build version " + strconv.Quote(current) + ": " + err.Error())
+		panic(malformedStampMessage(current, err))
 	}
 	return v
+}
+
+// malformedStampMessage is the panic text for a build stamped with something
+// that is not a release. Split out so a test can read it, and written for the
+// one person who can ever see it — whoever set the -X — because by the time it
+// prints, the wrong value is already inside a linked binary and nothing about
+// the process it came out of is visible from here.
+func malformedStampMessage(stamp string, err error) string {
+	return "version: this build was stamped with " + strconv.Quote(stamp) +
+		", which is not a release version (" + err.Error() + "). The stamp comes from " +
+		"-ldflags -X …core/version.current, which every build path sets from the " +
+		"repository's VERSION file. Only a bare MAJOR.MINOR.PATCH is a release here: a " +
+		"pre-release or build-metadata suffix (1.0.0-rc1, 1.0.0+build.7) is not one, and " +
+		"neither is a leading v — the tag is v1.0.0, the file and the stamp are 1.0.0. " +
+		"Fix VERSION, or the -X that went around it, and rebuild"
 }
 
 // unstampedWarning is what an unstamped binary says at startup. It is a

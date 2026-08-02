@@ -416,6 +416,13 @@ version_symbol='github.com/bacchus-vpn/bacchus/core/version.current'
 # "-rc1" or an editor's stray second line waved through here is not a build
 # error to be fixed later — it is every binary from this install dying at
 # startup on the machine it was installed on.
+#
+# The pre-release case is the one to expect, because it is the one somebody will
+# reasonably try: "1.0.0-rc1" is an ordinary thing to want to call a release, and
+# this project has no such version at any layer. core/version.Version is three
+# integers and the fence/force policy (ADR-0015) orders on them, so a suffix is
+# not a version that compares — only one that crashes. This refuses it here, by
+# name, rather than letting it become a panic on a machine three weeks later.
 version_valid() {
 	case $1 in
 	*[!0-9.]* | .* | *. | *..* | *.*.*.*) return 1 ;;
@@ -440,9 +447,13 @@ read_release_version() {
 	release_version=$(tr -d ' \t\r\n' <"$version_file")
 	version_valid "$release_version" || refuse "VERSION does not hold a release number." \
 		"$version_file contains: $release_version" \
-		"It must be a bare MAJOR.MINOR.PATCH — 0.2.0, not v0.2.0, not 0.2, and no" \
-		"pre-release suffix. It is stamped into the binary verbatim and parsed" \
-		"there by exactly this rule."
+		"" \
+		"It must be a bare MAJOR.MINOR.PATCH — 0.2.0. Not v0.2.0 (the TAG carries the" \
+		"v, the file does not), not 0.2, and NOT a pre-release or build-metadata" \
+		"suffix: 1.0.0-rc1 and 1.0.0+build.7 are not releases this project has. The" \
+		"version model is three integers and the serving fence orders on them," \
+		"so a suffix cannot be compared — only stamped, and then panicked on at" \
+		"startup by every binary carrying it. This refuses it here instead."
 }
 
 # prepare_build_dir makes the scratch directory in the CALLING shell, which is

@@ -525,6 +525,89 @@ expect_refusal 'does not contain bacchus-node' node --role exit --binaries "$wor
 assert_absent "$stage/usr/local/bin/bacchus-node"
 
 # ---------------------------------------------------------------------------
+# The release stamp (issue #128)
+# ---------------------------------------------------------------------------
+#
+# Every case above passes --binaries, which is the whole point of --binaries and
+# also means none of them has ever entered the BUILD path. So the code that reads
+# VERSION and stamps it into a binary had no coverage here at all.
+#
+# These three enter it, and still need no Go toolchain: `go` is stubbed like
+# systemctl and groupadd, and — because it records its arguments — the assertion
+# can be the thing worth asserting. "It exited 0" would pass just as well with
+# the -ldflags silently dropped, and a build path that quietly stops stamping is
+# exactly the failure #128 was filed about: every binary reporting one release
+# into three mechanisms that do nothing but compare releases.
+#
+# The fixture is a repository root of the test's own making — --deploy-dir points
+# at a copy of this directory, so repo_root is its parent — which is what lets a
+# case put a deliberately broken VERSION in front of the installer without going
+# anywhere near the real one.
+
+# Writes a runnable stand-in at whatever -o names, because the installer goes on
+# to install what it just "built".
+make_stub go 'out=""; prev=""
+for a in "$@"; do
+	if [ "$prev" = "-o" ]; then out=$a; fi
+	prev=$a
+done
+if [ -n "$out" ]; then printf "#!/bin/sh\nexit 0\n" >"$out"; chmod +x "$out"; fi
+exit 0'
+
+fixture_repo() {
+	fixture=$work/fixture.$1
+	rm -rf "$fixture"
+	mkdir -p "$fixture/deploy"
+	cp "$here"/* "$fixture/deploy/"
+	: >"$fixture/go.mod"
+}
+
+case_start 'the build path refuses a checkout with no VERSION file'
+new_stage noversion
+fixture_repo noversion
+expect_refusal 'no VERSION file' node --role coordinator --deploy-dir "$fixture/deploy"
+assert_absent "$stage/usr/local/bin/bacchus-coordinator"
+
+# The four shapes somebody actually types. 1.0.0-rc1 is the one that matters
+# most and the one most likely to be tried: it is an ordinary thing to want to
+# call a release, this project has no such version at any layer (core/version
+# models three integers and the fence orders on them), and a binary stamped with
+# it builds and installs cleanly and then PANICS at startup on the machine it was
+# installed on. Refused here, by name, is the whole point.
+case_start 'the build path refuses a VERSION it cannot stamp'
+for bad_version in v0.2.0 1.0.0-rc1 0.2 1.0.0+build.7; do
+	new_stage "badversion.$bad_version"
+	fixture_repo badversion
+	printf '%s\n' "$bad_version" >"$fixture/VERSION"
+	expect_refusal 'bare MAJOR\.MINOR\.PATCH' node --role coordinator --deploy-dir "$fixture/deploy"
+	assert_absent "$stage/usr/local/bin/bacchus-coordinator"
+	if [ "$bad_version" = '1.0.0-rc1' ]; then
+		assert_grep "$work/out.log" 'pre-release' \
+			'the refusal names the pre-release rule rather than leaving it to a panic'
+	fi
+done
+
+case_start 'every built binary is stamped with the release VERSION names'
+new_stage stamped
+fixture_repo stamped
+# Written the way a checkout that ignored .gitattributes would leave it: leading
+# and trailing spaces and a CR. All of that has to come off before the value
+# reaches the linker, because core/version.Parse rejects " 0.7.3" and
+# core/version.Current PANICS on a stamp it cannot parse — so a CR surviving to
+# here is not a cosmetic problem, it is every binary from this install dying at
+# startup. The assertion below pins the value AND its boundary for that reason.
+printf '  0.7.3 \r\n' >"$fixture/VERSION"
+expect_ok node --role coordinator --deploy-dir "$fixture/deploy"
+assert_grep "$calls" 'go build -ldflags -X github\.com/bacchus-vpn/bacchus/core/version\.current=0\.7\.3( |$)' \
+	'the build stamps the normalised release onto the core/version.current symbol'
+assert_file "$stage/usr/local/bin/bacchus-coordinator" 755
+
+# The stub is scoped to this section. Nothing below builds, and a `go` on PATH
+# that produces a working stand-in without compiling anything must not be able to
+# make a later case pass.
+rm -f "$stubdir/go"
+
+# ---------------------------------------------------------------------------
 # The pipe, and the property that makes it safe
 # ---------------------------------------------------------------------------
 #

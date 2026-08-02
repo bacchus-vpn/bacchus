@@ -23,6 +23,34 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
+      # The shape of VERSION, checked here in shell as well as by
+      # core/version.TestVersionFileIsCanonical below, because this is the one
+      # value in the repository whose malformation is not a build error:
+      # core/version.Current PANICS on a stamp it cannot parse, so a bad VERSION
+      # is not caught at build time, it is every binary of that release dying at
+      # startup on somebody else's machine.
+      #
+      # A PRE-RELEASE SUFFIX IS THE CASE THIS EXISTS FOR. `v1.0.0-rc1` is an
+      # entirely ordinary tag to want, and under the v<VERSION> convention it
+      # would put 1.0.0-rc1 in this file and stamp it into every binary. This
+      # project has no such release at any layer: core/version.Version models
+      # three integers and the whole fence/force policy (ADR-0015) orders on
+      # them, so a suffix is not a version that can be compared, only one that
+      # can crash. Wanting release candidates is a change to that model, not a
+      # tag someone can push.
+      - name: VERSION is a bare MAJOR.MINOR.PATCH
+        run: |
+          v=$(cat VERSION)
+          if ! printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION is '$v', which is not a release this project can carry."
+            echo "::error::It must be a bare MAJOR.MINOR.PATCH: 1.0.0, never v1.0.0, never"
+            echo "::error::1.0, and NEVER a pre-release or build-metadata suffix such as"
+            echo "::error::1.0.0-rc1 or 1.0.0+build.7 — core/version.Current() panics on one,"
+            echo "::error::so a binary stamped with it crashes at startup rather than failing"
+            echo "::error::here. Release candidates are unsupported by the version model."
+            exit 1
+          fi
+          echo "VERSION is $v"
       # The check that the -ldflags -X every build path passes actually LANDS,
       # and the reason it cannot be a plain assertion that the flag was passed:
       # a -X naming a symbol that does not resolve is IGNORED BY THE LINKER,
@@ -41,18 +69,33 @@ jobs:
         run: |
           go test -count=1 \
             -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" \
-            -run 'TestStampMatchesTheVersionFile|TestCurrentIsParseable' \
+            -run 'TestStampMatchesTheVersionFile|TestCurrentIsParseable|TestVersionFileIsCanonical|TestMalformedStamp' \
             ./core/version/
-      # VERSION itself is checked by core/version's own tests (they parse the
-      # file), which the server job runs. What only a tag can check is that the
-      # tag and the file agree — and they have to, because the file is what goes
-      # into the binary while the tag is what everything else names the release
-      # by. A v0.3.0 tag on a tree whose VERSION still says 0.2.0 ships binaries
-      # that report the wrong release to a fence built to believe them.
+      # What only a tag can check is that the tag and the file agree — and they
+      # have to, because the file is what goes into the binary while the tag is
+      # what everything else names the release by. A v0.3.0 tag on a tree whose
+      # VERSION still says 0.2.0 ships binaries that report the wrong release to
+      # a fence built to believe them.
+      #
+      # The tag's own SHAPE is checked before the comparison, and separately from
+      # it, for one reason: on a v1.0.0-rc1 tag of a tree whose VERSION also said
+      # 1.0.0-rc1 the two would agree perfectly, and agreeing on an unusable
+      # value is not the answer anyone needs. The step above would already have
+      # failed on the file — this makes the message the tagger gets name the tag
+      # they typed rather than the file they did not.
       - name: a tagged build's tag matches VERSION
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           tag="${GITHUB_REF#refs/tags/}"
+          if ! printf '%s' "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag $tag is not a release tag this project can build."
+            echo "::error::Tags are v<MAJOR.MINOR.PATCH> and nothing else: v1.0.0. A pre-release"
+            echo "::error::tag (v1.0.0-rc1) or build metadata (v1.0.0+build.7) has no release"
+            echo "::error::version behind it — core/version models three integers, ADR-0015's"
+            echo "::error::fence orders on them, and a binary stamped with a suffix panics at"
+            echo "::error::startup. Release candidates need a model change, not a tag."
+            exit 1
+          fi
           want="v$(cat VERSION)"
           if [ "$tag" != "$want" ]; then
             echo "::error::tag $tag does not match VERSION ($(cat VERSION))."

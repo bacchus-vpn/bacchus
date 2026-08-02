@@ -87,6 +87,31 @@ one-line commit — which is what a release should be.
 `v<VERSION>` — `0.2.0` in the file, `v0.2.0` as the tag. CI asserts on every tag
 push that the two match, so they cannot drift.
 
+**There are no release candidates, and this is the one rule to read before
+tagging.** `VERSION` and the tag are a bare `MAJOR.MINOR.PATCH` and nothing else:
+**`v1.0.0-rc1` is not a tag this project can build**, and neither is
+`v1.0.0+build.7`. The reason is not style. `core/version.Version` models three
+integers, deliberately (ADR-0015's serving fence and the client's force-major
+check both *order* on them, and there is no defined ordering for a suffix), so a
+pre-release string is not a version that can be compared — only one that can be
+stamped. A binary stamped with one **panics at startup**, on the machine it was
+installed on, having built and installed cleanly. Wanting release candidates is a
+change to that model and to the two policy predicates that turn on it, not a tag
+somebody can push.
+
+Three things refuse one before it can reach a binary, and they are independent on
+purpose: `deploy/install.sh` validates `VERSION` and will not build; CI checks the
+shape of both `VERSION` and the tag; and `core/version`'s own tests parse the file
+on every push. If all three are bypassed — a hand-typed `-ldflags` — the panic
+message names the rule and the file.
+
+All of that sits at the front of the pipeline because **nothing downstream would
+catch it**. No CI job runs a coordinator or node binary, and the two that launch
+the GUI smoke-test it without connecting — the client reads its release on
+*connect*, not at startup. A client stamped `1.0.0-rc1` would build, install,
+launch, sit there looking healthy, and crash the first time its user pressed
+Connect.
+
 **A binary nobody stamped still runs, and says so.** A bare `go build` — no
 `-ldflags` — produces a development build, which is correct and supported. It
 reports the release `0.0.0` (*no release*, not "zero point zero"), and it prints
