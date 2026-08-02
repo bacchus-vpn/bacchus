@@ -9,7 +9,7 @@ import (
 )
 
 // autostartValueName is the value this client owns under the Run key. Fixed
-// and distinct from clients/windows's own product name only in that this is
+// and distinct from the Windows tray client's own product name only in that this is
 // a separate binary; a machine could in principle run both clients, and each
 // must be able to register/unregister itself without touching the other's
 // entry — the walk client has no autostart entry of its own today, but there

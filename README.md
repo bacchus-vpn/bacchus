@@ -54,8 +54,8 @@ Full setup — what an exit needs, and how to bound what either costs you — is
 | `bind/` | gomobile facade (Kotlin/Swift) over `core` |
 | `cmd/node/` | the volunteer node binary — a thin flag wrapper over `core` (client/relay/exit) |
 | `cmd/coordinator/` | rendezvous / directory + STUN/TURN (pion) + cold-start bootstrap, blended onto one port |
-| `clients/fyne/` | the cross-platform desktop client |
-| `clients/windows/` | Windows tray client |
+| `clients/fyne/` | the desktop client — Windows, Linux, and macOS as a proxy |
+| `clients/internal/enforcement/` | device-wide enforcement: TUN, routes, kill-switch, split tunnel, DNS |
 | `deploy/` | systemd units + config templates |
 | `docs/` | runbook + architecture decisions (`docs/adr/`) |
 
@@ -69,8 +69,9 @@ talks to the network over the wire and shares no code with this one.
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bacchus-coordinator ./cmd/coordinator
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bacchus-node        ./cmd/node
 
-# Windows client
-go build -ldflags "-H=windowsgui" -o bacchus.exe ./clients/windows
+# Windows client (needs a mingw-w64 gcc, and wintun.dll at runtime — see clients/fyne/README.md)
+CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
+  go build -ldflags "-H=windowsgui" -o bacchus-fyne.exe ./clients/fyne
 ```
 
 See [docs/RUNNING.md](docs/RUNNING.md) to run the stack and

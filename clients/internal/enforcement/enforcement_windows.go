@@ -4,20 +4,20 @@ package enforcement
 
 import "sync"
 
-// New returns the Windows Enforcer. Unlike Linux and macOS, this one is real:
-// clients/windows has shipped this enforcement since ADR-0036, and bacchus#59
-// folded it in here rather than rewriting it. routes_windows.go and
+// New returns the Windows Enforcer. This is the enforcement the Windows tray
+// client shipped from ADR-0036 until bacchus#138 retired it, and bacchus#59
+// folded in here rather than rewriting. routes_windows.go and
 // killswitch_windows.go are that code, near-verbatim, with their free
 // functions turned into winOS methods so tunnel.go can reach them through
 // osNet instead of by name; the hardening comments came across with them,
 // because the reason a fix exists is the part a port drops first.
 //
-// Nothing here duplicates clients/windows. That client now calls this package
-// too (clients/windows/main.go) — one implementation with two callers, not
-// two implementations. clients/windows keeps shipping and stays maintained
-// until the owner takes the retirement decision ADR-0039's 2026-07-30
-// amendment now makes available; "Fyne everywhere" does not mean "stop
-// working on the walk client".
+// It had two callers between bacchus#59 and bacchus#138 — one implementation,
+// never two — and has one now. The retirement waited on evidence rather than
+// on taste: enforcement folded behind this interface (bacchus#59), the two
+// OS-level guarantees no Go test can assert confirmed on hardware
+// (bacchus#88), and clients/fyne built for Windows by CI and driven through
+// the full lifecycle on a real machine (bacchus#115). See ADR-0039.
 func New() (Enforcer, error) {
 	e := &windowsEnforcer{}
 	// One winOS for the enforcer's whole life, built here rather than per

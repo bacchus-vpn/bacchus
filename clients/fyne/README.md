@@ -6,17 +6,21 @@ platform, **no bundled webview** (Fyne renders its own widgets — the smallest 
 surface a security tool can have).
 
 > **What this client protects depends on the platform you run it on.**
-> On **Windows** it routes the whole device — TUN adapter, route table,
-> fail-closed kill-switch, split tunnelling — through the same enforcement code
-> `clients/windows` ships (`clients/internal/enforcement`, bacchus#59).
-> On **Linux and macOS** it does none of that yet and is a SOCKS5 proxy only;
-> those are `[E10]` (bacchus#37) and `[E9]` (bacchus#36).
+> On **Windows** (bacchus#59) and **Linux** (bacchus#37) it routes the whole device —
+> TUN adapter, route table, fail-closed kill-switch, split tunnelling, DNS capture —
+> through one shared implementation in `clients/internal/enforcement`.
+> On **macOS** it does none of that and is a SOCKS5 proxy only; that is `[E9]`
+> (bacchus#36), deferred past 1.0.
 >
 > The app tells you which one you are getting rather than making you read this:
 > the headline says **Protected** where the device is really routed and **Proxy
 > ready** where it is not. Still missing everywhere: a country picker (bacchus#16).
-> `clients/windows` remains maintained and shipping until the owner takes the
-> retirement decision ADR-0039's 2026-07-30 amendment describes.
+>
+> **This is the only desktop client.** `clients/windows` was retired in bacchus#138
+> once its three gates closed — enforcement folded behind one interface (bacchus#59),
+> the OS-level guarantees confirmed on hardware (bacchus#88), and this client built
+> for Windows by CI and driven through the full enforcement lifecycle on real
+> hardware (bacchus#115). See ADR-0039.
 
 ## What it does
 A single window: a full-width color band showing one of four states —
@@ -53,7 +57,7 @@ contract between the two.
 | Connecting… | Resolving a country and negotiating a session. | Set the moment Connect is pressed |
 | Protected | **Windows and Linux.** A session is up and this device's traffic is routed through it: TUN device, routes, kill-switch. On Linux this additionally requires `bacchus-netd` to be installed and reachable. | `core.Engine.Connect` succeeded *and* `enforcement.Enforcer.Start` succeeded |
 | Proxy ready | **macOS.** A session is up and the SOCKS5 proxy is listening on `127.0.0.1:1080`. **Not** device-wide protection — see below. | `core.Engine.Connect` returned successfully, with no enforcement backend on this platform |
-| Blocked | The session was up and the live path just died. | A transport-level ICE disconnect/failed/closed while the session was up — the same signal `clients/windows`'s tray status line already uses for this state (see ADR-0039) |
+| Blocked | The session was up and the live path just died. | A transport-level ICE disconnect/failed/closed while the session was up — the same signal the retired Windows tray client used for this state (see ADR-0039) |
 
 `Blocked` is named after the kill-switch's fail-closed posture (ADR-0014). On
 Windows an armed kill-switch really is holding the machine closed at that point
@@ -68,8 +72,8 @@ There are two different promises here and the app shows you which one applies.
 **Windows — "Protected".** The whole device is routed: a wintun adapter, a
 split-default route, the coordinator/STUN/TURN endpoints excluded so the tunnel's
 own signalling survives, split tunnelling honoured, and a fail-closed kill-switch
-armed by default. This is the same code `clients/windows` has shipped for as long
-as it has existed, not a reimplementation.
+armed by default. This is the enforcement code the retired Windows tray client
+shipped, moved behind one interface by bacchus#59 rather than reimplemented.
 
 If that enforcement cannot be brought up — most commonly **because the app is not
 running as Administrator** — the connect **fails** and tells you why. It does not
@@ -107,8 +111,8 @@ pressed Connect.
 
 Point your browser (or whatever you want protected) at SOCKS5 `127.0.0.1:1080`. The
 port is fixed rather than OS-assigned precisely so it can be pointed at; it listens on
-loopback only, so nothing off the machine can reach it. `clients/windows` uses the
-same number.
+loopback only, so nothing off the machine can reach it. The number is a package
+constant (`appstate.SocksAddr`).
 
 ### i18n (Russian-first)
 UI strings go through Fyne's `lang` package (`lang.L("English string")`); the English
@@ -128,7 +132,7 @@ belongs in a skeleton. The headline state — the part a user has to understand 
 fully translated, and it never depends on the detail line.
 
 ## Config
-Same idea as `clients/windows`: nothing is compiled in. Copy
+Nothing is compiled into the binary. Copy
 `bacchus-fyne.config.example.json` to `bacchus-fyne.config.json` (next to the built
 binary) or to this OS's per-user config directory (`%AppData%\Bacchus\fyne-client.json`
 on Windows, `~/.config/Bacchus/fyne-client.json` on Linux), and fill in your
@@ -149,8 +153,8 @@ user cannot write, so the first Save used to fail on permissions. An existing
 exe-adjacent config still keeps the save, because that is the file the client would go
 on reading.
 
-`admissionPubKey` / `admissionCrlPath` are optional and mirror `clients/windows`'s
-fields of the same name (and `core.Config`'s). Both empty means the client verifies no
+`admissionPubKey` / `admissionCrlPath` are optional and mirror `core.Config`'s
+fields of the same name. Both empty means the client verifies no
 exit credential and checks no revocation — fail-open, matching a coordinator with
 admission disabled. Set `admissionPubKey` to your admission authority's ed25519 public
 key (64 hex chars) to turn on ADR-0026/#60's end-to-end check that the exit you were
@@ -185,8 +189,8 @@ config file yet, to this OS's per-user config directory — see Config above):
 
 The lower five arrived with #93 and carry no platform caveat: they are `core` config,
 enforced by `core`, and so mean the same thing on every platform this client runs on.
-Before #93 they were unreachable here — the client replacing `clients/windows` could
-not configure them while the client being replaced could. See ADR-0039's
+Before #93 they were unreachable here — the replacement client could not configure
+them while the client it replaced could. See ADR-0039's
 configuration-parity bar, which that issue added precisely because the original
 eight-point bar was entirely about enforcement and so could be met in full with this
 gap wide open.
@@ -303,10 +307,9 @@ a dialog it never opened — the same double-check `transportPool` gets.
 
 ## Build
 
-This is the first client in the repo that needs a **C toolchain** — Fyne's desktop
-driver renders through OpenGL via cgo bindings (`go-gl/gl`, `go-gl/glfw`).
-`clients/windows` (`lxn/walk`, `getlantern/systray`) is pure Go/syscall and is
-unaffected; this requirement is new to `clients/fyne` only.
+This client needs a **C toolchain** — Fyne's desktop driver renders through OpenGL
+via cgo bindings (`go-gl/gl`, `go-gl/glfw`). It is the only package in the repo that
+does; everything under `cmd/` builds with `CGO_ENABLED=0`.
 
 - **Linux**: `gcc` + X11/Wayland + OpenGL dev headers. On Debian/Ubuntu:
   ```
@@ -321,23 +324,52 @@ GOOS=windows CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
   go build -ldflags "-H=windowsgui" -o bacchus-fyne.exe ./clients/fyne   # cross-compile from Linux
 ```
 
+### wintun runtime dependency, Windows only (fetch separately — not vendored)
+
+**A Windows build that compiles will still not connect without this.** The client
+loads **`wintun.dll`** at runtime (via `golang.zx2c4.com/wintun`) to create the TUN
+adapter, and it must sit next to `bacchus-fyne.exe` or on the DLL search path.
+Without it, bring-up fails with `create wintun adapter` — the same message an
+unelevated run produces, so the two are easy to confuse (bacchus#135).
+
+It is deliberately **not** committed to this repo: `wintun.dll` is proprietary
+(© WireGuard LLC, "licensed, not sold" — see its own `LICENSE.txt`), so it does not
+belong in an AGPL source tree, and wintun's own guidance is to distribute the binary
+"as downloaded from wintun.net", not a rebuilt or in-repo copy.
+
+Fetch it once from **https://www.wintun.net/builds/** (use the release matching
+`golang.zx2c4.com/wintun` in `go.mod` — 0.14.1 at time of writing), unzip, and copy
+`wintun/bin/<arch>/wintun.dll` next to the exe for your target arch (`amd64` for a
+normal 64-bit build). The staging dir `clients/fyne/wintun/` is git-ignored for
+exactly this — drop the download there and it cannot be committed by accident. In
+any release bundle, ship `wintun.dll` **and its `LICENSE.txt`** alongside the exe.
+
+CI does not do this: `windows-fyne-client` builds and smoke-launches the binary but
+never brings a tunnel up, so the artifact it uploads is an exe with no DLL beside it.
+That is what bacchus#136 is about — there is no Windows install path that places
+either one.
+
 Both the native Linux build and the mingw-cross-compiled Windows build were run (not
-just compiled) as part of proving this seam — see ADR-0039. The Linux build (issue
-#153) is now also proven on every push: CI's `linux-client` job installs the same
-package list above, builds, `go vet`/`go test`, then launches the binary under
-`xvfb-run` and confirms it is still alive five seconds later — see
-`.github/workflows/ci.yml`. Windows CI (`windows-client`) builds `clients/windows`
-and additionally vets and runs the tests for `clients/internal/...` — the shared
-enforcement layer, whose Windows half compiles on no other runner. It does not
-launch a GUI binary, matching `clients/windows`'s own job.
+just compiled) as part of proving this seam — see ADR-0039. Both are now proven on
+every push. CI's `linux-client` job installs the same package list above, builds,
+`go vet`/`go test`, then launches the binary under `xvfb-run` and confirms it is
+still alive five seconds later. `windows-fyne-client` does the equivalent on a
+Windows runner: locate a mingw-w64 gcc, refuse to run at `CGO_ENABLED=0`, vet, build
+with `-H=windowsgui`, check the output is a real PE image of plausible size, test,
+smoke-launch against the real Windows session, and upload the exe as an artifact
+(bacchus#115). A third job, `windows-enforcement`, vets and tests
+`clients/internal/...` on Windows without any toolchain — the shared enforcement
+layer, whose Windows half compiles on no other runner. It is kept separate because it
+runs in about a minute against `windows-fyne-client`'s eight, nearly all of which is
+cgo compiling `go-gl/glfw`. See `.github/workflows/ci.yml`.
 
 ## Known limits
 - No country picker (#150; `bacchus-vpn/bacchus#16` `[E3]` in the current tracker).
 - **Carries no device traffic on macOS.** No TUN, no route flip, no system proxy —
-  only apps you point at SOCKS5 `127.0.0.1:1080` go through the tunnel. This is now
-  the last platform gap against `clients/windows`, and it is the one to read before
-  trusting the banner there. Windows routes the device (bacchus#59) and so does
-  Linux (bacchus#37); macOS is `[E9]` (bacchus#36).
+  only apps you point at SOCKS5 `127.0.0.1:1080` go through the tunnel, and it is the
+  one thing to read before trusting the banner there. Windows routes the device
+  (bacchus#59) and so does Linux (bacchus#37); macOS is `[E9]` (bacchus#36), deferred
+  past 1.0.
 - **Linux routing needs `bacchus-netd` installed**, and the connect fails without
   it rather than degrading to a proxy. See the Linux paragraph under "What the
   headline means".
@@ -378,4 +410,31 @@ launch a GUI binary, matching `clients/windows`'s own job.
   with, which is the pre-#60 behaviour and matches a coordinator with admission
   disabled. If you run an admission authority, set it: it is the client's only
   end-to-end check against a coordinator handing out an exit it controls.
-- Requires a C toolchain to build (new; see Build above).
+- **Split tunnelling is destination-based only** — by IP/CIDR/domain (`bypass`), never
+  by process or application. Per-app split tunnelling is a separate and harder problem
+  (Windows has no `addAllowedApplication`-style API) and ADR-0025 ruled it out of scope
+  for 1.0 in its Consequences.
+- **A bypass domain the OS resolved from its own cache before you connected** is not
+  recognised until something re-queries it, because the interceptor never observes that
+  lookup. It fails in the safe direction — that traffic tunnels instead of going direct
+  — just not the intended one.
+- **`bypassMode: "include"` does not live-track a domain's mid-session IP rotation** the
+  way `"exclude"` does: only already-included traffic reaches the interceptor at all, so
+  a CDN rebalancing after connect is not observed. Fails toward that connection going
+  direct rather than toward a leak. Separately, the kill-switch has no notion of
+  include-mode's direct traffic being something that was never meant to be protected, so
+  arming it blocks that traffic rather than leaving it alone.
+- **IPv6 is blocked while the tunnel is up, not tunnelled** — the physical adapter's
+  IPv6 binding is disabled for the session's lifetime.
+- **A hard crash leaves the tunnel adapter, its routes and the IPv6 binding behind.**
+  They are cleaned up on the next launch, alongside kill-switch recovery — verified on
+  hardware in bacchus#115. To clear them by hand on Windows without relaunching:
+  ```
+  Enable-NetAdapterBinding -Name * -ComponentID ms_tcpip6
+  Set-NetFirewallProfile -All -DefaultOutboundAction Allow
+  Remove-NetFirewallRule -Group BacchusKillSwitch
+  ```
+- **On Windows there is no installer**, so a downloaded binary needs `wintun.dll` placed
+  beside it and a config file written by hand before it can connect (bacchus#136, with
+  bacchus#134 and bacchus#135 as the symptoms). `deploy/install.sh` covers Linux only.
+- Requires a C toolchain to build (see Build above).

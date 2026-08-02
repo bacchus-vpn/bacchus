@@ -86,7 +86,7 @@ prefixes) rather than mmap'd, which for a load-once coordinator is the right tra
 
 The files are **not committed** — a licensed third-party dataset, and bulk data besides.
 `.gitignore` excludes them and `docs/RUNNING.md` documents fetching and staging, the same
-pattern `clients/windows/README.md` uses for `wintun.dll` (#165).
+pattern `clients/fyne/README.md` uses for `wintun.dll` (#165).
 
 Columns are addressed **by header name**. MaxMind has reordered columns before, and a
 positional parser would keep loading and silently read the wrong field as the country —

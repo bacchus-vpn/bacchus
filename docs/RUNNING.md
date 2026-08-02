@@ -53,16 +53,16 @@ $env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED="0"
 go build -o bacchus-coordinator ./cmd/coordinator
 go build -o bacchus-node        ./cmd/node
 $env:GOOS=""; $env:GOARCH=""; $env:CGO_ENABLED=""
-# Windows client
-go build -ldflags "-H=windowsgui" -o bacchus.exe ./clients/windows
 go build -o node.exe ./cmd/node
 ```
 
-The Linux **client** is deliberately absent from that list: it is not
-cross-buildable from here. `clients/fyne` links a C toolchain and an
-OpenGL/X11/Wayland stack (ADR-0039) and `cmd/bacchus-netd` is Linux-only, so
-both are built on the Linux machine they will run on — which is what
-`deploy/install.sh` does for you.
+The **desktop client** is deliberately absent from that list, on either target:
+`clients/fyne` links a C toolchain and, per platform, an OpenGL/X11/Wayland or
+mingw-w64 stack (ADR-0039), so it is built on the machine it will run on — which
+is what `deploy/install.sh` does for you on Linux. `cmd/bacchus-netd` is
+Linux-only for the same reason. A Windows build additionally needs `wintun.dll`
+placed next to the exe at runtime, and there is no installer that does it
+(bacchus#136) — see `clients/fyne/README.md`.
 
 ## Deploy the VPS services
 `deploy/install.sh node --role coordinator` or `--role exit` does all of this in

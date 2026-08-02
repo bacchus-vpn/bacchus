@@ -19,9 +19,9 @@ jobs:
       # jobs on purpose: it is the OS enforcement layer (ADR-0039's seam), it
       # needs no GUI toolchain and no cgo, and until bacchus#59 moved
       # ~1,300 lines into it, it was covered by NO job at all — this one
-      # excluded ./clients/..., the linux-client job runs only
-      # ./clients/fyne/..., and windows-client only built ./clients/windows.
-      # Its Windows-tagged half is covered by the windows-client job below.
+      # excluded ./clients/... and the linux-client job runs only
+      # ./clients/fyne/....
+      # Its Windows-tagged half is covered by the windows-enforcement job below.
       - name: vet
         run: go vet ./core/... ./bind/... ./cmd/... ./clients/internal/...
       - name: build
@@ -79,15 +79,24 @@ jobs:
           BACCHUS_NETD_REQUIRE_NS: "1"
         run: go test ./core/... ./bind/... ./cmd/... ./clients/internal/...
 
-  windows-client:
+  windows-enforcement:
+    # The shared enforcement layer, vetted and tested on Windows with no C
+    # toolchain. This job was `windows-client` and additionally built
+    # clients/windows; that package was retired in bacchus#138 and the build
+    # step went with it. The vet and test did NOT: they are the only Windows
+    # coverage the enforcement layer has, and they must outlive any one caller.
+    #
+    # Kept separate from windows-fyne-client rather than folded into it, for
+    # the reason that job's own comment gives: this runs in about a minute and
+    # that one in eight, nearly all of which is cgo compiling go-gl/glfw. A
+    # mingw or GL failure should not red out the enforcement layer's only
+    # Windows signal, and this signal should not hide behind it.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - name: build
-        run: go build ./clients/windows
       # The enforcement layer's Windows half (routes_windows.go,
       # killswitch_windows.go, enforcement_windows.go) exists only under this
       # GOOS, so this is the only runner that can compile — let alone run —
@@ -112,12 +121,13 @@ jobs:
       # of it that changed; the sentence above still holds, because what
       # covers those two guarantees is a hardware run and not this job.
       #
-      # The run used clients/windows, which is the binary built above. The
-      # other caller of the same enforcement package is clients/fyne, and it
-      # is built by windows-fyne-client below — built, not run, so the same
-      # limit applies there and more of it (issue #115).
+      # Issue #88's run used clients/windows. Issue #115's used clients/fyne —
+      # the CI artifact from windows-fyne-client below, driven on real
+      # hardware through bring-up, egress, an outright kill and recovery, 7/7.
+      # So both guarantees are now confirmed through the client that ships,
+      # which is what let bacchus#138 retire the other one.
       - name: vet
-        run: go vet ./clients/windows ./clients/internal/...
+        run: go vet ./clients/internal/...
       - name: test
         run: go test ./clients/internal/...
 
@@ -125,24 +135,24 @@ jobs:
     # clients/fyne, built for Windows (issue #115) — the platform it is meant
     # to replace a client ON, and the one nothing had ever built it for.
     #
-    # Neither existing job covers this. windows-client builds clients/windows,
-    # which is pure Go/syscall and shares no build requirement with this
-    # package; linux-client builds clients/fyne against a completely different
-    # C toolchain. And a C toolchain is the whole point: clients/fyne is the
+    # Neither existing job covers this. windows-enforcement needs no toolchain
+    # at all and builds no client; linux-client builds clients/fyne against a
+    # completely different C toolchain. And a C toolchain is the whole point:
+    # clients/fyne is the
     # only package in this repo that needs one, because Fyne's desktop driver
     # renders through OpenGL via cgo (go-gl/gl, go-gl/glfw — ADR-0039's "new
     # build prerequisite"). So the one client that could plausibly fail to
     # build on Windows was the one nothing built on Windows.
     #
-    # A separate job rather than a step on windows-client, for the reason
-    # linux-client is separate from server: windows-client is the fast,
+    # A separate job rather than a step on windows-enforcement, for the reason
+    # linux-client is separate from server: windows-enforcement is the fast,
     # toolchain-free signal for the shared enforcement layer, and a mingw or
     # GL failure should neither red that out nor hide behind it. The two run
     # in parallel, so this costs no wall-clock, and the repo is public, so the
     # extra Windows runner costs no billed minutes.
     #
     # The measured numbers, from the first run of this job: 8m12s here against
-    # 1m17s for windows-client. Folding this in as a step would have taken the
+    # 1m17s for windows-enforcement. Folding this in as a step would have taken the
     # enforcement layer's only Windows signal from 1m17s to roughly nine
     # minutes on every push. Nearly all of that is cgo compiling go-gl/glfw,
     # so it is inherent to the target rather than something to tune away.

@@ -30,10 +30,10 @@ bacchus-fyne
 
 # --- third-party runtime binaries (fetched, NOT vendored) ---
 # wintun.dll is proprietary ((c) WireGuard LLC, "licensed, not sold" — see its
-# own LICENSE.txt) and must never land in this AGPL repo. It is a Windows-client
-# runtime dependency fetched from wintun.net and staged here at build/package
-# time. See clients/windows/README.md ("wintun runtime dependency").
-/clients/windows/wintun/
+# own LICENSE.txt) and must never land in this AGPL repo. It is a Windows runtime
+# dependency of clients/fyne, fetched from wintun.net and staged here at
+# build/package time. See clients/fyne/README.md ("wintun runtime dependency").
+/clients/fyne/wintun/
 
 # --- third-party datasets (fetched, NOT vendored) ---
 # The country database the coordinator derives node countries from (issue #136,

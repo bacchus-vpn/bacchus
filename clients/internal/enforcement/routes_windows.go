@@ -48,9 +48,8 @@ const createNoWindow = 0x08000000
 // two things every one of them needs.
 //
 // logf is the client's log sink, injected via Policy.Logf rather than called
-// by name — this package is shared by clients/windows (which logs to
-// bacchus.log via eventlog.go) and clients/fyne (which has its own), and
-// neither is importable from here.
+// by name — the client owns its sink and is not importable from here. This
+// package had two callers with two sinks until bacchus#138 retired one.
 //
 // run is the PowerShell escape hatch, and it is the reason the ordering
 // guarantees in this file are testable at all. In production it is nil and
@@ -108,7 +107,7 @@ func (o *winOS) runPS(script string) (string, error) {
 		// forensic footprint for a client whose whole point is running in a
 		// hostile jurisdiction. The returned error below is deliberately left
 		// full and unredacted: it only ever reaches the live, ephemeral tray
-		// status (setStatus in clients/windows/main.go), never the log file,
+		// status (setStatus in the retired Windows client's main.go), never the log file,
 		// so it keeps full diagnostic value for the running session.
 		first := redactIPs(firstLine(strings.TrimSpace(script)))
 		outFirst := redactIPs(firstLine(strings.TrimSpace(string(out))))

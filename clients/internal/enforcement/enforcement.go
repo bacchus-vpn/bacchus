@@ -1,14 +1,12 @@
 // Package enforcement names the device-wide enforcement seam: bringing up a
 // TUN device, routing the OS default route through it (or specific
 // destinations, for split-tunnel "include" mode), and optionally arming a
-// fail-closed kill-switch — everything clients/windows's tunnel.go,
-// routes.go, killswitch.go, splittunnel.go, poolroutes.go and tun2socks.go
-// (~1970 lines total) do for Windows today, as one contract instead of three
-// unrelated implementations.
+// fail-closed kill-switch — the ~1,970 lines the retired Windows client
+// carried for this, as one contract instead of a per-client implementation.
 //
 // This package is deliberately internal to clients/ (Go's internal-import
-// rule: importable from clients/fyne or clients/windows, not from core/ or
-// cmd/), and deliberately has no import of Fyne, walk, or appstate — the same
+// rule: importable from clients/fyne, not from core/ or cmd/), and
+// deliberately has no import of Fyne or appstate — the same
 // "no toolkit dependency" discipline clients/fyne/internal/appstate already
 // holds for connection state, one level further out: this seam is UI-neutral
 // as well as OS-neutral, so whichever client eventually calls it does so
@@ -16,8 +14,9 @@
 //
 // Windows is implemented (enforcement_windows.go, routes_windows.go,
 // killswitch_windows.go): bacchus#35 chose "Fyne everywhere", and bacchus#59
-// folded clients/windows's working, hardened enforcement in behind this
-// interface. It clears all eight of ADR-0039's parity items — see that ADR's
+// folded the Windows client's working, hardened enforcement in behind this
+// interface — that client was then retired in bacchus#138, leaving this the
+// only copy. It clears all eight of ADR-0039's parity items — see that ADR's
 // 2026-07-30 amendment, which records them one by one. Linux and macOS are
 // still honest NotImplementedErrors (enforcement_linux.go,
 // enforcement_darwin.go); writing them is [E10] (bacchus-vpn/bacchus#37) and
@@ -39,7 +38,7 @@ type Enforcer interface {
 	// Start brings up device-wide enforcement for one session and returns a
 	// Session to manage it — TUN device, OS routing per policy, and (if
 	// policy.KillSwitch) a fail-closed kill-switch — mirroring
-	// clients/windows/tunnel.go's startTunnel. socksAddr is the caller's
+	// clients/internal/enforcement/tunnel.go's startTunnel. socksAddr is the caller's
 	// already-running local SOCKS5 server (core.Engine.Connect) to bridge
 	// into the tunnel; Start does not start or own that server.
 	//
@@ -106,7 +105,7 @@ type Enforcer interface {
 
 // Session is one running enforcement session: one TUN device, one set of OS
 // routes, and — if the Policy that started it set KillSwitch — one armed
-// kill-switch. Mirrors clients/windows/tunnel.go's *tunnel type plus
+// kill-switch. Mirrors clients/internal/enforcement/tunnel.go's *tunnel type plus
 // poolroutes.go's *poolExcluder, which today are two separate types wired
 // together by hand in tunnel.go; here they are one seam because every caller
 // needs both for the life of a session.
@@ -115,7 +114,7 @@ type Session interface {
 	// client is about to dial (core.Config.OnUnderlayDial) — from the
 	// tunnel's route before the dial completes, so the dial rides the
 	// physical interface instead of looping into the tunnel it is carrying.
-	// See clients/windows/poolroutes.go's poolExcluder and issue #109: the
+	// See clients/internal/enforcement/poolroutes.go's poolExcluder and issue #109: the
 	// Reality transport's exit address is only known at dial time, not in
 	// advance like the WebRTC/TURN control-plane endpoints Policy already
 	// carries, so it cannot be excluded up front in Start and needs this
@@ -128,20 +127,20 @@ type Session interface {
 
 	// Close tears the session down: kill-switch lifted first if armed, then
 	// routes removed and IPv6 restored, then the TUN device itself — the
-	// same order clients/windows/tunnel.go's Close uses, and for the same
+	// same order clients/internal/enforcement/tunnel.go's Close uses, and for the same
 	// reason: egress must be restored before whatever was blocking it goes
 	// away, not after (ADR-0014).
 	Close()
 }
 
 // Policy is the platform-independent configuration one Start call carries.
-// Every field mirrors an existing clients/windows concept; see routes.go,
-// killswitch.go and splittunnel.go for the semantics each is expected to
-// have when a real Enforcer implements this.
+// Every field began as a Windows-client concept; see routes_windows.go,
+// killswitch_windows.go and splittunnel.go for the semantics each is expected
+// to have when a real Enforcer implements this.
 type Policy struct {
 	// Coordinators, STUNURL and TURNURL are not dialled here — they are
 	// excluded. An Enforcer must keep every pool member plus STUN/TURN
-	// reachable outside the tunnel's own route (clients/windows/tunnel.go's
+	// reachable outside the tunnel's own route (clients/internal/enforcement/tunnel.go's
 	// startTunnel, issue #6), the same set core.Config uses to actually
 	// dial, for an unrelated reason: whichever of them the session ends up
 	// using, the tunnel's own signalling must never be captured by the
@@ -150,21 +149,21 @@ type Policy struct {
 	STUNURL, TURNURL string
 
 	// DNSUpstream is the plain-DNS server queried over DNS-over-TCP through
-	// the tunnel for every intercepted DNS query (clients/windows/
-	// tun2socks.go's handleDNSUDP). Deliberately never resolved in the
-	// clear: see killswitch.go's file doc on why there is no plaintext-DNS
+	// the tunnel for every intercepted DNS query (tun2socks.go's
+	// handleDNSUDP). Deliberately never resolved in the
+	// clear: see killswitch_windows.go's file doc on why there is no plaintext-DNS
 	// kill-switch allowance either.
 	DNSUpstream string
 
 	// Bypass and BypassMode are destination-based split tunnelling
-	// (clients/windows/splittunnel.go). BypassMode is "exclude" (listed
+	// (clients/internal/enforcement/splittunnel.go). BypassMode is "exclude" (listed
 	// destinations go direct, default) or "include" (listed destinations
 	// are the only thing tunnelled) — see BypassModeExclude/BypassModeInclude.
 	// Entries are IPs, CIDRs, or domain names, exactly as splittunnel.go's
 	// newBypassPolicy classifies them; this package does not itself define a
 	// shared bypass-mode type with clients/fyne/internal/appstate.Config
 	// (which has its own BypassModeExclude/BypassModeInclude for the same
-	// string values) or with clients/windows/splittunnel.go's own unexported
+	// string values) or with clients/internal/enforcement/splittunnel.go's own unexported
 	// modeExclude/modeInclude — three independent definitions of the same two
 	// strings today, and unifying them is a naming cleanup this decision does
 	// not need to make.
@@ -195,9 +194,9 @@ type Policy struct {
 
 	// Logf, if set, receives this package's own bring-up/teardown progress
 	// and any OS-command failure. Injected rather than called by name because
-	// the two clients log to different places — clients/windows to
-	// bacchus.log (eventlog.go), clients/fyne to its own sink — and neither
-	// is importable from here. Nil is fine and means "discard".
+	// the caller owns its own log sink and is not importable from here — it
+	// was two callers with two sinks until bacchus#138 retired one of them,
+	// and the injection outlives the reason. Nil is fine and means "discard".
 	//
 	// Whatever this points at, an implementation must redact addresses out of
 	// what it passes (redact.go): a client's log is a disk file a user may

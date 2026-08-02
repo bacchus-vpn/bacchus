@@ -307,7 +307,7 @@ type Config struct {
 	// OnUnderlayDial, when set, is called synchronously on the client dial path
 	// the moment a transport has learned the physical host:port it is about to
 	// open an underlay connection to — BEFORE that connection is dialed. It
-	// exists for a full-device tunnel (clients/windows) whose leak-protection
+	// exists for a full-device tunnel (clients/internal/enforcement) whose leak-protection
 	// must exclude the underlay's address from the tunnel's own default route
 	// (and, under the kill-switch, allow-list it) before the connection is made,
 	// so the pool's own underlay never loops into or is blocked by the tunnel it
@@ -1207,7 +1207,7 @@ func newEngine(cfg Config, roles map[string]bool, exitKey noise.DHKey) (*Engine,
 		idleTTL:      5 * time.Minute,
 		reapInterval: 30 * time.Second,
 		// UDP relay association idle timeout (issue #41): 45s matches the
-		// windows client's own flow-table timeout (clients/windows/tun2socks.go),
+		// client's own flow-table timeout (clients/internal/enforcement/tun2socks.go),
 		// so in the common case the client's own teardown reaches here well
 		// before this backstop would ever fire.
 		udpIdleTimeout: 45 * time.Second,

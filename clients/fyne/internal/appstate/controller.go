@@ -116,7 +116,7 @@ func newProxyOnlyController(cfg Config) *Controller {
 
 // newEnforcedController is NewController with the Enforcer supplied, so the
 // enforced connect path — the one bacchus#37 gave Linux, and the one
-// clients/windows has had since bacchus#59 — can be driven at this seam with
+// the Windows tray client had from bacchus#59 — can be driven at this seam with
 // no live bacchus-netd. It mirrors NewController exactly, Recover() included,
 // so what a test drives is the object production builds rather than a
 // near-miss of it. The production path is NewController; nothing else calls
@@ -160,7 +160,7 @@ func newEnforcedController(cfg Config, enf enforcement.Enforcer) *Controller {
 //
 // So: false means the UI must keep saying "Proxy ready" and naming what is
 // and is not covered (ADR-0039's Scope). True means it has earned the word
-// "Protected" — the same word clients/windows has always been entitled to,
+// "Protected" — the same word the Windows tray client was always entitled to,
 // through the same code.
 func (c *Controller) DeviceEnforced() bool { return c.enf != nil }
 
@@ -211,7 +211,7 @@ func (c *Controller) logf(format string, args ...any) {
 // could ever point an application at it. The engine would come up, the UI would
 // say Protected, and every byte the user sent would leave in the clear.
 //
-// 1080 mirrors clients/windows (main.go's socksAddr) deliberately: it is the
+// 1080 mirrors the Windows tray client (its socksAddr) deliberately: it is the
 // conventional SOCKS port, it is what the Windows client's tun2socks already
 // expects, and keeping both clients on one number means one sentence of
 // documentation covers both. Loopback-only, so nothing off the machine can use it.
@@ -357,13 +357,13 @@ func (c *Controller) connectAsync(gen uint64) {
 		// enforcement/poolroutes.go's file doc). reality is handled late, on
 		// the dial path, by OnUnderlayDial below; webrtc has no such hook
 		// because it is not supposed to need one — it is supposed to be pinned
-		// here. clients/windows has set this since issue #75 for exactly that
+		// here. The Windows tray client set this from issue #75 for exactly that
 		// reason. This client did not, which left its webrtc underlay
 		// unexcluded on the one platform where it enforces; #93 surfaced it
 		// while wiring TransportPool, since a pool whose first member is
 		// webrtc makes the omission load-bearing rather than latent.
 		//
-		// Not unconditional, unlike clients/windows: on a platform with no
+		// Not unconditional, unlike the Windows tray client: on a platform with no
 		// Enforcer this client is proxy-only, there is no tunnel to loop into,
 		// and forcing every session through TURN would spend an operator's
 		// relay bandwidth and a round trip to fix a problem that platform does
