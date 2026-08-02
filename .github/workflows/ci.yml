@@ -140,6 +140,12 @@ jobs:
     # GL failure should neither red that out nor hide behind it. The two run
     # in parallel, so this costs no wall-clock, and the repo is public, so the
     # extra Windows runner costs no billed minutes.
+    #
+    # The measured numbers, from the first run of this job: 8m12s here against
+    # 1m17s for windows-client. Folding this in as a step would have taken the
+    # enforcement layer's only Windows signal from 1m17s to roughly nine
+    # minutes on every push. Nearly all of that is cgo compiling go-gl/glfw,
+    # so it is inherent to the target rather than something to tune away.
     runs-on: windows-latest
     env:
       # Pinned rather than inherited. See "confirm the toolchain" below for
@@ -154,6 +160,13 @@ jobs:
       # mingw-w64 GCC on PATH as `gcc`. Locate one rather than hardcode a
       # path: these runner images move mingw between releases, and the image
       # is not something this repo pins.
+      #
+      # As of 2026-08-02 windows-latest ships one already on PATH
+      # (C:\mingw64\bin, MinGW-Builds 15.2.0), so the first branch below is
+      # what runs and the install costs nothing. The other branches are kept
+      # precisely because that is an image detail nobody here controls, and
+      # its disappearance should cost one step rather than a red job nobody
+      # can read.
       - name: ensure a mingw-w64 gcc
         shell: pwsh
         run: |
