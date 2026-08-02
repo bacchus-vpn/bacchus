@@ -879,3 +879,102 @@ the reader to find this table.
   serve from a build that routes the device, and `DeviceEnforced()` is a property
   of the platform. bacchus#101 is the fix for the stored-opt-in trap this creates
   on upgrade; `cmd/node` remains the way to donate capacity from a Linux machine.
+
+## Amendment (2026-08-02): the hardware run happened — on `clients/windows` (#88)
+
+The 2026-07-30 amendment above, recording #59, says of the two OS-level guarantees
+no Go test can assert:
+
+> **Neither of those was verified on hardware as part of #59, and this section
+> will not pretend otherwise.**
+
+That was true, and it stayed true for three days. #88 is the run it asked for, done
+on 2026-08-02 on real Windows hardware with Administrator rights, and **both
+guarantees are now observed.** The sentence above is left where it is rather than
+rewritten, because it is still an accurate statement about #59 — what changed is
+not that it was wrong but that it has been overtaken, and a reader should be able
+to see both.
+
+### What the run establishes
+
+Six checks, all passing, mapped onto the bar rather than left as a list — the point
+of the run is which items it moves:
+
+| #88 checked | Bar item | What it turns from argument into observation |
+|---|---|---|
+| The tunnel comes up elevated | 7 | Elevated execution is real, not just documented |
+| `Get-NetRoute` shows the split-default | 1 | `0.0.0.0/1` and `128.0.0.0/1` both present on the Bacchus adapter, both with `NextHop` = `tunIP` (`enforcement/tunnel.go`'s `10.66.0.2`) |
+| …and the control-plane exclusions | 1, 5 | The coordinator's `/32` resolves via the **physical** gateway, outside the tunnel it is building — the exclusion is real, not merely installed |
+| Real device traffic egresses via the exit | 8 | The one this ADR could not reach. `traffic_test.go` proves everything from the IP packet inward; whether Windows *hands the device those packets* was open, and an egress-address check answers it from outside the process entirely |
+| Kill the process outright; still fail-closed | 2 | `Stop-Process -Force`, no cleanup path taken, `DefaultOutboundAction` still `Block` on all three profiles, and the same request fails. The kill-switch is an OS filter, observed rather than reasoned about |
+| Next launch recovers | 3 | A stale lockdown is detected and lifted, and the machine is genuinely back on its own path |
+
+Rows 2 and 4 are one guarantee in two halves and only the pair is evidence: **routes
+existing is state; traffic arriving at the exit is proof.** The #59 amendment made
+exactly this distinction to explain what its tests could not reach, and it is the
+distinction the run was designed around.
+
+One thing the run deliberately did not re-test: the unelevated refusal. That path is
+already asserted by `routes_windows.go`'s own error handling, and re-confirming it by
+hand would have added a screenshot, not a fact.
+
+### The qualifier, which belongs in this section and not a footnote
+
+**The run used `clients/windows`.** It had to: `clients/fyne` needs a mingw-w64
+toolchain to produce a Windows binary, the run had none, and no such artifact existed
+anywhere — because, as #115 then established, **no CI job had ever built `clients/fyne`
+for Windows at all.**
+
+What follows from that, precisely:
+
+- **The two guarantees hold for either caller.** They are properties of Windows and of
+  `clients/internal/enforcement`, and since #59 there is one implementation of that
+  package with two callers. The run drove the same `Enforcer`, the same `osNet` and the
+  same PowerShell layer `clients/fyne` drives.
+- **What is not established is that `clients/fyne` itself brings that package up
+  correctly on Windows** — a different claim, about a different binary, and one that
+  could not be tested at all while nothing compiled it for the platform.
+
+Writing this section as "Windows is verified" without that sentence would reproduce, in
+a new place, the exact pattern the #93 amendment named as this document's recurring
+failure: a true statement that is not the whole truth, which lets a reader conclude
+something broader than what was checked. The run is real; the binary it used is the one
+being retired, not the one replacing it.
+
+### The generalizable lesson from the run itself
+
+Recovery — bar item 3 — cannot be tested with the client reconnected. The first attempt
+left it connected, which re-arms the kill-switch and produces `DefaultOutboundAction
+Block` for an entirely legitimate reason, indistinguishable from a failed recovery if
+the firewall state is all you look at. **Relaunch and leave it disconnected, and use the
+egress address as the discriminator, not the firewall state.**
+
+That is not a Windows fact. `[E10]` (#37) and `[E9]` (#36) each carry the same item
+against nftables and NetworkExtension respectively, and the same trap: an armed filter
+looks identical whether it was left behind or just re-armed. Recorded here rather than
+in the issue, so the next platform's run inherits it.
+
+### Consequences
+
+- **The #59 amendment's Consequences bullet — retirement is a decision the owner can
+  take "once the hardware run above is done" — has had its condition met.** It is not
+  the last one. The #93 amendment added items 9–12 (satisfied), and #115 adds a gate
+  that did not exist when either was written: `clients/fyne` must be built for Windows,
+  and then brought up on it, before the client being retired stops being the only
+  Windows client anyone has ever run.
+- **The #37 amendment's line that the OS-delivery gap is "still open, as #88" on
+  Windows is superseded.** Linux reached that assertion through a real kernel in a
+  network namespace; Windows now reaches it through a real machine. Both are outside
+  the process, which is the property that matters; neither is a Go test, which is the
+  point.
+- **The build half of #115 is now covered.** `.github/workflows/ci.yml` grows a
+  `windows-fyne-client` job that installs the mingw-w64 toolchain
+  `clients/fyne/README.md` documents, vets, builds the shipping `-H=windowsgui` binary
+  and runs the tests — the same "proven once versus proven continuously" move the #153
+  amendment made for Linux, applied to the platform that had no proof at all. The
+  hardware pass with that binary is #115's second item and is not this.
+- **`clients/windows` is still not retired, and this amendment does not retire it.**
+  That has been the standing position through four amendments and it has not moved:
+  retirement is an event with a written trigger, the trigger is the bar, and the bar
+  now has one item outstanding that is about the surviving client rather than the
+  departing one.
