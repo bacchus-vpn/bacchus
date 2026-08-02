@@ -100,13 +100,138 @@ jobs:
       # rules before the default flips to Block, nothing left half-armed on a
       # failure, a crashed session's prior state restored from the marker
       # rule. What they deliberately do NOT assert is that Windows honours
-      # those cmdlets; that is an OS guarantee, it needs an elevated machine,
-      # and ADR-0039's 2026-07-30 amendment records that run as OUTSTANDING —
-      # a green job here is not evidence it has been done.
+      # those cmdlets — that the route table really hands the TUN device this
+      # machine's traffic, and that a DefaultOutboundAction Block really keeps
+      # blocking after the process is killed. Those are OS guarantees, they
+      # need an elevated machine, and no result from this job is evidence
+      # about them in either direction.
+      #
+      # That run has since happened: issue #88, 2026-08-02, elevated, both
+      # guarantees confirmed — recorded in ADR-0039's amendment of that date.
+      # This comment used to call the run OUTSTANDING, which is the only part
+      # of it that changed; the sentence above still holds, because what
+      # covers those two guarantees is a hardware run and not this job.
+      #
+      # The run used clients/windows, which is the binary built above. The
+      # other caller of the same enforcement package is clients/fyne, and it
+      # is built by windows-fyne-client below — built, not run, so the same
+      # limit applies there and more of it (issue #115).
       - name: vet
         run: go vet ./clients/windows ./clients/internal/...
       - name: test
         run: go test ./clients/internal/...
+
+  windows-fyne-client:
+    # clients/fyne, built for Windows (issue #115) — the platform it is meant
+    # to replace a client ON, and the one nothing had ever built it for.
+    #
+    # Neither existing job covers this. windows-client builds clients/windows,
+    # which is pure Go/syscall and shares no build requirement with this
+    # package; linux-client builds clients/fyne against a completely different
+    # C toolchain. And a C toolchain is the whole point: clients/fyne is the
+    # only package in this repo that needs one, because Fyne's desktop driver
+    # renders through OpenGL via cgo (go-gl/gl, go-gl/glfw — ADR-0039's "new
+    # build prerequisite"). So the one client that could plausibly fail to
+    # build on Windows was the one nothing built on Windows.
+    #
+    # A separate job rather than a step on windows-client, for the reason
+    # linux-client is separate from server: windows-client is the fast,
+    # toolchain-free signal for the shared enforcement layer, and a mingw or
+    # GL failure should neither red that out nor hide behind it. The two run
+    # in parallel, so this costs no wall-clock, and the repo is public, so the
+    # extra Windows runner costs no billed minutes.
+    runs-on: windows-latest
+    env:
+      # Pinned rather than inherited. See "confirm the toolchain" below for
+      # why 0 is the dangerous value here and not merely the wrong one.
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      # clients/fyne/README.md's Build section states the requirement as a
+      # mingw-w64 GCC on PATH as `gcc`. Locate one rather than hardcode a
+      # path: these runner images move mingw between releases, and the image
+      # is not something this repo pins.
+      - name: ensure a mingw-w64 gcc
+        shell: pwsh
+        run: |
+          if (Get-Command gcc -ErrorAction SilentlyContinue) {
+            "gcc already on PATH: $((Get-Command gcc).Source)"
+            exit 0
+          }
+          $dirs = @(
+            "C:\msys64\mingw64\bin",
+            "C:\ProgramData\mingw64\mingw64\bin",
+            "C:\mingw64\bin"
+          )
+          $dir = $dirs | Where-Object { Test-Path (Join-Path $_ "gcc.exe") } | Select-Object -First 1
+          if ($dir) {
+            "preinstalled toolchain at $dir"
+            Add-Content -Path $env:GITHUB_PATH -Value $dir
+            exit 0
+          }
+          "no preinstalled mingw-w64 on this image; installing one"
+          choco install mingw --no-progress --yes
+          # Chocolatey's shim directory is already on PATH for later steps, so
+          # a successful install needs nothing more here. The next step is the
+          # gate either way: it fails loudly if this left no usable compiler.
+      - name: confirm the toolchain
+        shell: pwsh
+        run: |
+          gcc --version
+          if ($LASTEXITCODE -ne 0) { throw "no working mingw-w64 gcc on PATH - see the step above" }
+          # CGO_ENABLED=0 is the one setting that would make this whole job
+          # theatre, and it does not announce itself as a missing compiler:
+          # with cgo off, go-gl's files are excluded by build constraints and
+          # the error names a package no reader connects to "you have no C
+          # compiler". ADR-0039 records both forms of that failure verbatim.
+          $cgo = go env CGO_ENABLED
+          if ($cgo -ne "1") { throw "CGO_ENABLED=$cgo - this job only means anything at 1" }
+          "CGO_ENABLED=$cgo CC=$(go env CC)"
+      - name: vet
+        run: go vet ./clients/fyne/...
+      # -H=windowsgui is the form clients/fyne/README.md documents for the
+      # shipping binary (no console window behind the GUI). It sets one PE
+      # header field and changes no compilation - but building something other
+      # than what ships is how a green job stops describing the artifact.
+      - name: build
+        run: go build -ldflags "-H=windowsgui" -o bacchus-fyne.exe ./clients/fyne
+      - name: confirm the build produced a real Windows binary
+        shell: pwsh
+        run: |
+          if (-not (Test-Path bacchus-fyne.exe)) { throw "no bacchus-fyne.exe - the build step produced nothing" }
+          $f = Get-Item bacchus-fyne.exe
+          "bacchus-fyne.exe: $([math]::Round($f.Length / 1MB, 1)) MB"
+          # A Fyne binary with the GL stack linked in is tens of megabytes.
+          # A few hundred KB would mean something got stubbed out - which is
+          # the failure this job exists to catch, so it must not be the one
+          # thing the job takes on trust.
+          if ($f.Length -lt 5MB) { throw "bacchus-fyne.exe is only $($f.Length) bytes - too small to have the GL stack linked in" }
+          $mz = Get-Content bacchus-fyne.exe -AsByteStream -TotalCount 2
+          if (($mz[0] -ne 0x4D) -or ($mz[1] -ne 0x5A)) { throw "bacchus-fyne.exe is not a PE image" }
+      # internal/appstate holds the real tests and is Fyne-free, so most of
+      # this needs no toolchain - but two things here run on Windows for the
+      # first time. autostart_windows.go's registry Run key is exercised by
+      # autostart_windows_test.go, which is behind //go:build windows and so
+      # has been compiled by nothing until now; and the outer package's
+      # translations_test.go (#93) links the whole GL stack into a test
+      # binary, which is a stronger check than the build step alone. It walks
+      # its own AST and creates no fyne.App, so it needs no display.
+      - name: test
+        run: go test ./clients/fyne/...
+      # The binary #115's second item needs. That item is a hardware pass on
+      # the owner's own machine, and without this it would begin by installing
+      # a mingw toolchain to produce a binary CI already had. Unsigned - this
+      # is a test artifact, not a release (Windows signing identity is its own
+      # open question).
+      - name: upload the Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: bacchus-fyne-windows-amd64
+          path: bacchus-fyne.exe
+          if-no-files-found: error
 
   linux-client:
     # The Linux GUI build target (issue #153): clients/fyne is the first
