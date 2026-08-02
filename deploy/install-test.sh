@@ -262,6 +262,23 @@ assert_called 'systemctl enable --now bacchus-netd\.socket'
 # socket-activated pair wrong — so it is asserted rather than assumed.
 assert_not_grep "$calls" 'enable.*bacchus-netd\.service' 'the SERVICE is not enabled — only the socket'
 
+# The one place in this file where the OUTPUT is the artifact rather than
+# narration about one. The last thing a fresh user reads has to send them
+# somewhere that can do the job, and this text used to end "…or use the app's
+# Settings window" for the five network keys — which that window cannot set, by
+# design (they are file-only; clients/fyne/settings.go binds enforcement,
+# transport, admission and volunteering, none of these). That is issue #134's
+# defect, sitting in the Linux installer the whole time it was believed to be
+# Windows-only, and nothing here would have caught it.
+assert_grep "$work/out.log" 'BY EDITING THE CONFIG FILE' \
+	'the next steps send the user to the config file'
+assert_grep "$work/out.log" "$stage$home/\.config/Bacchus/fyne-client\.json" \
+	'and name it by the path it was actually seeded at'
+assert_grep "$work/out.log" 'cannot' \
+	'and say the Settings window cannot set these keys'
+assert_not_grep "$work/out.log" 'or use the app.s Settings window' \
+	'rather than offering it as the alternative'
+
 case_start 'client: running it twice changes nothing and clobbers no config'
 cfg=$stage$home/.config/Bacchus/fyne-client.json
 printf '{ "coordinators": ["sentinel.invalid:8080"] }\n' >"$cfg"

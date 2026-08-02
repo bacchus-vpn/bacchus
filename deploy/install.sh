@@ -665,6 +665,21 @@ EOF
 		warn "could not chown $cfg_dir to $desktop_user — check it by hand"
 }
 
+# client_next_steps is the last thing a fresh user reads, so step 2 has to send
+# them somewhere that can actually do the job.
+#
+# It used to end "…or use the app's Settings window", and the Settings window
+# CANNOT set any of the five network keys: coordinators, stun, turn, turnUser and
+# turnPass are file-only by design (clients/fyne/settings.go binds enforcement,
+# transport, admission and volunteering — not these). So the one instruction a
+# user cannot skip pointed at a dialog with no field for it. That is issue #134's
+# defect, which everyone believed was Windows-only; it has been in this script the
+# whole time. A Linux user installed the documented way does not hit #134's
+# refusal — seed_client_config gives them a file — they hit its placeholder
+# COORDINATOR_HOST instead and go looking in Settings for somewhere to change it.
+#
+# The path is printed resolved rather than as \$HOME, because it is the file they
+# have to open and this script is the one process that knows whose home it is in.
 client_next_steps() {
 	cat <<EOF
 
@@ -676,11 +691,18 @@ $progname:      at login, so $desktop_user is not yet effectively in the bacchus
 $progname:      group in any shell or desktop session that is already running.
 $progname:      Until then the client will report the helper as unreachable.
 
-$progname:   2. Fill in a coordinator. The seeded config is the example
-$progname:      template and points at placeholder hosts:
-$progname:        \$HOME/.config/Bacchus/fyne-client.json
-$progname:      Set "coordinators", "stun", "turn" and "turnPass" to your
-$progname:      network's, or use the app's Settings window.
+$progname:   2. Fill in a coordinator, BY EDITING THE CONFIG FILE:
+$progname:        $cfg
+$progname:      It is the example template, so it points at a placeholder host
+$progname:      (COORDINATOR_HOST) that resolves nowhere — connecting before you
+$progname:      change it fails to dial. Set "coordinators", "stun", "turn" and
+$progname:      "turnPass" to your network's ("turnUser" already has the usual
+$progname:      value). Editing it needs no root: the file is yours.
+$progname:
+$progname:      These five keys are NOT in the app's Settings window and cannot
+$progname:      be set from it — Settings covers the kill switch, split tunnel,
+$progname:      DNS, transports, admission and volunteering. Do not go looking
+$progname:      there for a coordinator field; there is not one (issue #134).
 
 $progname: Then launch Bacchus from your application menu, or run
 $progname: $bin_dir/bacchus-fyne.
