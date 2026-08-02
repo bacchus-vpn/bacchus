@@ -58,10 +58,135 @@ go build -ldflags "-H=windowsgui" -o bacchus.exe ./clients/windows
 go build -o node.exe ./cmd/node
 ```
 
+The Linux **client** is deliberately absent from that list: it is not
+cross-buildable from here. `clients/fyne` links a C toolchain and an
+OpenGL/X11/Wayland stack (ADR-0039) and `cmd/bacchus-netd` is Linux-only, so
+both are built on the Linux machine they will run on — which is what
+`deploy/install.sh` does for you.
+
 ## Deploy the VPS services
-See [../deploy/README.md](../deploy/README.md) — copy the binaries to
-`/usr/local/bin/`, install the units, create `/etc/bacchus/*.env` from the
-templates (real IP + `TURN_PASS`), open the firewall, `systemctl enable --now`.
+`deploy/install.sh node --role coordinator` or `--role exit` does all of this in
+one command, including generating the exit's persistent identity on the box —
+see [Installing on Linux](#installing-on-linux-issue-18) below.
+[../deploy/README.md](../deploy/README.md) is the same work by hand: copy the
+binaries to `/usr/local/bin/`, install the units, create `/etc/bacchus/*.env`
+from the templates (real IP + `TURN_PASS`), open the firewall,
+`systemctl enable --now`.
+
+## Installing on Linux (issue #18)
+
+`deploy/install.sh` installs either half of the Linux story and, just as
+importantly, removes it again.
+
+```bash
+# a desktop client: the GUI, the root helper, its unit, its socket, its group
+sudo sh deploy/install.sh client --user "$USER"
+
+# a server node: binary, unit, env file, and (for an exit) a persistent identity
+sudo sh deploy/install.sh node --role coordinator
+sudo sh deploy/install.sh node --role exit
+
+# and back out again
+sudo sh deploy/install.sh uninstall client
+sudo sh deploy/install.sh uninstall node          # keeps /etc/bacchus
+sudo sh deploy/install.sh uninstall node --purge  # destroys it too
+```
+
+**The client is the half this matters most for, and it is newer than the card
+that asked for an installer.** Before issue #37 the Linux client offered a SOCKS
+port and needed nothing installed. It now routes the whole device through
+`bacchus-netd`, which means a binary in `/usr/local/lib/bacchus`, a systemd unit
+and socket, and a `bacchus` group — all placed with root. Without them the
+client does not degrade to a proxy, it **refuses to connect** (ADR-0039 parity
+item 7, deliberately). So until this script existed, the platform that shipped
+in #37 was reachable only by someone willing to build from source and follow
+[deploy/README.md](../deploy/README.md) by hand.
+
+A server that already has cross-built binaries does not need a Go toolchain:
+`--binaries DIR` takes the ones you copied over, which is the workflow
+[Build (dev machine)](#build-dev-machine) above describes.
+
+### Why it is not `curl … | sh`
+
+The card that asked for this named that shape. The script refuses it, and the
+first of the three reasons is not about security at all:
+
+1. **It does not work properly.** Piping into `sh` makes the script its own
+   standard input, so an installer that ever wants to ask the operator a
+   question reads its own source instead.
+2. **`sh` runs the pipe as it arrives.** A connection that dies at 60% produces
+   a *partial* install rather than a failed one — no error, no record of where
+   it stopped. For a script whose job includes arranging a fail-closed
+   kill-switch, half-applied is the worst available outcome.
+3. **There is nothing to check.** This project's users are, by construction, the
+   people most likely to be behind an adversary who can intercept TLS. `curl |
+   sh` asks exactly them to run an unexamined artifact as root, with no step in
+   between where a signature or a human's eyes could intervene.
+
+So the supported form is three lines, of which the third is the one the card
+wanted:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/bacchus-vpn/bacchus/main/deploy/install.sh
+less install.sh
+sudo sh install.sh client --user "$USER"
+```
+
+To keep that from being merely advice, the script exits if it cannot find its
+own source on disk, which is exactly the condition a pipe creates.
+
+**Once [#34](https://github.com/bacchus-vpn/bacchus/issues/34) `[G7]` signs
+releases**, the middle line stops being "read it" and becomes "verify it": fetch
+the release tarball, check its signature against a key obtained out of band, then
+run the installer from inside it. That is the story worth having, and it is one
+`curl | sh` structurally cannot tell, because there is nowhere for the
+verification to happen. Until then, reading the script is the honest maximum.
+
+### What it refuses to do
+
+A half-written unit is worse than no unit: it survives reboots, it looks
+installed, and it fails at connect time. So the script refuses, changing
+nothing, when it cannot do the job properly — on a host not running systemd
+(pointing at the manual steps, since ADR-0049 records that socket activation is
+an optimisation and any supervisor can start the helper), when it cannot tell
+which user will run the client, when `--role` is missing or unrecognised, and
+when a binary it was told to install is not where it was told to look.
+
+There is deliberately **no distribution whitelist**. Nothing here is
+Debian-shaped or Fedora-shaped: the script needs systemd, coreutils' `install`,
+and `groupadd`/`usermod`. Each is probed and named individually, so a
+distribution nobody tested works if it has them, and one that lacks something
+gets told *which* thing rather than that it is "unsupported".
+
+A node whose env file still holds template placeholders is installed and
+deliberately **left stopped** — a unit started against `YOUR_VPS_PUBLIC_IP`
+does not fail once, it crash-loops behind `Restart=always`. Fill the file in and
+re-run the same command.
+
+Running the installer twice is safe: it never creates the group twice, never
+overwrites an env file or a user config, and — the one that would be expensive —
+never re-mints an exit's `EXIT_KEY`, since that key *is* the node id that clients
+pin and learned paths point at.
+
+### The exit key never travels
+
+An exit's `EXIT_KEY` is generated on the host, at install time, straight into
+`/etc/bacchus/node.env` at mode `0600`. It is not printed, not logged, not passed
+as a command-line argument (where `/proc` would expose it to every local user),
+and not echoed even under `sh -x` — the generator runs in a subshell with tracing
+disabled, and `deploy/install-test.sh` asserts exactly that. Back that file up if
+you want the exit to keep its identity across a rebuild; nothing else has a copy.
+
+### Testing it
+
+`deploy/install-test.sh` runs install → verify → uninstall → verify-clean for
+every mode, asserting against the filesystem and the recorded system commands
+rather than the installer's own output. **CI does not run it** — the checks need
+a booted systemd and a container runtime that `.github/workflows/ci.yml` has no
+step for. Run it by hand, and see the REAL-SYSTEM CHECKLIST at the end of that
+file for the things no harness can assert: that systemd accepts the units, that
+the socket really comes up `0660 root:bacchus`, and that the helper is activated
+by the client's first connect.
 
 ## Run relay + client
 Endpoints/credentials are passed as flags (or, for the Windows client, via

@@ -10,7 +10,30 @@ Secrets and host-specific values live in **env files** under `/etc/bacchus/`
 (gitignored) — the `.service` files reference them via `${VARS}`. Only the
 `*.env.example` templates are tracked.
 
-## Install (on the server box)
+## Install
+
+`install.sh` does everything in this file, in one command, and — the part that
+matters more — undoes it:
+
+```bash
+sudo sh install.sh node --role coordinator
+sudo sh install.sh node --role exit          # generates EXIT_KEY on this box
+sudo sh install.sh client --user "$USER"     # the desktop client (issue #37)
+sudo sh install.sh uninstall node --purge
+```
+
+On a server with binaries cross-built elsewhere, `--binaries DIR` skips the
+build and needs no Go toolchain. It refuses rather than guessing on a host it
+does not understand, never starts a unit whose env file still holds template
+placeholders, and is safe to re-run. Full notes, including why it is not
+`curl … | sh` and what changes once releases are signed
+(issue #34): [docs/RUNNING.md](../docs/RUNNING.md#installing-on-linux-issue-18).
+
+Everything below is the same work by hand — worth reading either way, since it
+is what the script is doing on your behalf, and it is the fallback on a host
+with no systemd.
+
+## Install by hand (on the server box)
 1. Build the Linux binaries (on the dev machine) and copy them to
    `/usr/local/bin/`: `bacchus-coordinator`, `bacchus-node`. `chmod +x` them.
 2. Copy the `.service` files to `/etc/systemd/system/`.
@@ -164,7 +187,14 @@ Exits **may** share a country: a client picks a country and the coordinator pick
 the exit inside it by headroom (issue #146, ADR-0042), so two exits in the same
 place is a load-balancing pool, not an ambiguity. There is no exact-exit pinning.
 
-## Cold-start bootstrap (issue #18)
+## Cold-start bootstrap (`old #18`)
+
+> That number is from the **retired** tracker (see the tracker note in the root
+> [README](../README.md)). It is written as a code span so it cannot autolink —
+> in the current tracker `#18` is the installer at the top of this file, which is
+> a different thing entirely. The rest of the repo still carries this reference
+> bare in about twenty places; those are tracked separately.
+
 The coordinator generates its snapshot-signing keypair on first run and logs
 the public key once:
 ```bash
@@ -198,6 +228,10 @@ group `bacchus`. Running the whole GUI as root is not acceptable for a client
 aimed at ordinary users — Fyne links a GL stack, an X11/Wayland client and a
 font renderer, and none of that belongs in a process that can rewrite the route
 table.
+
+`sudo sh install.sh client --user "$USER"` performs all three steps below, plus
+the GUI binary, a desktop entry, and a per-user config seeded somewhere the GUI
+can actually write it back. The manual sequence:
 
 ```bash
 # 1. Build and install the helper (it is not in /usr/local/bin: it is a helper
