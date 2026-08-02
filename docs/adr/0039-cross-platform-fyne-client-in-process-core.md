@@ -880,6 +880,26 @@ the reader to find this table.
   of the platform. bacchus#101 is the fix for the stored-opt-in trap this creates
   on upgrade; `cmd/node` remains the way to donate capacity from a Linux machine.
 
+  > **Update (2026-08-02):** superseded by [ADR-0053](0053-serving-while-routed.md)
+  > (issue #109). Volunteering is no longer refused on Linux. `core` binds a
+  > volunteered relay or exit's own sockets to this machine's address and
+  > `bacchus-netd` routes that source past the tunnel, so the toggles are live on a
+  > build that routes the device. The gate is no longer "does this build route the
+  > device" — `VolunteeringRefused` now reads `Enforcer.ServesWhileRouted()`, a
+  > per-platform capability whose safe default is false, which is why **Windows
+  > keeps the refusal**: it selects a route by destination and has no source
+  > selector, so the routing half has no mechanism there (#131). `cmd/node` is
+  > still the way to donate from a Linux machine that runs no GUI.
+  >
+  > **This costs parity item 2 some ground, and the loss is deliberate.** The
+  > kill-switch gains its first *source* allowance — "traffic this machine sent as
+  > itself may leave", which for an exit is necessarily the whole internet — and
+  > because it is address-and-uid scoped rather than socket-scoped it also reaches
+  > the volunteering user's other sockets bound to that address. Item 2 is
+  > unqualified when not volunteering and qualified while volunteering, behind two
+  > checkboxes that are off by default. ADR-0053 §4 is the argument; this bullet
+  > only records that the bar moved.
+
 ## Amendment (2026-08-02): the hardware run happened — on `clients/windows` (#88)
 
 The 2026-07-30 amendment above, recording #59, says of the two OS-level guarantees
