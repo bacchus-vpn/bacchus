@@ -25,9 +25,15 @@ sudo sh install.sh uninstall node --purge
 On a server with binaries cross-built elsewhere, `--binaries DIR` skips the
 build and needs no Go toolchain. It refuses rather than guessing on a host it
 does not understand, never starts a unit whose env file still holds template
-placeholders, and is safe to re-run. Full notes, including why it is not
-`curl … | sh` and what changes once releases are signed
-(issue #34): [docs/RUNNING.md](../docs/RUNNING.md#installing-on-linux-issue-18).
+placeholders, and is safe to re-run.
+
+A `curl … | sh` one-liner works — every side effect sits behind the script's
+final dispatch, so a truncated download installs nothing, and `install-test.sh`
+pins that by truncating the script at 42 offsets and asserting an empty tree.
+Downloading and reading it first is still the recommended path, and becomes the
+only one once releases are signed (issue #34), since a signature check has
+nowhere to happen inside a pipe. Full notes:
+[docs/RUNNING.md](../docs/RUNNING.md#installing-on-linux-issue-18).
 
 Everything below is the same work by hand — worth reading either way, since it
 is what the script is doing on your behalf, and it is the fallback on a host

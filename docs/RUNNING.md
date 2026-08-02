@@ -90,7 +90,21 @@ sudo sh deploy/install.sh node --role exit
 sudo sh deploy/install.sh uninstall client
 sudo sh deploy/install.sh uninstall node          # keeps /etc/bacchus
 sudo sh deploy/install.sh uninstall node --purge  # destroys it too
+sudo sh deploy/install.sh uninstall all           # both installs; still keeps /etc/bacchus
 ```
+
+Uninstall removes the units, the socket, the group, the binaries, the desktop
+entry, `/run/bacchus` and the per-user config. There is one rule about what
+survives, and it is whether the state can be regenerated: a client's config can,
+so it goes by default; an exit's `EXIT_KEY` is the node id clients pinned and a
+coordinator's signing key is what its snapshots are trusted by, so
+**`/etc/bacchus` stays until you ask for it with `--purge`**. `all` means both
+*installs*, not "and the keys too" — it does not override that rule, because a
+wider word does not make irreplaceable state replaceable. Uninstall says out loud
+which it did.
+
+Uninstall never reads the repository, so removing this does not require still
+having the checkout you installed from.
 
 **The client is the half this matters most for, and it is newer than the card
 that asked for an installer.** Before issue #37 the Linux client offered a SOCKS
@@ -106,25 +120,47 @@ A server that already has cross-built binaries does not need a Go toolchain:
 `--binaries DIR` takes the ones you copied over, which is the workflow
 [Build (dev machine)](#build-dev-machine) above describes.
 
-### Why it is not `curl … | sh`
+### `curl … | sh`, and why we still recommend downloading first
 
-The card that asked for this named that shape. The script refuses it, and the
-first of the three reasons is not about security at all:
+The pipe works. What makes it safe is not a check the script performs but a
+property of how it is laid out:
 
-1. **It does not work properly.** Piping into `sh` makes the script its own
-   standard input, so an installer that ever wants to ask the operator a
-   question reads its own source instead.
-2. **`sh` runs the pipe as it arrives.** A connection that dies at 60% produces
-   a *partial* install rather than a failed one — no error, no record of where
-   it stopped. For a script whose job includes arranging a fail-closed
-   kill-switch, half-applied is the worst available outcome.
-3. **There is nothing to check.** This project's users are, by construction, the
-   people most likely to be behind an adversary who can intercept TLS. `curl |
-   sh` asks exactly them to run an unexamined artifact as root, with no step in
-   between where a signature or a human's eyes could intervene.
+> **Every side effect lives behind the final `case $mode` dispatch, which is the
+> last statement in the file.**
 
-So the supported form is three lines, of which the third is the one the card
-wanted:
+Above that line there is nothing but `set -eu`, variable assignments, function
+definitions, argument parsing, and read-only resolution of where the unit files
+are. `sh` executes a pipe as it arrives, so a download that dies at 60% runs only
+what arrived — and what arrived defines functions that nobody calls. **A
+truncated fetch installs nothing**, rather than leaving the half-applied install
+that is otherwise the real hazard of this shape. It cannot even stop halfway
+through a compound command, because a shell will not execute a `case` or a
+function body whose end it has not seen.
+
+That is a guarantee about the code's *shape*, so it is pinned by a test rather
+than by good intentions: `deploy/install-test.sh` truncates the script at 42 byte
+offsets, pipes each fragment into `sh` exactly as `curl` would, and asserts that
+not one file was placed and not one unit written. Add a top-level side-effecting
+statement above the dispatch and that test goes red — which is the point, because
+that is the change that would quietly reintroduce the hazard.
+
+So the one-liner is supported:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/bacchus-vpn/bacchus/main/deploy/install.sh \
+  | sudo sh -s client --user "$USER"
+```
+
+One caveat that is about plumbing rather than posture, and it applies **today**:
+the installer *writes* the `.service` and `.socket` files, it does not generate
+them, and a piped script has no directory of its own to find them in. So run the
+line above from inside a checkout, or add
+`--deploy-dir /path/to/bacchus/deploy`. It says exactly that rather than failing
+obscurely. Once #34 ships a release tarball carrying the script and the units
+together, the caveat goes away.
+
+**We still recommend downloading it first**, for two reasons that the layout
+guarantee does not address:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/bacchus-vpn/bacchus/main/deploy/install.sh
@@ -132,15 +168,23 @@ less install.sh
 sudo sh install.sh client --user "$USER"
 ```
 
-To keep that from being merely advice, the script exits if it cannot find its
-own source on disk, which is exactly the condition a pipe creates.
+1. **There is nothing to check in a pipe.** This project's users are, by
+   construction, the people most likely to be behind an adversary who can
+   intercept TLS or serve a substituted response. The pipe asks exactly them to
+   run an unexamined artifact as root, with no step in between where a signature
+   or a human's eyes could intervene.
+2. **It forecloses ever asking a question.** Piping makes the script the shell's
+   own standard input, so anything read from the terminal would read the script's
+   remaining source. Everything here is driven by flags, which is the right
+   design anyway — but it is a constraint the pipe imposes rather than one chosen
+   freely.
 
 **Once [#34](https://github.com/bacchus-vpn/bacchus/issues/34) `[G7]` signs
-releases**, the middle line stops being "read it" and becomes "verify it": fetch
-the release tarball, check its signature against a key obtained out of band, then
-run the installer from inside it. That is the story worth having, and it is one
-`curl | sh` structurally cannot tell, because there is nowhere for the
-verification to happen. Until then, reading the script is the honest maximum.
+releases, downloading first stops being a recommendation and becomes the only
+path**: fetch the release tarball — which carries the script and the unit files
+together — verify its signature against a key obtained out of band, then run the
+installer from inside it. That is the argument that eventually retires the
+one-liner, because a signature check has nowhere to happen inside a pipe.
 
 ### What it refuses to do
 

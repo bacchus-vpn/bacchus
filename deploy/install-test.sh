@@ -406,6 +406,67 @@ assert_absent "$stage/etc/bacchus"
 # Refusals. Each one must also leave the tree untouched.
 # ---------------------------------------------------------------------------
 
+case_start 'uninstall all removes both installs and still keeps the irreplaceable half'
+new_stage all
+expect_ok client --user "$user" --binaries "$bins"
+expect_ok node --role exit --binaries "$bins"
+allkey=$(sed -n 's/^EXIT_KEY=//p' "$stage/etc/bacchus/node.env")
+: >"$calls"
+expect_ok uninstall all --user "$user"
+# Both installs are gone...
+assert_absent "$stage/usr/local/bin/bacchus-fyne"
+assert_absent "$stage/usr/local/lib/bacchus/bacchus-netd"
+assert_absent "$stage/usr/local/bin/bacchus-node"
+assert_absent "$stage/etc/systemd/system/bacchus-netd.socket"
+assert_absent "$stage/etc/systemd/system/bacchus-exit.service"
+# ...the client's replaceable config with them...
+assert_absent "$stage$home/.config/Bacchus"
+# ...and the exit's identity is NOT destroyed by the wider word.
+assert_present "$stage/etc/bacchus/node.env"
+still=$(sed -n 's/^EXIT_KEY=//p' "$stage/etc/bacchus/node.env")
+if [ "$allkey" = "$still" ]; then
+	ok '"all" did not take the exit identity with it — that still needs --purge'
+else
+	bad '"all" changed or destroyed EXIT_KEY without --purge'
+fi
+assert_grep "$work/out.log" 'KEPT' '"all" says out loud what it kept'
+
+case_start 'uninstall all --purge takes everything'
+: >"$calls"
+expect_ok uninstall all --user "$user" --purge
+assert_absent "$stage/etc/bacchus"
+
+case_start 'uninstall needs no unit files — the checkout may already be gone'
+new_stage nosrc
+expect_ok client --user "$user" --binaries "$bins"
+set +e
+BACCHUS_ROOT=$stage sh "$installer" uninstall client --user "$user" --deploy-dir /nonexistent \
+	>"$work/out.log" 2>&1
+rc=$?
+set -e
+if [ "$rc" = '0' ]; then
+	ok 'uninstall works with --deploy-dir pointing at nothing'
+else
+	bad "uninstall demanded the source tree (exit $rc)"
+	sed 's/^/        | /' "$work/out.log"
+fi
+assert_absent "$stage/usr/local/bin/bacchus-fyne"
+
+case_start 'an install with no unit files anywhere refuses and explains'
+new_stage nounits
+set +e
+BACCHUS_ROOT=$stage sh "$installer" client --user "$user" --binaries "$bins" \
+	--deploy-dir "$work/emptydir" >"$work/out.log" 2>&1
+rc=$?
+set -e
+mkdir -p "$work/emptydir"
+if [ "$rc" -ne 0 ]; then
+	ok 'refuses when pointed at a directory with no unit files'
+else
+	bad 'installed with no unit files available'
+fi
+assert_absent "$stage/usr/local/bin/bacchus-fyne"
+
 case_start '--root overrides BACCHUS_ROOT rather than the other way round'
 new_stage flagroot
 other=$work/stage.flagroot.other
@@ -463,20 +524,94 @@ mkdir -p "$work/emptybins"
 expect_refusal 'does not contain bacchus-node' node --role exit --binaries "$work/emptybins"
 assert_absent "$stage/usr/local/bin/bacchus-node"
 
-case_start 'refuses to run from a pipe'
+# ---------------------------------------------------------------------------
+# The pipe, and the property that makes it safe
+# ---------------------------------------------------------------------------
+#
+# `curl … | sh` is a supported shape. What makes it safe is not a check the
+# script performs but a property of its LAYOUT: every side effect lives behind
+# the final `case $mode` dispatch, which is the last statement in the file, so a
+# shell fed a truncated download executes only function definitions and argument
+# parsing and writes nothing.
+#
+# That is a guarantee one well-meaning top-level statement above the dispatch
+# would silently destroy, and no amount of reading the file proves it stayed
+# true. So it is asserted behaviourally: truncate the script across a spread of
+# byte offsets, pipe each fragment into `sh` exactly as curl would, and require
+# that not one file was placed.
+
+case_start 'the complete script installs when piped into sh (the shape #18 asks for)'
+new_stage pipefull
+# --deploy-dir because a pipe gives the script no directory of its own: $0 is
+# the shell's name, so it cannot find the units beside itself.
 set +e
-out=$(cat "$installer" | sh 2>&1)
+BACCHUS_ROOT=$stage sh -c 'cat "$1" | sh -s client --user "$2" --binaries "$3" --deploy-dir "$4"' \
+	_ "$installer" "$user" "$bins" "$here" >"$work/out.log" 2>&1
 rc=$?
 set -e
-if [ "$rc" -ne 0 ]; then
-	ok "piping into sh exits non-zero ($rc)"
+if [ "$rc" = '0' ]; then
+	ok 'piping the whole script into sh exits 0'
 else
-	bad 'piping into sh was accepted'
+	bad "piping the whole script into sh exited $rc"
+	sed 's/^/        | /' "$work/out.log"
 fi
-if printf '%s' "$out" | grep -q 'will not run from a pipe'; then
-	ok 'the pipe refusal explains itself'
+assert_present "$stage/usr/local/bin/bacchus-fyne"
+assert_present "$stage/etc/systemd/system/bacchus-netd.socket"
+
+case_start 'a truncated download installs nothing, at every offset'
+total=$(wc -c <"$installer")
+truncated_runs=0
+dirty=''
+# A spread across the whole file, plus the two offsets that matter most: just
+# short of the final dispatch, and one byte short of the end.
+offsets=''
+i=1
+while [ "$i" -lt 40 ]; do
+	offsets="$offsets $((total * i / 40))"
+	i=$((i + 1))
+done
+# Plus the three boundary offsets, which are the ones with something to say:
+#   pre        — everything except the dispatch. Every function defined, none
+#                called. This is the case the whole property rests on.
+#   pre + 20   — partway into the dispatch's own compound command.
+#   total - 5  — the entire file except the closing `esac`, so the `case` is
+#                unterminated and the shell cannot run it.
+#
+# Deliberately NOT total-1: the last byte is the newline after `esac`, so that
+# offset is a COMPLETE script and installs correctly. It looked like a
+# tempting "almost the whole file" case and it is really a positive control —
+# which the piped-full-script case above already covers properly.
+dispatch_at=$(grep -n '^case \$mode in' "$installer" | cut -d: -f1)
+pre=$(head -n "$((dispatch_at - 1))" "$installer" | wc -c)
+offsets="$offsets $pre $((pre + 20)) $((total - 5))"
+
+for off in $offsets; do
+	frag_stage=$work/stage.trunc
+	rm -rf "$frag_stage"
+	mkdir -p "$frag_stage/run/systemd/system"
+	set +e
+	head -c "$off" "$installer" |
+		BACCHUS_ROOT=$frag_stage sh -s client --user "$user" --binaries "$bins" --deploy-dir "$here" \
+			>/dev/null 2>&1
+	set -e
+	truncated_runs=$((truncated_runs + 1))
+	# Anything at all outside the /run/systemd/system fixture means the fragment
+	# wrote something, which is the failure this case exists to catch.
+	placed=$(find "$frag_stage" -mindepth 1 \
+		-not -path "$frag_stage/run" \
+		-not -path "$frag_stage/run/systemd" \
+		-not -path "$frag_stage/run/systemd/system" 2>/dev/null)
+	if [ -n "$placed" ]; then
+		dirty="$dirty
+  at byte $off: $(printf '%s' "$placed" | tr '\n' ' ')"
+	fi
+done
+rm -rf "$work/stage.trunc"
+
+if [ -z "$dirty" ]; then
+	ok "$truncated_runs truncated fragments piped into sh, none placed a file or wrote a unit"
 else
-	bad "the pipe refusal did not fire; got: $out"
+	bad "truncated fragments wrote something — a top-level side effect has appeared above the final dispatch:$dirty"
 fi
 
 case_start 'unknown mode is a usage error, not a refusal'

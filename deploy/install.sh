@@ -19,40 +19,54 @@
 # nobody exercises until they are in a hurry.
 #
 # ---------------------------------------------------------------------------
-# WHY THIS IS NOT `curl … | sh`
+# `curl … | sh` WORKS, AND WHY THE RECOMMENDED PATH IS STILL DOWNLOAD-THEN-RUN
 # ---------------------------------------------------------------------------
 #
-# The card names that shape. This script deliberately refuses it, for three
-# reasons, of which only the first is a matter of taste:
+# The card names the pipe shape and it is supported. The structural reason it is
+# safe here is the one property this file must not lose:
 #
-#  1. It does not work. Piping into `sh` makes the script itself the shell's
-#     standard input, so a script that ever needs to read from the terminal
-#     reads its own source instead. Every confirmation an installer for a
-#     security tool ought to be able to ask becomes structurally impossible. The
-#     usual workaround — never prompt — is the wrong direction for a program
-#     that installs a root-privileged helper.
+#   EVERY SIDE EFFECT IN THIS SCRIPT HAPPENS BEHIND THE FINAL `case $mode`
+#   DISPATCH, WHICH IS THE LAST STATEMENT IN THE FILE.
 #
-#  2. `sh` executes the pipe as it arrives. A connection that dies at 60% does
-#     not produce a failed install; it produces a PARTIAL one, with no error and
-#     no record of where it stopped. For an installer whose job includes
-#     arranging a fail-closed kill-switch, half-applied is the worst outcome
-#     available.
+# Above that line there is nothing but `set -eu`, variable assignments, function
+# definitions, argument parsing, and read-only resolution of where the unit files
+# are — all of which can print or exit, and none of which can write. `sh` executes
+# a pipe as it arrives, so a download that dies at 60% executes only what arrived —
+# and what arrived defines functions nobody calls. A truncated fetch therefore
+# installs NOTHING, rather than leaving the half-applied install that would
+# otherwise be the real hazard of this shape. It cannot even leave a syntax error
+# halfway through a compound command, because a shell will not execute a `case`
+# or a function body it has not seen the end of.
 #
-#  3. There is nothing to check. Our users are, by construction, the population
+# That is a guarantee about the code's SHAPE, which means it can be broken later
+# by a single well-meaning top-level statement added above the dispatch. So it is
+# not left to reasoning: install-test.sh truncates this file at a spread of byte
+# offsets, pipes each fragment into `sh`, and asserts that not one file was
+# placed and not one unit written. If you add a top-level side effect above the
+# dispatch, that test is what will tell you.
+#
+# The pipe is still not the RECOMMENDED path, for two reasons that survive:
+#
+#  1. There is nothing to check. Our users are, by construction, the population
 #     most likely to be behind an adversary that can intercept TLS or serve a
-#     substituted response. `curl | sh` asks exactly those users to execute an
+#     substituted response. The pipe asks exactly those users to execute an
 #     unexamined artifact as root, with no step in between where a signature, a
 #     checksum or a human's eyes could intervene.
 #
-# So: download the file, look at it or verify it, then run it. That is three
-# lines instead of one, and the third line is identical either way. To keep the
-# distinction from being merely advisory, the script exits if it cannot find its
-# own source on disk — see require_own_source below.
+#  2. It forecloses ever asking a question. Piping makes this script the shell's
+#     own standard input, so anything read from the terminal would read the
+#     script's remaining source instead. Everything here is therefore driven by
+#     flags, which is the right design anyway — but it is a constraint the pipe
+#     imposes rather than one chosen freely, and it is worth knowing that is why.
 #
-# Once issue #34 [G7] signs releases, the recommended flow gains the step that
-# makes it worth the extra lines: fetch the tarball, verify its signature
-# against a key obtained out of band, THEN run this. That is a story `curl | sh`
-# can never tell, because the verification has nowhere to happen.
+# So the documented recommendation is: download the file, look at it, then run
+# it. Three lines instead of one, of which the third is identical either way.
+#
+# Once issue #34 [G7] signs releases this stops being a recommendation and
+# becomes the only path: fetch the tarball, verify its signature against a key
+# obtained out of band, THEN run this. That is the argument that eventually
+# retires the one-liner, because a signature check has nowhere to happen inside
+# a pipe. It is not this change.
 #
 # ---------------------------------------------------------------------------
 # WHAT IT REFUSES, AND WHY IT CHECKS CAPABILITIES RATHER THAN DISTRIBUTIONS
@@ -84,9 +98,6 @@
 # regenerates one that already exists.
 
 set -eu
-
-# bacchus_install_marker — require_own_source greps for this exact string to
-# confirm that the file $0 names really is this script. Do not remove it.
 
 progname='bacchus-install'
 
@@ -168,8 +179,18 @@ uninstall options:
                      key, so it is not the default.
   --keep-config      (client) keep the per-user config file.
 
+  "all" means both INSTALLS, not "and the keys too". It removes the client and
+  the node, purging the client's config (which is replaceable) and keeping
+  /etc/bacchus (which is not) exactly as the two separate commands would. There
+  is one rule here and "all" does not override it: irreplaceable state goes only
+  when you ask for it with --purge. Uninstall says which it did, either way.
+
 common options:
   --no-start         install and enable units but do not start them.
+  --deploy-dir DIR   where the .service/.socket/.env.example files are. Defaults
+                     to this script's own directory, then ./deploy, then the
+                     working directory. Needed when the script was piped in,
+                     since a pipe gives it no directory of its own.
   --root DIR         prefix every path with DIR. For packaging and for this
                      script's own tests; it is NOT a way to install into a
                      chroot you then boot, because the systemd and group work
@@ -181,30 +202,6 @@ EOF
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
-
-# require_own_source is the `curl | sh` refusal described in the header. When a
-# script is piped into a shell, $0 is the shell's own name and there is no file
-# behind it; when it is run normally, $0 names a readable file containing this
-# script's marker. The marker check rather than a bare -f test is deliberate:
-# $0 is "sh" under a pipe, and a directory that happened to contain a file
-# called "sh" would otherwise satisfy -f.
-require_own_source() {
-	if [ ! -f "$0" ] || [ ! -r "$0" ] || ! grep -q 'bacchus_install_marker' "$0" 2>/dev/null; then
-		refuse "this installer will not run from a pipe." \
-			"It looks like it was invoked as 'curl ... | sh', which cannot be done" \
-			"safely: the shell executes the script as it arrives, so a connection" \
-			"that drops leaves a PARTIAL install with no error, and there is no" \
-			"point at which you could have checked what you were about to run as" \
-			"root. Download it, look at it, then run it:" \
-			"" \
-			"  curl -fsSLO https://raw.githubusercontent.com/bacchus-vpn/bacchus/main/deploy/install.sh" \
-			"  less install.sh" \
-			"  sudo sh install.sh client" \
-			"" \
-			"Once releases are signed (issue #34) the middle step becomes a" \
-			"signature check against a key you obtained out of band."
-	fi
-}
 
 need_cmd() {
 	command -v "$1" >/dev/null 2>&1 || refuse "$1 is not installed, and this script needs it." "$2"
@@ -861,6 +858,17 @@ do_uninstall() {
 	client) uninstall_client ;;
 	node) uninstall_node ;;
 	all)
+		# "all" scopes WHICH INSTALLS are removed. It deliberately does not
+		# change what --purge is for. A user typing "all" plainly means "get
+		# everything off this box", and the temptation is to let the word carry
+		# the keys with it — but the rule that decides this is whether the state
+		# can be regenerated, and that does not become true because a wider word
+		# was typed. An exit's EXIT_KEY is still the node id clients pinned; it
+		# is still gone for good; and there is still no way to get it back after
+		# a mistyped removal. So "all" is exactly `uninstall client` followed by
+		# `uninstall node`, which means the client's replaceable config goes and
+		# /etc/bacchus stays until --purge asks for it. The kept-state notice
+		# prints here too, so nobody has to infer any of this.
 		uninstall_client
 		uninstall_node
 		;;
@@ -874,8 +882,8 @@ do_uninstall() {
 
 mode=''
 uninstall_what=''
-
-require_own_source
+deploy_dir=''
+repo_root=''
 
 [ "$#" -gt 0 ] || {
 	usage >&2
@@ -937,6 +945,15 @@ while [ "$#" -gt 0 ]; do
 		binaries_dir=${1#--binaries=}
 		shift
 		;;
+	--deploy-dir)
+		deploy_dir=${2:-}
+		[ -n "$deploy_dir" ] || die "--deploy-dir needs a value"
+		shift 2
+		;;
+	--deploy-dir=*)
+		deploy_dir=${1#--deploy-dir=}
+		shift
+		;;
 	--root)
 		root=${2:-}
 		[ -n "$root" ] || die "--root needs a value"
@@ -970,11 +987,62 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
-# deploy_dir is where the unit files live: this script's own directory, always,
-# because the units ship beside it. repo_root is only consulted when something
-# has to be BUILT, which --binaries skips entirely.
-deploy_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-repo_root=$(CDPATH='' cd -- "$deploy_dir/.." && pwd)
+# deploy_dir is where the unit files live. Normally that is this script's own
+# directory, since the units ship beside it — but $0 is the shell's own name
+# when the script is piped in, and `dirname sh` is not a useful answer. So the
+# location is resolved from candidates and confirmed by a marker rather than
+# assumed, and a run that cannot find them says so instead of failing later with
+# "missing file to install: ./bacchus-netd.socket".
+#
+# repo_root is only consulted when something has to be BUILT, which --binaries
+# skips entirely.
+is_deploy_dir() {
+	[ -f "$1/bacchus-netd.socket" ] && [ -f "$1/bacchus-coordinator.service" ]
+}
+
+resolve_deploy_dir() {
+	if [ -n "$deploy_dir" ]; then
+		is_deploy_dir "$deploy_dir" ||
+			refuse "--deploy-dir $deploy_dir does not hold this project's unit files."
+		return 0
+	fi
+	# $0's directory first (the ordinary case), then a checkout the caller is
+	# standing in, which is what makes `curl … | sh` work from inside a clone.
+	if [ -f "$0" ] && d=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) && is_deploy_dir "$d"; then
+		deploy_dir=$d
+		return 0
+	fi
+	for d in "$PWD/deploy" "$PWD"; do
+		if is_deploy_dir "$d"; then
+			deploy_dir=$d
+			return 0
+		fi
+	done
+	refuse "cannot find this project's unit files (bacchus-netd.socket and friends)." \
+		"They ship in the repository's deploy/ directory, beside this script, and" \
+		"the installer needs them — it writes them, it does not generate them." \
+		"" \
+		"If you piped this script in, the shell gave it no directory of its own," \
+		"so run it from a checkout instead, or point it at one:" \
+		"" \
+		"  git clone https://github.com/bacchus-vpn/bacchus" \
+		"  sudo sh bacchus/deploy/install.sh client --user \"\$USER\"" \
+		"" \
+		"or:  sudo sh install.sh client --deploy-dir /path/to/bacchus/deploy" \
+		"" \
+		"Once releases are signed (issue #34) a release tarball will carry both" \
+		"this script and the units together."
+}
+
+# Only an INSTALL needs the unit files. Uninstall removes things by path and
+# reads nothing from the repository, which matters: somebody removing this in a
+# hurry may well have deleted the checkout first, and "you cannot uninstall
+# because you no longer have the source" would be an absurd thing to say to
+# them.
+if [ "$mode" != 'uninstall' ]; then
+	resolve_deploy_dir
+	repo_root=$(CDPATH='' cd -- "$deploy_dir/.." && pwd)
+fi
 
 if [ -n "$binaries_dir" ] && [ ! -d "$binaries_dir" ]; then
 	refuse "--binaries $binaries_dir is not a directory"
