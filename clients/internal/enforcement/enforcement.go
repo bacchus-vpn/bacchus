@@ -73,6 +73,35 @@ type Enforcer interface {
 	// reserved before Start are recorded and installed by bring-up, and
 	// addresses reserved after it install live.
 	ReserveUnderlay(addr string)
+
+	// ServesWhileRouted reports whether this platform can honor
+	// Policy.ServeEgress — whether a volunteered relay or exit can serve from
+	// a machine this Enforcer is routing (ADR-0053, bacchus#109).
+	//
+	// A property of the platform, not of the moment, exactly like
+	// Controller.DeviceEnforced(): it must be answerable before anything has
+	// been started, because clients/fyne asks it to decide whether the
+	// volunteer checkboxes are even offered, and it must give the same answer
+	// when the settings window asks and when the connect path re-asks. A probe
+	// would make it a property of the moment and could disagree with itself
+	// across those two calls, which is how a user ticks a box that the connect
+	// then refuses.
+	//
+	// False is the safe answer and the default for a new platform. It leaves
+	// ErrVolunteerWhileRouted in force, which is where every platform started.
+	ServesWhileRouted() bool
+
+	// ServedSource is the local address a served role's own sockets must bind
+	// for the carve-out to apply to them, or "" when no serving session is up.
+	//
+	// It is read at DIAL time rather than passed in at Start, and the ordering
+	// is why: clients/fyne builds core.Config and connects the engine before it
+	// starts enforcement at all, so at the moment core needs a value there is
+	// no Session and no tunnel to have derived one. The engine holds this as a
+	// function and asks when it opens a served socket, by which point bring-up
+	// has run. Wired to the Enforcer rather than the Session for the same
+	// reason ReserveUnderlay is.
+	ServedSource() string
 }
 
 // Session is one running enforcement session: one TUN device, one set of OS
@@ -146,6 +175,23 @@ type Policy struct {
 	// or the whole process — dies, nothing egresses in the clear until it is
 	// explicitly restored. See killswitch_windows.go.
 	KillSwitch bool
+
+	// ServeEgress asks for a volunteered relay or exit's OWN egress to be
+	// carved out of the tunnel this session installs, so the machine can serve
+	// other people while routing itself (ADR-0053, bacchus#109).
+	//
+	// It is the one field here that widens what the machine may do rather than
+	// narrowing it, and Start must fail rather than ignore it — the rule this
+	// interface already states, with more than usual riding on it. Ignoring
+	// KillSwitch would leave a user less protected than they asked; ignoring
+	// this leaves other people's traffic egressing through the tunnel under the
+	// UPSTREAM exit's address while the exit checkbox in the settings window
+	// says "under YOUR own IP and jurisdiction". A volunteer would be accepting
+	// a legal exposure they do not have, and somebody else's traffic would be
+	// laundering through an exit its operator never agreed to carry it for.
+	// That is worse than the feature being unavailable, which is why
+	// clients/fyne refuses to offer it at all where this cannot be honored.
+	ServeEgress bool
 
 	// Logf, if set, receives this package's own bring-up/teardown progress
 	// and any OS-command failure. Injected rather than called by name because

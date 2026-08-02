@@ -175,4 +175,36 @@ type osNet interface {
 	//     and ADR-0050 §5), so there is nothing to stub.
 	captureDNS() error
 	releaseDNS()
+
+	// allowServedEgress carves a volunteered relay or exit's OWN egress out of
+	// the tunnel this session installed, and returns the local source address
+	// its sockets must bind for the carve-out to reach them (ADR-0053,
+	// bacchus#109). revokeServedEgress withdraws it.
+	//
+	// This is the only primitive here that hands an address back rather than
+	// taking one, and the direction is the design. What distinguishes other
+	// people's traffic from the volunteer's own is the SOCKET, not the
+	// destination — both go to the same places — so the carve-out has to be
+	// keyed on something the served sockets set on themselves. The platform is
+	// the side that knows which address that is (it read the default route),
+	// so it says; core binds what it is told. A caller that invents the address
+	// itself would be guessing at exactly the moment the tunnel has made the
+	// machine's own routing misleading.
+	//
+	// It returns an error, and the fallible half of osnet.go's split is where
+	// it belongs: a serving session whose carve-out did not happen egresses
+	// other people's traffic through the tunnel, under the UPSTREAM exit's
+	// address, while the exit checkbox says "under YOUR own IP". That is not a
+	// degraded tunnel, it is a false disclosure, so bring-up unwinds. An
+	// implementation with no way to do this must return an error rather than a
+	// no-op and an empty string — the Enforcer contract's "fail the whole call
+	// rather than silently ignore the field" applied one level down.
+	//
+	// revokeServedEgress is silent, like the other teardown primitives. It is
+	// also not the only thing that undoes this: the carve-out is dropped when
+	// the session ends however it ends, including a client that died without
+	// calling anything — the opposite of the choice the kill-switch makes, and
+	// ADR-0053 §5 is about why the two go opposite ways.
+	allowServedEgress() (string, error)
+	revokeServedEgress()
 }

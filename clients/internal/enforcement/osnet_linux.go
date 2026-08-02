@@ -367,6 +367,34 @@ func (o *linuxOS) releaseDNS() {
 	o.silent(netdwire.VerbReleaseDNS, &netdwire.Request{})
 }
 
+// allowServedEgress sends no parameters either, and for a stronger version of
+// captureDNS's reason. Every obvious encoding of a carve-out widens ADR-0049
+// §2's inward vocabulary by something the helper would then have to trust — a
+// firewall mark, a routing-table id, a source address, a uid, a port range —
+// and none of them has to cross: the helper read the default route, so it knows
+// the address; SO_PEERCRED told it the uid; the table id and the rule priority
+// are its own constants. What comes back is the address to bind, which travels
+// OUTWARD on the same footing as Gateway.
+func (o *linuxOS) allowServedEgress() (string, error) {
+	rep, err := o.do(&netdwire.Request{Verb: netdwire.VerbAllowServedEgress})
+	if err != nil {
+		return "", err
+	}
+	if rep.ServedSource == "" {
+		// The helper is not allowed to say yes without naming the address, and
+		// a client that accepted a blank one would bind nothing and serve other
+		// people's traffic through the tunnel under the upstream exit's
+		// address. Refused here so the failure is a failed connect rather than
+		// a false disclosure.
+		return "", errors.New("netd carved out served egress but named no source address")
+	}
+	return rep.ServedSource, nil
+}
+
+func (o *linuxOS) revokeServedEgress() {
+	o.silent(netdwire.VerbRevokeServedEgress, &netdwire.Request{})
+}
+
 // unixClose closes a raw descriptor we still own.
 func unixClose(fd int) {
 	if fd >= 0 {

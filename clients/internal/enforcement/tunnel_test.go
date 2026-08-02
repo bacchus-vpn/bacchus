@@ -120,6 +120,22 @@ func (f *fakeOS) captureDNS() error {
 
 func (f *fakeOS) releaseDNS() { f.rec("releaseDNS") }
 
+// servedSource is what allowServedEgress answers with. A fixed documentation
+// address rather than the fake gateway's, because the two are different things
+// — the gateway is the next hop, this is the machine's own address — and a fake
+// that conflated them would let a bug that returned the wrong one pass.
+const servedSource = "192.0.2.5"
+
+func (f *fakeOS) allowServedEgress() (string, error) {
+	f.rec("allowServedEgress")
+	if err := f.fail["allowServedEgress"]; err != nil {
+		return "", err
+	}
+	return servedSource, nil
+}
+
+func (f *fakeOS) revokeServedEgress() { f.rec("revokeServedEgress") }
+
 // indexOf returns the position of the first op with the given prefix, or -1.
 func indexOf(ops []string, prefix string) int {
 	for i, op := range ops {

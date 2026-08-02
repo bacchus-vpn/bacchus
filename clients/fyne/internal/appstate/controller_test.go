@@ -674,6 +674,14 @@ type fakeEnforcer struct {
 	// []error{errSomething} is "fail the first attempt, succeed after".
 	startErrs []error
 
+	// servesWhileRouted is what ServesWhileRouted answers, i.e. whether this
+	// fake platform can carve a served role's egress out of the tunnel
+	// (bacchus#109). The zero value is false — the safe answer, and the one a
+	// platform that has not built the carve-out gives — so every test written
+	// before #109 keeps the posture it was written against.
+	servesWhileRouted bool
+	servedSource      string
+
 	starts     int
 	recovers   int
 	policies   []enforcement.Policy
@@ -707,6 +715,18 @@ func (f *fakeEnforcer) ReserveUnderlay(addr string) {
 	f.mu.Lock()
 	f.reserved = append(f.reserved, addr)
 	f.mu.Unlock()
+}
+
+func (f *fakeEnforcer) ServesWhileRouted() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.servesWhileRouted
+}
+
+func (f *fakeEnforcer) ServedSource() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.servedSource
 }
 
 func (f *fakeEnforcer) startCount() int {
@@ -1113,7 +1133,7 @@ func TestEnforcementPolicyCarriesTheUsersConfiguration(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		enf := &fakeEnforcer{}
 		c := newEnforcedController(Config{Coordinators: []string{"127.0.0.1:9"}}, enf)
-		if _, err := c.startEnforcement(); err != nil {
+		if _, err := c.startEnforcement(false); err != nil {
 			t.Fatalf("startEnforcement: %v", err)
 		}
 		p, socksAddr := enf.lastPolicy(t)
@@ -1146,7 +1166,7 @@ func TestEnforcementPolicyCarriesTheUsersConfiguration(t *testing.T) {
 		var logged []string
 		c.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-		if _, err := c.startEnforcement(); err != nil {
+		if _, err := c.startEnforcement(false); err != nil {
 			t.Fatalf("startEnforcement: %v", err)
 		}
 		p, _ := enf.lastPolicy(t)

@@ -43,6 +43,12 @@ type tunnel struct {
 	policy      *bypassPolicy
 	excluder    *poolExcluder
 	killSwitch  bool
+
+	// servedSource is the local address a volunteered relay or exit's sockets
+	// bind so their traffic takes the carve-out (ADR-0053, bacchus#109), and
+	// "" when this session is not serving. Read by the Enforcer, which is what
+	// core.Config asks at dial time.
+	servedSource string
 }
 
 func (t *tunnel) log(format string, args ...any) {
@@ -271,6 +277,39 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 		}
 	}()
 
+	// Carve a volunteered relay or exit's own egress out of the tunnel, if this
+	// session is serving (ADR-0053, bacchus#109).
+	//
+	// The position is pinned from both sides. AFTER addSplitDefaultRoute,
+	// because the carve-out is an exception to that route and installing an
+	// exception to a route that does not exist yet is a rule with nothing to
+	// override. BEFORE the kill-switch, because the platform folds the served
+	// allowance into the same transaction that flips the default to Block — so
+	// there is never an instant where this machine is serving and its own
+	// lockdown is dropping what it serves. That also keeps enableKillSwitch the
+	// final osNet call of bring-up, which tunnel_test.go pins literally.
+	//
+	// A failure returns rather than degrades. Every other route mutator here is
+	// best-effort because a missing route fails safe — the dial loops into the
+	// tunnel or is blocked. This one is the exception in the exact way osnet.go
+	// describes: a missing carve-out does not block the served traffic, it
+	// sends it out through the tunnel under the upstream exit's address, while
+	// the settings window says it left under this machine's. Failing safe here
+	// means not connecting.
+	var servedSource string
+	if cfg.ServeEgress {
+		servedSource, err = osn.allowServedEgress()
+		if err != nil {
+			return nil, fmt.Errorf("carve served egress out of the tunnel: %w", err)
+		}
+		log("[tun] served egress carved out")
+		defer func() {
+			if !ok {
+				osn.revokeServedEgress()
+			}
+		}()
+	}
+
 	if cfg.KillSwitch {
 		// Nest the pool-allowlist arming inside the bypass arming so the pool's
 		// reserved underlays and the bypass dynamic set are both snapshotted
@@ -295,6 +334,7 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 	return &tunnel{
 		os: osn, logf: logf, dev: dev, nt: nt, gw: gw,
 		excludedIPs: excluded, policy: policy, excluder: pe, killSwitch: cfg.KillSwitch,
+		servedSource: servedSource,
 	}, nil
 }
 
@@ -318,6 +358,16 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 func (t *tunnel) Close() {
 	if t == nil {
 		return
+	}
+	// The served-egress carve-out goes first, before the lockdown is lifted.
+	// Either order restores the machine correctly — once the lockdown is gone
+	// everything is permitted anyway — but this one makes a stronger statement
+	// true: the carve-out never outlives the lockdown it was an exception to.
+	// That is the same rule the crash path follows for the same reason
+	// (ADR-0053 §5), and having both paths obey it means there is one sentence
+	// to check rather than two orders to reason about.
+	if t.servedSource != "" {
+		t.os.revokeServedEgress()
 	}
 	if t.killSwitch {
 		t.os.disableKillSwitch()

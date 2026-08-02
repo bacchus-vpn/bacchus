@@ -105,6 +105,18 @@ func (e *windowsEnforcer) ReserveUnderlay(addr string) {
 	pe.reserve(addr)
 }
 
+// ServesWhileRouted is false on Windows. routes_windows.go's allowServedEgress
+// carries the argument: the Linux mechanism's routing half has no Windows
+// equivalent, IP_UNICAST_IF is the lever that would, and bacchus#109's
+// traffic-level bar is not something the Windows CI job can reach. Returning
+// false keeps ErrVolunteerWhileRouted in force here rather than offering a
+// checkbox whose disclosure this platform cannot yet make true.
+func (e *windowsEnforcer) ServesWhileRouted() bool { return false }
+
+// ServedSource is therefore always empty: nothing can start a serving session
+// on this platform, so there is never a carve-out for core to bind to.
+func (e *windowsEnforcer) ServedSource() string { return "" }
+
 // Start brings up device-wide enforcement for one session.
 func (e *windowsEnforcer) Start(policy Policy, socksAddr string) (Session, error) {
 	e.setSink(policy.Logf)

@@ -72,18 +72,17 @@ import (
 )
 
 // ErrVolunteerWhileRouted refuses to serve from a build that routes the whole
-// device, which today means the one platform with an enforcement.Enforcer
-// (Windows, bacchus#59); [E9] macOS and [E10] Linux are proxy-only and can serve
-// now.
+// device AND cannot carve a served role's own egress back out of the tunnel it
+// installs. As of bacchus#109 those are two different questions, and until then
+// they were one.
 //
 // This is the refusal that is least obvious and matters most, so it is first.
 // When this client routes the device, it installs the OS default route into its
 // own TUN and — with the kill-switch armed — flips the outbound default to Block
 // behind an allowlist of the coordinators, STUN/TURN, the bypass list and the
-// tunnel adapter (clients/internal/enforcement/killswitch_windows.go). A relay
-// or exit role in that same process has its forwarding caught by exactly that
-// route. Two consequences, and both of them break a promise this feature's whole
-// point is to keep:
+// tunnel adapter. A relay or exit role in that same process has its forwarding
+// caught by exactly that route. Two consequences, and both of them break a
+// promise this feature's whole point is to keep:
 //
 //   - Other people's traffic would leave through this machine's own Bacchus
 //     connection and egress at the UPSTREAM exit's address, not at this
@@ -97,11 +96,20 @@ import (
 //     an exit and serve nobody — the exact silent under-registration cmd/node's
 //     validateVolunteer exists to refuse.
 //
-// So the honest answer is that this client can serve while it is a proxy and
-// cannot serve while it is the tunnel, and it says so instead of shipping a
-// toggle that quietly means something else. Making enforcement carve the served
-// roles' own egress out of the tunnel it installs is real work in
-// clients/internal/enforcement rather than a flag here.
+// # What changed, and what did not
+//
+// ADR-0053 makes both of those survivable ON LINUX: core binds a served role's
+// own sockets to this machine's address, and bacchus-netd routes that source
+// past the tunnel and allows it through the kill-switch. So the sentence below
+// is no longer true there, and this error is no longer reached.
+//
+// It is still reached on Windows, where the routing half has no equivalent —
+// Windows selects a route by destination and has no source-based rule layer to
+// add one to (clients/internal/enforcement/routes_windows.go). The refusal is
+// therefore keyed on what the platform can actually DO, not on whether it
+// routes the device, and a platform that cannot must keep refusing. Nothing
+// here relaxes on a promise: enforcement.Enforcer.ServesWhileRouted is the one
+// answer, both callers ask it, and false is what a new platform gets.
 var ErrVolunteerWhileRouted = errors.New("Volunteering cannot run while Bacchus routes this whole device. Other people's traffic would leave through your own Bacchus connection instead of under your own address, and an exit you advertised would be unreachable — so the donation would not be what it says it is.")
 
 // ErrVolunteerExitNeedsAddress is the exit opt-in with nothing to advertise.
@@ -250,8 +258,8 @@ func (p VolunteerPlan) Serving() bool {
 // Controller.connectAsync runs against whatever is on disk and which must keep
 // refusing — a hand-edited config saying "serve" on a build that routes the
 // device has to fail closed, not be quietly rewritten on the way to a connect.
-func ClearVolunteeringIfRouted(cfg Config, deviceRouted bool) (Config, bool) {
-	if !deviceRouted {
+func ClearVolunteeringIfRouted(cfg Config, routedWithoutCarveOut bool) (Config, bool) {
+	if !routedWithoutCarveOut {
 		return cfg, false
 	}
 	cleared := cfg.VolunteerRelay || cfg.VolunteerExit
@@ -262,11 +270,12 @@ func ClearVolunteeringIfRouted(cfg Config, deviceRouted bool) (Config, bool) {
 // PlanVolunteer validates cfg's four volunteer fields and returns what they
 // contribute to core.Config, or the first refusal.
 //
-// deviceRouted is Controller.DeviceEnforced() — whether this build routes the
-// whole device rather than only a SOCKS port. It is a parameter rather than
+// routedWithoutCarveOut is Controller.VolunteeringRefused() — whether this
+// build routes the whole device AND cannot carve a served role's egress back
+// out of the tunnel (bacchus#109, ADR-0053). It is a parameter rather than
 // something read from the platform here so this stays a pure function both
-// callers and a test can drive; see ErrVolunteerWhileRouted for why serving and
-// device-wide routing cannot both be true in one process.
+// callers and a test can drive; see ErrVolunteerWhileRouted for what the two
+// halves of that question are and why neither alone is the right one to ask.
 //
 // The zero Config plans exactly what this client did before #12: the client role
 // alone, no advertise, no key, no warnings, no error. That is the default path
@@ -276,7 +285,8 @@ func ClearVolunteeringIfRouted(cfg Config, deviceRouted bool) (Config, bool) {
 // It returns at most one error — the first, in the order below, matching
 // cmd/node's validateVolunteer — and any number of warnings:
 //
-//  1. either opt-in while this build routes the whole device
+//  1. either opt-in on a build that routes the device and cannot carve the
+//     served egress back out
 //  2. the exit opt-in with nothing to advertise
 //  3. the exit opt-in with an address no relay could dial
 //  4. the exit opt-in with no persistent identity key, or a malformed one
@@ -291,7 +301,7 @@ func ClearVolunteeringIfRouted(cfg Config, deviceRouted bool) (Config, bool) {
 // listener, no port forwarding and no stable identity; carrying somebody's
 // middle hop needs a publicly reachable ingress, and offering that here would
 // put an exit's setup burden back onto the relay-only choice.
-func PlanVolunteer(cfg Config, deviceRouted bool) (VolunteerPlan, error) {
+func PlanVolunteer(cfg Config, routedWithoutCarveOut bool) (VolunteerPlan, error) {
 	plan := VolunteerPlan{Roles: []string{core.RoleClient}}
 	if cfg.VolunteerRelay {
 		plan.Roles = append(plan.Roles, core.RoleRelay)
@@ -302,7 +312,7 @@ func PlanVolunteer(cfg Config, deviceRouted bool) (VolunteerPlan, error) {
 	if !plan.Serving() {
 		return plan, nil
 	}
-	if deviceRouted {
+	if routedWithoutCarveOut {
 		return VolunteerPlan{}, ErrVolunteerWhileRouted
 	}
 	if !cfg.VolunteerExit {

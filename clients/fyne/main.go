@@ -118,7 +118,7 @@ func main() {
 		cfgPath = path
 	}
 	settingsItem := fyne.NewMenuItem(lang.L("Settings…"), func() {
-		showSettings(a, cfg, cfgPath, ctrl.DeviceEnforced(), onConfigSaved)
+		showSettings(a, cfg, cfgPath, ctrl.DeviceEnforced(), ctrl.VolunteeringRefused(), onConfigSaved)
 	})
 	w.SetMainMenu(fyne.NewMainMenu(fyne.NewMenu(lang.L("File"), settingsItem)))
 

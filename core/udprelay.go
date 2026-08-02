@@ -97,7 +97,10 @@ func (e *Engine) exitTerminateUDP(sid string, pace *capacity.Limiter, nc *noiseC
 	if err != nil {
 		return
 	}
-	conn, err := net.DialUDP("udp", nil, raddr)
+	// Served, like the TCP egress beside it (issue #109): this is other
+	// people's traffic leaving under this operator's address, and on a machine
+	// that also routes itself the socket has to say so.
+	conn, err := e.dialServedUDP(raddr)
 	if err != nil {
 		return
 	}

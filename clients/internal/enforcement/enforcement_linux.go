@@ -101,6 +101,12 @@ type linuxEnforcer struct {
 	mu sync.Mutex
 	pe *poolExcluder
 
+	// servedSrc is the current serving session's carve-out source, guarded by
+	// mu and read from core's dial path (ServedSource). Held on the enforcer
+	// rather than the session because that is where core.Config's hook is
+	// wired, one connect earlier than any session exists.
+	servedSrc string
+
 	// logMu guards sink alone, deliberately separate from mu. linuxOS calls
 	// logf from silent-method failure paths, which run on the dial path and on
 	// background gateway refreshes; taking the same lock those paths might hold
@@ -187,7 +193,22 @@ func (e *linuxEnforcer) Start(policy Policy, socksAddr string) (Session, error) 
 		e.os.close()
 		return nil, err
 	}
+	e.mu.Lock()
+	e.servedSrc = t.servedSource
+	e.mu.Unlock()
 	return &linuxSession{enf: e, t: t, pe: pe}, nil
+}
+
+// ServesWhileRouted is true on Linux as of bacchus#109: ADR-0053's carve-out is
+// a fib rule and an nftables allowance, both installed by bacchus-netd from
+// values it derives itself, and the helper's protocol version gates a client
+// that expects them against one that cannot do them.
+func (e *linuxEnforcer) ServesWhileRouted() bool { return true }
+
+func (e *linuxEnforcer) ServedSource() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.servedSrc
 }
 
 type linuxSession struct {
@@ -215,6 +236,11 @@ func (s *linuxSession) Close() {
 		if s.enf.pe == s.pe {
 			s.enf.pe = nil
 		}
+		// Cleared unconditionally, unlike the excluder above: a stale source
+		// here would have core bind an address whose carve-out no longer
+		// exists, which is the failure this whole change is about, one
+		// disconnect late.
+		s.enf.servedSrc = ""
 		s.enf.mu.Unlock()
 	})
 }
