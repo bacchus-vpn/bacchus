@@ -160,17 +160,48 @@ func (r *stateRecorder) next(t *testing.T, timeout time.Duration) ConnState {
 // exit-role core.Engine, both on loopback, with the exit stopped on cleanup.
 // It returns both because a test that wants a genuine ICE drop kills the exit
 // by hand.
-func startLoopbackExit(t *testing.T) (*fakeCoordinator, *core.Engine) {
+//
+// # turnAddr, and why the enforced path needs it on Windows
+//
+// Callers that leave turnAddr empty get an exit with no STUN and no TURN, which
+// gathers HOST candidates. pion excludes loopback from host gathering by
+// default and nothing here calls SetIncludeLoopbackCandidate, so those
+// candidates carry the machine's real interface addresses.
+//
+// That is fine while the other side also has host candidates. It is not fine on
+// the enforced path, where the client is relay-ONLY: connectAsync sets
+// ForceRelay whenever an Enforcer exists, so the client's only candidate is the
+// TURN allocation at 127.0.0.1. The connectivity check then runs from a socket
+// bound to a real interface TO loopback — which Linux delivers and **Windows
+// does not**, because Windows will not carry a datagram from a non-loopback
+// socket to 127.0.0.1. The symptom is ICE sitting in `checking` until the
+// transport gives up, on Windows only, with every assertion here otherwise
+// sound.
+//
+// Passing turnAddr puts the exit on the same TURN server and makes it
+// relay-only too. Then neither side ever asks an interface-bound socket to
+// reach loopback: both talk to the TURN server from unspecified-bound sockets,
+// and relaying between the two allocations is internal to that server. The
+// three callers that pass nothing keep exactly today's behaviour.
+func startLoopbackExit(t *testing.T, turnAddr ...string) (*fakeCoordinator, *core.Engine) {
 	t.Helper()
 	coord := newFakeCoordinator(t)
 
-	exitEng, err := core.New(core.Config{
+	cfg := core.Config{
 		Coordinators: []string{coord.addr()},
 		Roles:        []string{core.RoleExit},
 		ListenAddr:   "127.0.0.1:0",
 		Advertise:    "127.0.0.1:1", // unused in direct mode; New only requires it non-empty
 		Country:      "zz",
-	})
+	}
+	if len(turnAddr) > 0 && turnAddr[0] != "" {
+		cfg.TURNURL = "turn:" + turnAddr[0]
+		cfg.TURNUser = turnTestUser
+		cfg.TURNPass = turnTestPass
+		cfg.ForceRelay = true
+	}
+
+	exitEng, err := core.New(cfg)
 	if err != nil {
 		t.Fatalf("exit New: %v", err)
 	}
@@ -821,10 +852,13 @@ func startLoopbackTURN(t *testing.T) string {
 // (see SocksAddr) and a test that left it held would fail the next one.
 func enforcedRig(t *testing.T, enf enforcement.Enforcer) (*Controller, *stateRecorder) {
 	t.Helper()
-	coord, _ := startLoopbackExit(t)
+	// One TURN server for both ends. The exit has to be on it too, or the
+	// enforced path cannot connect on Windows — see startLoopbackExit's doc.
+	turnAddr := startLoopbackTURN(t)
+	coord, _ := startLoopbackExit(t, turnAddr)
 	ctrl := newEnforcedController(Config{
 		Coordinators: []string{coord.addr()},
-		TURN:         "turn:" + startLoopbackTURN(t),
+		TURN:         "turn:" + turnAddr,
 		TURNUser:     turnTestUser,
 		TURNPass:     turnTestPass,
 	}, enf)
