@@ -550,3 +550,66 @@ it arm?" check passes — an `rt_protocol` id that collided with `RTPROT_BGP`, a
 a buffer-aliasing bug that corrupted any netlink dump spanning more than one
 datagram. That is the verification §"How #37 gets tested" promised, and it is
 verification bacchus#59 never had.
+
+## Amendment (2026-08-02): §3.1's session check, and DNS (#104, #111)
+
+**DNS is now answered.** The primitive this record identified and deliberately
+left open is decided in ADR-0051, which also corrects the reason recorded above.
+The `127.0.0.53` analysis is right about the first hop and incomplete about the
+second: resolved's own upstream query does not fall into the tunnel behind the
+stub either, because that socket is scoped to its link and link scoping
+overrides the routing table. Measured. The practical consequence is that this
+record's phrasing — "an nftables redirect of loopback-stub traffic" as a
+plausible implementation — describes something that does not work; ADR-0051 §"The
+measurement" has the numbers. What survives intact is the claim this record
+actually staked: that `osNet` was short exactly one method, and that its
+three-way distribution across Windows and macOS was the reason not to fold it
+into #37.
+
+**§3.1 said less than the code does, and #111 is the correction.**
+`uidHasActiveSession` accepts logind's `online` as well as `active`, where §3.1
+says only "the peer's uid must own an active local session (logind seat)". The
+code is right and this record was wrong; the words are amended rather than the
+gate narrowed, and the reason is worth stating because the card's own premise
+did not survive checking.
+
+#111 supposed `online` was the state admitting a seatless SSH login. It is not.
+For a uid, logind reports `active` when it owns at least one session that is its
+seat's foreground session **or has no seat at all** — a session with no seat is
+unconditionally active. So a plain SSH login, and a cron job, already arrive as
+`active`. Narrowing this gate to `active` would not have excluded a single
+remote login. What it would have excluded is the case `online` exists for: a
+local user at a seat who has been switched away from, by fast user switching or
+a VT switch. Their session stops being their seat's foreground session and the
+uid drops to `online` while they remain logged in at the machine. Refusing that
+would tear down a live tunnel because somebody else took the console.
+
+Three things follow, and all three are now in the code:
+
+1. **`online` stays, with the reason stated** where previously only the
+   exclusions carried one.
+2. **The exclusions' stated reason was wrong** and is corrected. `lingering` and
+   `closing` were excluded here because "a lingering user has no seat, which is
+   the whole point of asking" — but seats are not what separates them.
+   `lingering` is a uid that is *not logged in* with user services still
+   running; `closing` is one that is *not logged in* with processes winding
+   down. Presence is the discriminator, not seats.
+3. **§3.1's parenthetical "(logind seat)" is withdrawn.** This gate does not
+   assert a seat and cannot: neither state it accepts implies one. The question
+   it actually answers is *is this uid logged in on this machine right now, as
+   opposed to lingering, closing, or gone*. If a seat is ever genuinely
+   required — to exclude remote logins from device-wide enforcement, which is a
+   real question this record never asked — the primitive is logind's `SEATS=`
+   field, not `STATE=`, and it deserves its own card rather than being smuggled
+   in as a tightening of this one.
+
+A locked screen is unaffected either way: logind's state computation does not
+consult `LockedHint`, so a locked desktop session stays `active`. Multi-seat is
+unaffected too, since each seat has its own foreground session and both uids
+read `active`.
+
+One consequence for §4 is recorded in ADR-0051 §3 rather than here: the helper
+now links a D-Bus client, so `uidHasActiveSession`'s comment no longer justifies
+its file read by the cost of that dependency. The file read stays, for the
+reason that survives — it is on the connection-accept path, where a file read
+cannot block on a bus that is starting or wedged.

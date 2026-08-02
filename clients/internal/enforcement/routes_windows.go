@@ -284,3 +284,29 @@ func (o *winOS) enablePhysicalIPv6(ifAlias string) {
 	_, _ = o.runPS(fmt.Sprintf(
 		`Enable-NetAdapterBinding -InterfaceAlias "%s" -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue`, ifAlias))
 }
+
+// captureDNS does nothing on Windows, and the nothing is the answer rather
+// than a gap waiting to be filled.
+//
+// A Windows resolver's servers are ordinary routable addresses — whatever DHCP
+// or the adapter's static configuration supplied. A query to one of them is an
+// ordinary packet to an ordinary destination, so it meets the split-default
+// route addSplitDefaultRoute installed, enters the TUN, and is intercepted
+// portably by tun2socks.go's handleDNSUDP along with everything else. There is
+// no local stub listener in the path and nothing on loopback to capture.
+//
+// This is exactly why bacchus#104 exists as a Linux card. systemd-resolved puts
+// a stub on 127.0.0.53, and the kernel consults the `local` table before any
+// route, so no split-default can reach it; that platform needs a mechanism
+// (ADR-0051) and this one does not. Adding a Windows implementation "for
+// symmetry" would mean reconfiguring a resolver that is already pointed
+// somewhere the tunnel sees, which can only make it worse.
+//
+// Windows does have its own DNS-capture question, and it is a different one:
+// DNS-over-HTTPS configured in the OS or in a browser bypasses UDP/53 on every
+// platform, and neither this method nor the interceptor addresses it. That is
+// out of scope here for the same reason it is on Linux — see ADR-0051's
+// "What this does not capture".
+func (o *winOS) captureDNS() error { return nil }
+
+func (o *winOS) releaseDNS() {}

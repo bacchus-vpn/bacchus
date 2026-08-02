@@ -6,6 +6,7 @@ require (
 	fyne.io/fyne/v2 v2.8.0
 	github.com/flynn/noise v1.1.0
 	github.com/getlantern/systray v1.2.2
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/lxn/walk v0.0.0-20210112085537-c389da54e794
 	github.com/pion/dtls/v3 v3.1.4
 	github.com/pion/ice/v4 v4.2.7
@@ -46,7 +47,6 @@ require (
 	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/go-text/render v0.2.1 // indirect
 	github.com/go-text/typesetting v0.3.4 // indirect
-	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/btree v1.1.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hack-pad/go-indexeddb v0.3.2 // indirect

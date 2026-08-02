@@ -661,21 +661,48 @@ refuses the connection outright rather than negotiating down to a subset; a
 client that silently lost its kill-switch to a version skew is the same failure
 wearing different clothes.
 
-### DNS is not finished here (issue #104)
+### What happens to DNS
 
-One field in that window carries an exception, and the window now says so next
-to it. DNS is intercepted inside the tunnel, which works for any program that
-queries a routable DNS server. It does **not** work for `systemd-resolved` — the
-default on Ubuntu, Fedora and Debian — whose stub listens on `127.0.0.53`. That
-is loopback, the kernel consults the `local` routing table before anything else,
-and no route Bacchus installs can override `127.0.0.0/8`. Those queries never
-reach the tunnel.
+DNS is intercepted inside the tunnel, which is enough on its own for any program
+that queries a routable DNS server. It is not enough for `systemd-resolved` —
+the default on Ubuntu, Fedora and Debian — and on those machines `bacchus-netd`
+does one extra thing while the tunnel is up.
 
-With the kill-switch armed they are dropped (there is deliberately no
-plaintext-DNS allowance), so the machine has a tunnel and no working DNS. With
-it off, they leave in the clear. Closing this needs a new primitive on the shared
-`osNet` interface that Windows and macOS also implement, which is why it is its
-own card rather than part of this one.
+The reason is worth knowing if you are debugging it. resolved's stub listens on
+`127.0.0.53`, which is loopback, and the kernel consults the `local` routing
+table before anything else, so no route can capture a query aimed at it. Nor
+does resolved's own upstream query fall into the tunnel behind it: that socket
+is scoped to the link its DNS server belongs to, and link scoping overrides the
+routing table outright. Neither hop is reachable by routing, which is why this
+takes a mechanism rather than another route.
+
+So while connected, the helper gives the tunnel interface its own DNS server and
+a `~.` routing domain, and clears the physical link's default-route flag. You
+can see both, and confirm the tunnel is winning:
+
+```bash
+resolvectl status                 # the tunnel link should show DNS Domain: ~.
+resolvectl status <your-wifi>     # Default Route: no, while connected
+```
+
+The physical link keeps its own DNS servers and its own search domains, so a
+corporate or LAN-local name that only that link can resolve still resolves.
+
+**It is put back when the tunnel goes down** — on a clean disconnect, and also
+if `bacchus-fyne` is killed outright. The helper notices the dropped connection
+and restores the resolver itself. This is the one piece of state it does *not*
+hold across a crash: the kill-switch is held deliberately, because holding it
+fails closed, whereas a resolver still pointed into a dead tunnel just leaves
+the machine unable to resolve anything. If you ever find one that was not
+restored — the helper was killed with `SIGKILL` at the wrong moment, say —
+`resolvectl revert <link>` on each link puts it back, and so does a reboot.
+
+On a machine with no `systemd-resolved`, the helper rewrites `/etc/resolv.conf`
+instead and restores it the same way, symlink and all.
+
+ADR-0051 has the measurements this is built on, including why an nftables
+redirect and a `resolv.conf` rewrite alone were both ruled out on a resolved
+machine.
 
 ### If something goes wrong
 

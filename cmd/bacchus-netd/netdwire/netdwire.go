@@ -110,6 +110,21 @@ const (
 	VerbDisableKillSwitch    Verb = "disable-kill-switch"
 	VerbRecoverKillSwitch    Verb = "recover-kill-switch"
 	VerbRefreshAllowIP       Verb = "refresh-kill-switch-allow-ip"
+
+	// VerbCaptureDNS points the machine's resolver at the tunnel; VerbReleaseDNS
+	// puts it back (ADR-0051). Both carry no fields beyond the token: the helper
+	// derives the address it points the resolver at from the TUN it created, so
+	// no interface name, unit name or file path crosses inward for this.
+	//
+	// Note these are additions to the verb SET, not to Request. That matters
+	// for skew in a way the reverse would not: ReadRequest decodes with unknown
+	// fields refused, so a new field would be a hard parse failure against an
+	// old helper, while a new verb is a clean CodeUnknownVerb. Neither can
+	// actually be reached, because Version is compared for equality at Open and
+	// an old helper refuses the session outright — but the protocol degrades
+	// legibly rather than confusingly if that ever changes.
+	VerbCaptureDNS Verb = "capture-dns"
+	VerbReleaseDNS Verb = "release-dns"
 )
 
 // Error codes. These are part of the protocol rather than free text because

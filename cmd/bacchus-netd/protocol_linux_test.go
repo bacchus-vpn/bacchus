@@ -16,6 +16,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -33,23 +34,82 @@ func startHelper(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	h := newHelper(func(f string, a ...any) { t.Logf("[netd] "+f, a...) }, true)
+	sink := &helperLog{t: t}
+	h := newHelper(sink.logf, true)
 	// Inside the namespace this process is uid 0, which owns no logind session
 	// on the host, so the real check would refuse every connection and none of
 	// the refusals below would ever be reached. The gate's own behaviour is
 	// asserted against the real function in TestRefusesAPeerWithNoActiveSession.
 	h.sessionCheck = func(uint32) (bool, error) { return true, nil }
+
+	// The WaitGroup covers the accept loop AND every connection it hands to
+	// serve. Closing the listener only stops the former; a serve still draining
+	// its client outlives it, and serve's disconnect path logs.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			c, err := ln.AcceptUnix()
 			if err != nil {
 				return
 			}
-			go h.serve(c)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				h.serve(c)
+			}()
 		}
 	}()
-	t.Cleanup(func() { ln.Close() })
+
+	// Most tests here end with a session still open, so the closing of the
+	// client connection is what tells the helper the client is gone — and
+	// clientGone logs. That log races the end of the test whose *testing.T it
+	// writes to, and one that lands after the test has returned does not fail a
+	// test, it panics the whole package ("Log in goroutine after Test... has
+	// completed"). Rare, timing-dependent, and it took down a whole -race run
+	// on main once.
+	//
+	// So: disarm the sink first, so a line already in flight is dropped rather
+	// than written; then stop accepting; then wait for the goroutines to be
+	// gone, which is also what keeps this from leaking one per test.
+	//
+	// Waiting is safe because cleanups run last-registered-first and a dial can
+	// only happen after the startHelper that gave it a path — so dialHelper's
+	// Close always runs before this one, and every serve is already unblocked
+	// by the time Wait is reached.
+	t.Cleanup(func() {
+		sink.stop()
+		ln.Close()
+		wg.Wait()
+	})
 	return path
+}
+
+// helperLog is the log sink handed to a helper under test, in place of t.Logf
+// directly. The helper is free to log right up to the moment its test tears it
+// down and not one line further: stop() makes everything after it a no-op, and
+// because it takes the same lock logf holds across the t.Logf call, it also
+// waits out a line already being written.
+type helperLog struct {
+	mu   sync.Mutex
+	done bool
+	t    *testing.T
+}
+
+func (l *helperLog) logf(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done {
+		return
+	}
+	l.t.Logf("[netd] "+format, args...)
+}
+
+func (l *helperLog) stop() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.done = true
 }
 
 func dialHelper(t *testing.T, path string) *net.UnixConn {

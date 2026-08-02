@@ -113,6 +113,13 @@ func (f *fakeOS) disableKillSwitch()                 { f.rec("disableKillSwitch"
 func (f *fakeOS) recoverKillSwitch()                 { f.rec("recoverKillSwitch") }
 func (f *fakeOS) refreshKillSwitchAllowIP(ip string) { f.rec("refreshAllow " + ip) }
 
+func (f *fakeOS) captureDNS() error {
+	f.rec("captureDNS")
+	return f.fail["captureDNS"]
+}
+
+func (f *fakeOS) releaseDNS() { f.rec("releaseDNS") }
+
 // indexOf returns the position of the first op with the given prefix, or -1.
 func indexOf(ops []string, prefix string) int {
 	for i, op := range ops {
@@ -242,6 +249,114 @@ func TestFailedBringUpOrphansNothing(t *testing.T) {
 	if indexOf(ops, "enableKillSwitch") >= 0 {
 		t.Errorf("the kill-switch was armed even though bring-up failed — that is a machine left fail-closed with no tunnel\nsequence: %v", ops)
 	}
+}
+
+// TestBringUpCapturesDNSAfterTheNetstackAndBeforeTheKillSwitch pins the two
+// constraints that fix where DNS capture sits in the sequence (bacchus#104).
+//
+// After the netstack, because capture redirects the machine's queries into the
+// TUN and until the netstack is reading that device there is nothing to answer
+// them — a window with no DNS, created by the step whose purpose is DNS.
+// Before the kill-switch, because the kill-switch is armed last and stays
+// last; a capture after it would be the first operation to run against an
+// already fail-closed machine.
+func TestBringUpCapturesDNSAfterTheNetstackAndBeforeTheKillSwitch(t *testing.T) {
+	f := newFakeOS()
+	tn, err := startForTest(t, f, testPolicy(true, BypassModeExclude, nil))
+	if err != nil {
+		t.Fatalf("startTunnel: %v", err)
+	}
+	t.Cleanup(tn.Close)
+
+	ops := f.seq()
+	if indexOf(ops, "captureDNS") < 0 {
+		t.Fatalf("DNS was never captured; sequence: %v", ops)
+	}
+	mustBefore(t, ops, "createTUN", "captureDNS",
+		"the resolver is pointed at a device that has to exist first")
+	mustBefore(t, ops, "splitDefault", "captureDNS",
+		"capture happens once the tunnel is actually carrying traffic, not before")
+	mustBefore(t, ops, "captureDNS", "enableKillSwitch",
+		"the kill-switch is armed last; a capture after it runs on a fail-closed machine")
+}
+
+// TestFailedDNSCaptureUnwindsBringUp is the fail-closed half of osnet.go's
+// error/no-error split, for the method this change adds.
+//
+// A capture that fails is not a tunnel with a cosmetic flaw. On a
+// systemd-resolved machine it is a tunnel whose queries either leave in the
+// clear or are dropped by the lockdown, and reporting Protected over either is
+// ADR-0039 parity item 7's "silently degrading to unprotected". So bring-up has
+// to fail, and fail without orphaning anything.
+func TestFailedDNSCaptureUnwindsBringUp(t *testing.T) {
+	f := newFakeOS()
+	f.fail["captureDNS"] = errors.New("simulated resolver failure")
+
+	_, err := startForTest(t, f, testPolicy(true, BypassModeExclude, []string{"198.51.100.0/24"}))
+	if err == nil {
+		t.Fatal("startTunnel succeeded despite DNS capture failing — the client would report Protected over a resolver that is not")
+	}
+
+	ops := f.seq()
+	if indexOf(ops, "enableKillSwitch") >= 0 {
+		t.Errorf("the kill-switch was armed even though DNS capture failed\nsequence: %v", ops)
+	}
+	for _, prefix := range []string{"192.0.2.10", "198.51.100.0/24"} {
+		if indexOf(ops, "remove "+prefix) < 0 {
+			t.Errorf("route for %s was installed but never removed after DNS capture failed\nsequence: %v", prefix, ops)
+		}
+	}
+	if !f.dev.isClosed() {
+		t.Error("the TUN device was left open after DNS capture failed")
+	}
+	if indexOf(ops, "enableIPv6") < 0 {
+		t.Errorf("IPv6 was never re-enabled after DNS capture failed\nsequence: %v", ops)
+	}
+}
+
+// TestBringUpFailingAfterDNSCaptureReleasesIt covers the reverse-every-step
+// rule for the one step whose reversal is not a route removal. A capture that
+// succeeded and was then abandoned by a later failure leaves the machine's
+// resolver pointed into a tunnel that is being torn down — the exact state
+// ADR-0051 §4 says is worse than the leak it replaced.
+func TestBringUpFailingAfterDNSCaptureReleasesIt(t *testing.T) {
+	f := newFakeOS()
+	f.fail["enableKillSwitch"] = errors.New("simulated lockdown failure")
+
+	_, err := startForTest(t, f, testPolicy(true, BypassModeExclude, nil))
+	if err == nil {
+		t.Fatal("startTunnel succeeded despite the kill-switch failing to arm")
+	}
+
+	ops := f.seq()
+	if indexOf(ops, "captureDNS") < 0 {
+		t.Fatalf("DNS was never captured, so this test is not exercising what it claims; sequence: %v", ops)
+	}
+	if indexOf(ops, "releaseDNS") < 0 {
+		t.Errorf("DNS was captured and never released after a later step failed — the resolver is left pointing into a dismantled tunnel\nsequence: %v", ops)
+	}
+}
+
+// TestCloseReleasesDNSOnceEgressIsBack is the teardown counterpart. The
+// resolver has to be handed back, and handed back while the machine can still
+// reach the network, so it is never simultaneously able to resolve and pointed
+// somewhere that no longer resolves.
+func TestCloseReleasesDNSOnceEgressIsBack(t *testing.T) {
+	f := newFakeOS()
+	tn, err := startForTest(t, f, testPolicy(true, BypassModeExclude, nil))
+	if err != nil {
+		t.Fatalf("startTunnel: %v", err)
+	}
+	tn.Close()
+
+	ops := f.seq()
+	if indexOf(ops, "releaseDNS") < 0 {
+		t.Fatalf("Close never released DNS; sequence: %v", ops)
+	}
+	mustBefore(t, ops, "disableKillSwitch", "releaseDNS",
+		"handing the resolver back before egress is restored points it at a network that is still locked down")
+	mustBefore(t, ops, "releaseDNS", "remove",
+		"the resolver goes back before the routes it was resolving through are pulled")
 }
 
 // TestIncludeModeNeverInstallsASplitDefault is issue #64, which is the bug
