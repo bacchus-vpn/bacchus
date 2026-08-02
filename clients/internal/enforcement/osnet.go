@@ -2,7 +2,7 @@
 //
 // tunnel.go's bring-up/teardown sequencing, poolroutes.go's underlay-exclusion
 // state machine, splittunnel.go's matching and tun2socks.go's netstack bridge
-// are all platform-independent — 1,317 of the 1,969 lines clients/windows
+// are all platform-independent — 1,317 of the 1,969 lines the Windows client
 // carried, per ADR-0039's 2026-07-28 file-by-file costing. What is not
 // portable is the handful of primitives underneath them: read the default
 // route, add/remove a route, create a TUN device, block IPv6 on the physical
@@ -66,10 +66,10 @@ type gatewayInfo struct {
 }
 
 // osNet is one platform's implementation of the primitives above. Every
-// method keeps the exact name, signature and failure posture the
-// clients/windows free function it came from had, so tunnel.go's sequencing
-// reads the same after re-pointing as before it — the seam moved, the
-// ordering did not.
+// method keeps the exact name, signature and failure posture the Windows
+// client's free function it came from had, so tunnel.go's sequencing reads
+// the same after re-pointing as before it — the seam moved, the ordering did
+// not.
 //
 // Note which methods return an error and which do not: that split is load
 // bearing and was inherited deliberately rather than tidied. The route

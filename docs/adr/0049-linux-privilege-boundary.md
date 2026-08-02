@@ -328,7 +328,7 @@ traffic?"* — a question this design never asks.
 
 Per-app split tunnelling is not an open question either. ADR-0025 ruled it out in its
 Consequences, on `old #40`'s own scope cut, consistent with ADR-0011's narrow-v1 stance;
-`clients/windows/README.md` states the same limitation to users. Nothing in #37 reopens
+`clients/fyne/README.md` states the same limitation to users. Nothing in #37 reopens
 it, and #37 is not the place it would be reopened.
 
 So what remains on Linux is not a mechanism choice. It is three `osNet` methods —

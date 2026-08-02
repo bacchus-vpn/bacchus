@@ -424,7 +424,7 @@ func TestLoadRelayDirectoryDecodesTheSignedPair(t *testing.T) {
 // TestNewConfigFieldsUseTheWalkClient'sJSONKeys — the two clients read each
 // other's documentation and their config files are compared by hand; a key
 // that differs by a letter is a setting that silently does not load. These are
-// asserted against literal strings rather than against clients/windows's
+// asserted against literal strings rather than against the Windows tray client's
 // struct, which is package main behind a windows build tag and importable from
 // nowhere.
 //

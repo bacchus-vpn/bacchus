@@ -10,7 +10,7 @@
 // here, and settings.go is left as wiring over it.
 //
 // Each function mirrors a same-named unexported one in
-// clients/windows/settings.go, which #93 names as the reference for what every
+// the retired Windows client's settings.go, which #93 names as the reference for what every
 // control is and what it validates. They are duplicated rather than shared
 // because that file is package main behind a `windows` build tag and so is
 // importable from nowhere — the same constraint clients/internal/enforcement's
@@ -36,7 +36,7 @@ import (
 // allowedPoolTransports is the set safe to actually enable for this client's
 // pool; knownPoolTransports is every transport the ladder UI displays, in its
 // default order. Two lists rather than one for the reason
-// clients/windows/settings.go gives: a future transport can appear in the UI
+// the retired Windows client's settings.go gives: a future transport can appear in the UI
 // before it is proven tunnel-safe to enable.
 //
 // Both entries qualify today, but by two different routes, and the difference
@@ -81,7 +81,7 @@ var ErrAdmissionConfig = errors.New("revocation list path requires the admission
 // offers nothing above core.RelayHopsMax; core.New's own construction-time
 // refusal is still what enforces the ceiling for real, exactly as it does for
 // every other path to Config.RelayHops. Mirrors normalizeRelayHops in
-// clients/windows/settings.go.
+// the retired Windows client's settings.go.
 func NormalizeRelayHops(hops int) int {
 	if hops < 1 {
 		return 1
@@ -131,7 +131,7 @@ func ParseRelayHops(s string) int {
 // inputs first and returns the trimmed values, so the caller persists what was
 // actually validated rather than the raw widget text — otherwise a whitespace-
 // only key paired with a real path passes this check and fails later inside
-// core instead. Mirrors validateRelayChainConfig in clients/windows/settings.go.
+// core instead. Mirrors validateRelayChainConfig in the retired Windows client's settings.go.
 func ValidateRelayChainConfig(hops int, dirPath, dirKey string) (trimmedPath, trimmedKey string, err error) {
 	dirPath = strings.TrimSpace(dirPath)
 	dirKey = strings.TrimSpace(dirKey)
@@ -151,7 +151,7 @@ func ValidateRelayChainConfig(hops int, dirPath, dirKey string) (trimmedPath, tr
 // whitespace-only pubkey paired with a real crlPath passes this check and only
 // core's trim-then-reject turns it into a raw "requires AdmissionPubKey" error
 // from a field the user never got a chance to fix. Mirrors
-// validateAdmissionConfig in clients/windows/settings.go.
+// validateAdmissionConfig in the retired Windows client's settings.go.
 func ValidateAdmissionConfig(pubKey, crlPath string) (trimmedPubKey, trimmedCRLPath string, err error) {
 	pubKey = strings.TrimSpace(pubKey)
 	crlPath = strings.TrimSpace(crlPath)
@@ -166,7 +166,7 @@ func ValidateAdmissionConfig(pubKey, crlPath string) (trimmedPubKey, trimmedCRLP
 // Applied both when the settings window saves the ladder and again in
 // Controller.connectAsync before core.Config is built, so a hand-edited config
 // file cannot smuggle an unsafe transport into the pool either. Mirrors
-// sanitizePoolOrder in clients/windows/settings.go.
+// sanitizePoolOrder in the retired Windows client's settings.go.
 func SanitizePoolOrder(order []string) []string {
 	allowed := map[string]bool{}
 	for _, t := range allowedPoolTransports {
@@ -188,7 +188,7 @@ func SanitizePoolOrder(order []string) []string {
 // followed by any knownPoolTransports entries it is missing, so a
 // never-configured or partially-configured ladder still shows every transport
 // the control knows about in a stable default order. Mirrors
-// ladderDisplayOrder in clients/windows/settings.go.
+// ladderDisplayOrder in the retired Windows client's settings.go.
 func LadderDisplayOrder(saved []string) []string {
 	out := append([]string(nil), saved...)
 	have := map[string]bool{}
@@ -208,7 +208,7 @@ func LadderDisplayOrder(saved []string) []string {
 // move that would run off either end, returns order unchanged: reordering a
 // ladder is always a swap with an adjacent element, never a wrap-around or a
 // clamp-and-move-to-the-end, so repeated clicks at an edge are inert rather
-// than surprising. Mirrors moveLadderItem in clients/windows/settings.go.
+// than surprising. Mirrors moveLadderItem in the retired Windows client's settings.go.
 func MoveLadderItem(order []string, idx, dir int) []string {
 	out := append([]string(nil), order...)
 	j := idx + dir
@@ -225,7 +225,7 @@ func MoveLadderItem(order []string, idx, dir int) []string {
 // from disk for the overwhelmingly common case.
 //
 // Called from Controller.connectAsync before core.New, mirroring the same load
-// in clients/windows's connect() and cmd/node's own -relay-directory handling,
+// in the Windows tray client's connect() and cmd/node's own -relay-directory handling,
 // and for the same reason: a missing file or a non-hex key fails here, named,
 // rather than surfacing later as core's "relay chaining needs a signed relay
 // directory" from a field the user cannot tell was the cause. The directory is

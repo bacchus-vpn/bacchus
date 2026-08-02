@@ -643,7 +643,7 @@ func TestStaleEngineEventsAreDropped(t *testing.T) {
 // --- the enforced connect path (issue #112) -------------------------------
 //
 // Everything below drives a Controller that HAS an Enforcer, which is what
-// clients/windows has had since bacchus#59 and what Linux gained in
+// the Windows tray client had from bacchus#59 and what Linux gained in
 // bacchus#37. The Enforcer is a fake (fakeEnforcer), so nothing below the seam
 // is checked here — see newEnforcedController for the full statement of what
 // that costs and where the other half is covered.

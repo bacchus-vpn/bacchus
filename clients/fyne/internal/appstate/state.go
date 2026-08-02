@@ -48,7 +48,7 @@ const (
 // there. The one transition with no such call is a live path dying (or
 // recovering) underneath an already-established session, which is only
 // observable from the ICE event stream, so that is all this function
-// handles. Mirrors eventStatus's ICE branch (clients/windows/main.go)
+// handles. Mirrors eventStatus's ICE branch (the retired Windows client's main.go)
 // exactly, typed as a state instead of a status string.
 func StateFor(cur ConnState, ev core.Event) ConnState {
 	if ev.Kind != core.EventICE || (cur != Protected && cur != Blocked) {
@@ -65,13 +65,13 @@ func StateFor(cur ConnState, ev core.Event) ConnState {
 
 // DetailFor decides whether ev should update the small secondary detail line
 // beneath the headline state, and with what text. Mirrors eventStatus's own
-// show/suppress rules (clients/windows/main.go): an error always surfaces,
+// show/suppress rules (the retired Windows client's main.go): an error always surfaces,
 // since no client-role error source fires once a session is protected; info
 // narrates the connect attempt and only matters pre-protected; ICE detail is
 // redundant with the headline state itself once protected, so it is never
 // separately shown. EventSession/EventConnected are plumbing, logged
 // elsewhere, never surfaced here.
-// relayChainFailedPrefix mirrors clients/windows/main.go's constant of the
+// relayChainFailedPrefix mirrors the retired Windows client's main.go's constant of the
 // same name: core's one genuinely diagnostic signal for a relay chain that
 // failed to build (docs/design/relay-chaining.md §10.4; core/relaychain.go's
 // file doc — chaining is fail-closed, never silently downgraded to fewer

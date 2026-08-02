@@ -9,8 +9,8 @@
 // split-tunnel/kill-switch/DNS/auto-connect/launch-on-boot; whether the first
 // three do anything depends on the platform having an enforcement.Enforcer
 // (Windows does, bacchus#59) - see settings.go's doc. Still no country picker
-// (#150, blocked on #146): Connect auto-selects, exactly like
-// clients/windows's own tray picker does before a user chooses.
+// (#150, blocked on #146): Connect auto-selects, exactly like the retired
+// Windows tray client's picker did before a user chose.
 //
 // Build: go build -o bacchus-fyne .  (needs a C toolchain - see README.md)
 package main
@@ -42,7 +42,7 @@ func main() {
 
 	// A config file that exists but doesn't parse must be SEEN, not logged. This is
 	// built with -H=windowsgui (see README): there is no console, so log.Println goes
-	// nowhere at all — the same trap issue #50 fixed for clients/windows. Worse than
+	// nowhere at all — the same trap issue #50 fixed for the Windows tray client. Worse than
 	// silent: cfg stays zero, so Connect then reports "no coordinators configured —
 	// copy the example into place" at a user whose file IS in place and has a typo,
 	// pointing them away from the one thing wrong. So it is carried to the UI and

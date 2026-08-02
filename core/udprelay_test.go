@@ -340,7 +340,7 @@ func (s *pipeSession) Close() error            { return nil }
 
 // TestHandleSocksUDPAssociateRoundTrip drives the whole client-core-side path
 // (issue #41): a manually-driven RFC 1928 SOCKS5 UDP ASSOCIATE handshake
-// (standing in for clients/windows/udprelay.go's dialSOCKSUDPAssociate, which
+// (standing in for clients/internal/enforcement/udprelay.go's dialSOCKSUDPAssociate, which
 // lives in a separate package and is tested on its own there) against
 // handleSocksUDPAssociate, which in turn opens a real E2E channel to an exit
 // side relaying to a real loopback UDP echo target — proving both framing
@@ -601,7 +601,7 @@ func (s *failingSession) Closed() <-chan struct{} { return nil }
 func (s *failingSession) Close() error            { return nil }
 
 // TestServeSOCKSUDPAssociateDropsWhenTunnelUnreachable is the core-side
-// counterpart to clients/windows/udprelay_test.go's
+// counterpart to clients/internal/enforcement/udprelay_test.go's
 // TestHandleGeneralUDPDropsWhenTunnelUnreachable (issue #99): when the
 // tunnel itself can't be reached (sess.OpenStream fails — the transport
 // session to the exit is down), the client's datagram must be dropped, never

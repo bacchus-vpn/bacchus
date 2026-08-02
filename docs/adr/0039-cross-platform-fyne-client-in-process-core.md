@@ -1007,3 +1007,111 @@ in the issue, so the next platform's run inherits it.
   retirement is an event with a written trigger, the trigger is the bar, and the bar
   now has one item outstanding that is about the surviving client rather than the
   departing one.
+
+## Amendment (2026-08-02): #115's hardware pass, and the retirement (#138)
+
+The previous amendment closed with *"`clients/windows` is still not retired, and this
+amendment does not retire it… the bar now has one item outstanding that is about the
+surviving client rather than the departing one."* That item was #115. It is done, and
+this amendment is the retirement.
+
+### The run
+
+`clients/fyne`, built for Windows by the `windows-fyne-client` job at `main` `12a8608`,
+downloaded as a CI artifact and run on the owner's own machine. Nothing was built
+locally — the whole point of #115's first half was that the second half should start
+from a download rather than from a mingw install, and it did.
+
+**7/7.** The five items #88's checklist defines, plus two this client makes possible:
+
+| check | result |
+|---|---|
+| Unelevated: connect refuses, no degradation to an unprotected proxy | pass |
+| Elevated: tunnel comes up | pass |
+| `Get-NetRoute` shows the split-default and the control-plane exclusions | pass — `0.0.0.0/1` and `128.0.0.0/1` on the Bacchus adapter, coordinator `/32` held on the physical one |
+| Real device traffic egresses via the exit | pass |
+| Volunteer toggles disabled on Windows (ADR-0053) | pass |
+| Process killed outright: machine still fail-closed | pass — `DefaultOutboundAction` `Block` on all three profiles |
+| Next launch recovers | pass — relaunched and **left disconnected**; egress returned the machine's own address |
+
+Three results are worth stating individually, because each is something no Go test in
+this repository asserts and no document could have settled.
+
+**Parity item 7 is confirmed for this client.** Unelevated, the connect fails with a
+message rather than coming up green over a working-but-unprotected SOCKS proxy. Item 7
+names that as *"the one failure mode this whole bar exists to rule out"*, and until this
+run it had been observed only on the client being retired. It is now observed on the one
+that stays.
+
+**When the process dies, every Bacchus route dies with it, and the firewall alone holds
+the line.** The wintun adapter is auto-removed on process exit, so the post-kill route
+table shows the ordinary default via the physical adapter and no Bacchus entry at all.
+`killswitch_windows.go` says this in its file doc; it has now been watched. The
+operational consequence is worth writing down: **a Windows kill-switch cannot be
+diagnosed by looking for routes** — there are none to find, by design, and the only
+evidence is `DefaultOutboundAction`.
+
+**`Enforcer.Recover` tears down orphaned state without reconnecting**, verified using
+the **egress address** as the discriminator rather than firewall state, per the #88
+amendment's own warning that a reconnected client re-arms the lockdown and is
+indistinguishable from a failed recovery if you only read the firewall.
+
+### The retirement
+
+`clients/windows` is retired. Deleted, not deprecated: 21 files, ~2,481 lines of Go.
+
+The three gates the four preceding amendments named are all closed. **#59** folded that
+client's enforcement behind one interface, so nothing unique to it was left to lose.
+**#88** confirmed the two OS-level guarantees on hardware. **#115** confirmed that the
+surviving client drives them. The order matters and was not incidental: had the deletion
+come first, #88's evidence would have been about a binary nobody could still build, and
+#115 would have had nothing to compare against.
+
+**What did not go with it, and had to be moved first.** `clients/windows/README.md` was
+the only place in the repository documenting the `wintun.dll` runtime dependency — that
+the client loads it via `golang.zx2c4.com/wintun`, that it is deliberately uncommitted
+(proprietary, and wintun's guidance is to ship it as downloaded rather than rebuilt),
+where to fetch it and which architecture subdirectory to take. Deleting that file before
+moving the section would have destroyed the only record of a dependency the shipping
+client cannot start without — which is exactly how #115's run failed at first, and is
+#135. It now lives in `clients/fyne/README.md`, and `.gitignore`'s staging-directory
+exclusion moved with it.
+
+**The CI job stayed; only its build step went.** `windows-client` did two unrelated
+jobs: it built the departing client, and it was the fast toolchain-free Windows signal
+for `clients/internal/...` — about a minute against `windows-fyne-client`'s eight, which
+is why they were ever separate jobs. It is now `windows-enforcement` and does the second
+job only. Retiring a client must not retire the enforcement layer's only Windows
+coverage.
+
+**About half the reference cleanup was fixing citations that were already wrong.** Of
+roughly 46 comments naming a specific `clients/windows/*.go` file, ~22 named files that
+had not existed since #59 moved them into `clients/internal/enforcement/` —
+`tunnel.go`, `splittunnel.go`, `poolroutes.go`, `routes.go`, `udprelay.go`,
+`tun2socks.go` — in `core/`, in the enforcement package itself, and in several ADRs. A
+reader following one landed nowhere, and had for weeks. Repointed here because this was
+the change that had to read all of them.
+
+### Consequences
+
+- **This ADR's central bet is settled.** One Go binary per platform, a Fyne UI calling
+  `core` in-process, no FFI bridge — measured against a shipping alternative for five
+  weeks, and the alternative is gone because it stopped being needed rather than because
+  anyone stopped maintaining it.
+- **`clients/internal/enforcement` now has one caller**, and its package documentation
+  says so. The `Policy.Logf` injection stays regardless: the reason it exists — the
+  caller owns its log sink and is not importable from here — outlived the second caller
+  it was written for.
+- **Historical references in ADRs 0028, 0034, 0036, 0037, 0042, 0049 and 0050 are
+  deliberately left alone.** They are dated records of what existed when they were
+  written, and ADR-0036 is *about* that client. The test applied was whether a sentence
+  is a pointer (repointed) or a statement of history (left standing).
+- **The parity bar itself is not retired.** Items 1–12 are what `[E9]` is still measured
+  against, and ADR-0053 qualified item 2 while volunteering. The bar outlives the
+  comparison that produced it.
+- **This does not make the client installable on Windows.** #115's run reached a working
+  client by hand — fetching `wintun.dll` and hand-editing JSON — because on Windows
+  there is no other way. `deploy/install.sh` is Linux-only; nothing places either file.
+  That is #136, with #134 and #135 as its symptoms, and it is now the largest gap in
+  front of 1.0 on this platform. **It is also upstream of #34**: a release channel
+  replaces an already-installed binary, and on Windows nothing installs the first one.

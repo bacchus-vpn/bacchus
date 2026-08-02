@@ -1,6 +1,6 @@
 // Runtime configuration. No endpoints are compiled into the binary - they load
 // from a JSON file next to the executable, or the per-user config directory
-// (mirrors clients/windows/config.go's precedence; see that file's doc comment
+// (mirrors the retired Windows client's config.go's precedence; see that file's doc comment
 // for why: config lives outside the binary so the same build serves any
 // operator's network). Ship bacchus-fyne.config.example.json as a template.
 package appstate
@@ -39,7 +39,7 @@ type Config struct {
 	TURNPass     string   `json:"turnPass"`
 
 	// AdmissionPubKey and AdmissionCRLPath mirror the same-named core.Config
-	// fields, and mirror what clients/windows already passes (its main.go sets
+	// fields, and mirror what the Windows tray client passed (its main.go set
 	// both). They are here because omitting them is not a neutral omission:
 	// core treats an unset AdmissionPubKey as fail-open, so the client verifies
 	// nothing and accepts any exit it can complete a Noise_NK handshake with.
@@ -63,12 +63,12 @@ type Config struct {
 	AdmissionPubKey  string `json:"admissionPubKey"`
 	AdmissionCRLPath string `json:"admissionCrlPath"`
 
-	// Bypass, BypassMode, DisableKillSwitch, and DNS mirror clients/windows's
+	// Bypass, BypassMode, DisableKillSwitch, and DNS mirror the Windows tray client's
 	// same-named Config fields (config.go) exactly - same names, same JSON
 	// keys, same semantics - and as of bacchus#59 they are live on any
-	// platform with an Enforcer, which today means Windows: Controller passes
-	// them straight into enforcement.Policy, and the same code that has
-	// always honored them for clients/windows honors them here.
+	// platform with an Enforcer: Controller passes them straight into
+	// enforcement.Policy, and the same code that always honored them for the
+	// Windows tray client honors them here.
 	//
 	// They were config surface only until then, which is why this comment
 	// used to say at length that nothing enforced them. On a platform with no
@@ -97,7 +97,7 @@ type Config struct {
 	// vice versa.
 	LaunchOnBoot bool `json:"launchOnBoot"`
 
-	// TransportPool mirrors core.Config.TransportPool and clients/windows's
+	// TransportPool mirrors core.Config.TransportPool and the Windows tray client's
 	// same-named field, JSON key included: a preference-ordered ladder the
 	// client races and then converges on, per network (issue #15, ADR-0028).
 	// Empty turns the pool off and keeps the single-transport connect, which
@@ -184,7 +184,7 @@ type Config struct {
 }
 
 // BypassModeInclude and BypassModeExclude are the two values BypassMode
-// accepts, matching clients/windows/splittunnel.go's splitTunnelMode exactly
+// accepts, matching clients/internal/enforcement/splittunnel.go's splitTunnelMode exactly
 // (kept as plain strings here, not a typed enum, since Config.BypassMode -
 // like every other Config field - round-trips through JSON as one).
 const (
@@ -193,13 +193,13 @@ const (
 )
 
 // DefaultDNSUpstream is used when Config.DNS is empty, and is the same value
-// clients/windows defaults to (its config.go) — one number, one sentence of
+// the Windows tray client defaulted to — one number, one sentence of
 // documentation, both clients. Queried over DNS-over-TCP through the tunnel,
 // never in the clear (see enforcement/killswitch_windows.go on why there is
 // no plaintext-DNS allowance in the lockdown either).
 const DefaultDNSUpstream = "1.1.1.1:53"
 
-// NormalizeBypassMode mirrors clients/windows/splittunnel.go's
+// NormalizeBypassMode mirrors clients/internal/enforcement/splittunnel.go's
 // parseSplitTunnelMode: only "include" (case-insensitive, whitespace
 // tolerant) means include-mode; anything else - "exclude", empty, unset,
 // a typo - means exclude-mode, matching a fresh Config's zero value. Settings
@@ -299,7 +299,7 @@ func LoadConfig() (Config, string, error) {
 var errNoConfigPath = errors.New("no config file path to save to")
 
 // SaveConfig writes c back to path as indented JSON. Mirrors
-// clients/windows/config.go's saveConfig (issue #75 there; issue #152 here,
+// the retired Windows client's config.go's saveConfig (issue #75 there; issue #152 here,
 // settings.go's save handler is the only caller): path is normally whatever
 // LoadConfig reported reading from, so a Settings save lands back in the same
 // file the user is already using, and DefaultConfigPath covers the

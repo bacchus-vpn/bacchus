@@ -208,7 +208,7 @@ func startIdleReaper(idle time.Duration, stop func()) (touch func(), cleanup fun
 
 // socksUDPHeaderLen is the RFC 1928 §7 UDP request header length for ATYP=1
 // (IPv4) — the only address type this hop ever uses: this project's netstack
-// is IPv4-only end to end (clients/windows/tunnel.go), so every destination
+// is IPv4-only end to end (clients/internal/enforcement/tunnel.go), so every destination
 // core learns here is already an IPv4 host:port.
 const socksUDPHeaderLen = 2 + 1 + 1 + 4 + 2 // RSV + FRAG + ATYP + IPv4 + PORT
 

@@ -80,7 +80,7 @@ func stateHeadline(s appstate.ConnState, enforced bool) string {
 		//
 		// Which it is depends on the platform, not on the mood of the app. With
 		// an Enforcer (Windows, bacchus#59) the device really is routed — TUN,
-		// routes, kill-switch, the same code clients/windows ships — and a
+		// routes, kill-switch, the same code the Windows tray client shipped — and a
 		// connect that could not do that aborts rather than arriving here, so
 		// reaching Protected on such a build means it worked. That earns
 		// "Protected", the word ADR-0039 said this would take back "the day
@@ -114,7 +114,7 @@ func stateHeadline(s appstate.ConnState, enforced bool) string {
 //
 // "Nothing is exposed" described a kill switch. This client now has one on any
 // platform with an Enforcer (bacchus#59) — ADR-0014's, the same code
-// clients/windows arms — but the Blocked copy below still does not make that
+// the Windows tray client armed — but the Blocked copy below still does not make that
 // claim, deliberately. The kill-switch is a setting a user can turn off
 // (Config.DisableKillSwitch), so "nothing is exposed" is true of an armed
 // lockdown and false of a disabled one, and this function is handed the

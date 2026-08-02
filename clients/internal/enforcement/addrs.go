@@ -3,7 +3,7 @@
 // outside the tunnel, and normalizing an address into the prefix form a route
 // call wants.
 //
-// These came out of clients/windows/routes.go, which was 414 lines of which
+// These came out of clients/internal/enforcement/routes_windows.go, which was 414 lines of which
 // only the PowerShell shell-outs are actually Windows-specific. Nothing here
 // touches an OS API — it is net.ParseIP, net.LookupHost and string handling —
 // so a Linux or macOS implementation ([E10] bacchus#37, [E9] bacchus#36)

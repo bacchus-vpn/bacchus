@@ -9,7 +9,7 @@
 // tool whose whole point is running in a hostile jurisdiction.
 //
 // This lives outside the Windows build tag for that reason. It arrived as
-// part of clients/windows/routes.go's runPS, but nothing in it is
+// part of clients/internal/enforcement/routes_windows.go's runPS, but nothing in it is
 // PowerShell-specific; a Linux implementation shelling out to `ip route` or
 // `nft` inherits exactly the same problem, and re-deriving the answer is how
 // a platform quietly ships without it.
