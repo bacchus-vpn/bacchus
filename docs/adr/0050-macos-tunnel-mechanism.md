@@ -453,6 +453,19 @@ extension's state rather than from an in-process `Enforcer`, and a wrong answer 
 security refusal into a silent no-op.** #12's stored-opt-in case (#101) meets the same
 seam.
 
+> **Update (2026-08-02):** partly superseded by [ADR-0053](0053-serving-while-routed.md)
+> (issue #109). The mechanism above is no longer what drives the refusal: it is not a
+> `deviceRouted bool` fed from `Controller.DeviceEnforced()` but
+> `Enforcer.ServesWhileRouted()`, a question about the platform's *capability* rather than
+> about the moment's routing state — and Linux now answers true, so a routed Linux machine
+> serves. What this paragraph concluded for macOS is unchanged, and its warning gets
+> sharper rather than weaker. Under NE the extension, not an in-process `Enforcer`, is
+> still what would have to answer, a wrong answer is still a silent no-op rather than a
+> loud failure, and the answer now carries more than a refusal: it also decides whether the
+> kill-switch takes a source allowance (ADR-0053 §4). The one thing that got easier is the
+> default — false is the safe answer and what a platform that has built nothing gets for
+> free, so macOS inherits the refusal by doing nothing rather than by asserting anything.
+
 ## Where this parallels ADR-0049, and where it diverges
 
 Asked for explicitly, because a reader coming from #37 will expect the Linux answer and
