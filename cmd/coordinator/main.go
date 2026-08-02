@@ -1284,7 +1284,7 @@ func reselectDeadRelays(now time.Time) {
 //
 // Deliberately a sweep over LIVE sessions rather than a check at reap time. Two
 // reasons: a peer-relayed session that was signaled is exempt from prune's idle
-// sweep (issue #96/#105) and would never reach a reap-time check while its relay
+// sweep (see prune) and so would never reach a reap-time check while its relay
 // keeps heartbeating, which is precisely the state a diverged relay is in; and a
 // live sweep reports the fault while it is still happening rather than sessionTTL
 // after the client gave up.

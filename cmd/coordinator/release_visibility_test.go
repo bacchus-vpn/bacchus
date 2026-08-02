@@ -414,7 +414,7 @@ func TestUnansweredIsReportedOncePerEpisode(t *testing.T) {
 // that never acted would point an operator at the wrong box.
 //
 // This is also the case a reap-time check could not make: prune exempts a signaled
-// peer-relay session from the idle sweep (issue #96/#105), so this session is never
+// peer-relay session from the idle sweep (see prune), so this session is never
 // reaped while its relay keeps heartbeating — which is exactly the state a diverged
 // relay is in.
 //
