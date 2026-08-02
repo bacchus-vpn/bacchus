@@ -59,6 +59,12 @@ type session struct {
 	ipv6For string // interface whose IPv6 setting we changed
 	ipv6Was string // its value before we changed it
 
+	// dns is what captureDNS changed and how to put it back (dns.go,
+	// ADR-0051). It lives on the session for the same reason ipv6Was does:
+	// the disconnect path has to be able to undo it without the client, and
+	// the client is by then gone.
+	dns dnsState
+
 	killSwitchArmed bool
 }
 
@@ -160,6 +166,15 @@ func (h *helper) clientGone(uid uint32) {
 	if sess == nil {
 		return
 	}
+
+	// DNS is restored on BOTH paths below, before either of them decides what
+	// to do about the lockdown, and it is the one piece of session state that
+	// is never held past a crash. The kill-switch is held deliberately because
+	// holding it fails closed; a resolver still pointed into a tunnel that no
+	// longer has anything reading it fails to a machine that resolves nothing,
+	// which is not a safer state, it is just a broken one. ADR-0051 §4.
+	h.releaseDNS(sess)
+
 	if sess.killSwitchArmed {
 		h.log("client uid %d disconnected with the kill-switch armed: holding the lockdown (it is lifted by the next Open, or a reboot)", uid)
 		return
@@ -207,10 +222,31 @@ func (h *helper) checkPeer(cred *unix.Ucred) error {
 
 // uidHasActiveSession asks logind whether this uid is logged in locally.
 //
-// Read from /run/systemd/users/<uid> rather than over D-Bus: this is a root
-// process, and a D-Bus client library is a large dependency and a large parse
-// surface to add to it for one boolean. The file is logind's own published
-// state and its STATE= field is the same value `loginctl show-user` reports.
+// Read from /run/systemd/users/<uid> rather than over D-Bus. An earlier
+// version of this comment justified that by the cost of a D-Bus client
+// library; dns.go now links one, so that reason no longer holds and is not
+// worth pretending to. The reason that does hold is the path this runs on:
+// this is the connection-accept gate, and a file read cannot block on a bus
+// that is starting, wedged, or not yet reachable, where a method call can.
+// The file is logind's own published state and its STATE= field carries the
+// same value `loginctl show-user` reports.
+//
+// Both "active" and "online" are accepted, and ADR-0049 §3.1's amendment
+// records why, because the code and the record disagreed until bacchus#111
+// made them agree. In short: for a uid, "active" means it owns at least one
+// session that is its seat's foreground session OR has no seat at all, and
+// "online" means it owns sessions but none of them is currently foreground —
+// which is what a user who has been switched away from by fast user switching,
+// or by a VT switch, looks like. Refusing "online" would disconnect that user
+// mid-session for going to the background. It is deliberately in.
+//
+// What neither state implies is a seat, and that is the real gap #111 found
+// between §3.1's wording and this function. A seatless session — an SSH login,
+// a cron job — reports "active", not "online", because logind treats a session
+// with no seat as unconditionally active. So narrowing this to "active" would
+// not exclude a remote login; it would only exclude the switched-away local
+// user. Excluding remote logins is a different question with a different
+// primitive (the SEATS= field), and §3.1 no longer claims this gate answers it.
 func uidHasActiveSession(uid uint32) (bool, error) {
 	if _, err := os.Stat("/run/systemd/users"); err != nil {
 		return false, fmt.Errorf("logind is not running: %w", err)
@@ -230,8 +266,14 @@ func uidHasActiveSession(uid uint32) (bool, error) {
 		case "active", "online":
 			return true, nil
 		default:
-			// "lingering" and "closing" are deliberately not enough: a
-			// lingering user has no seat, which is the whole point of asking.
+			// "lingering", "closing" and "offline" are deliberately not
+			// enough, and the discriminator is presence, not seats — an
+			// earlier comment here said a lingering user "has no seat, which
+			// is the whole point of asking", which is not what separates
+			// these. A lingering uid is one that is NOT logged in but still
+			// has user services running; a closing one is NOT logged in with
+			// processes still winding down. Neither is a person at the
+			// machine, and this gate is asking whether one is.
 			return false, nil
 		}
 	}
@@ -283,6 +325,10 @@ func (h *helper) dispatch(conn *net.UnixConn, cred *unix.Ucred, req *netdwire.Re
 		return h.reply(conn, h.handleRecoverKillSwitch())
 	case netdwire.VerbRefreshAllowIP:
 		return h.reply(conn, h.handleRefreshAllowIP(sess, req))
+	case netdwire.VerbCaptureDNS:
+		return h.reply(conn, h.handleCaptureDNS(sess))
+	case netdwire.VerbReleaseDNS:
+		return h.reply(conn, h.handleReleaseDNS(sess))
 	default:
 		return h.reply(conn, netdwire.Failf(netdwire.CodeUnknownVerb, "unknown verb %q", req.Verb))
 	}
@@ -349,6 +395,12 @@ func (h *helper) handleClose(req *netdwire.Request) *netdwire.Reply {
 	}
 	h.sess = nil
 	h.mu.Unlock()
+
+	// The clean path restores DNS too. A client that closed properly has
+	// usually sent VerbReleaseDNS already, which makes this a no-op; one that
+	// closed without it has not, and the resolver is not something to leave
+	// changed because the client forgot.
+	h.releaseDNS(sess)
 
 	h.log("session closed for uid %d", sess.uid)
 	return &netdwire.Reply{OK: true}
@@ -791,6 +843,30 @@ func (h *helper) handleRefreshAllowIP(sess *session, req *netdwire.Request) *net
 // rather than a skip: ADR-0049 §3.3 makes parsing the boundary, and silently
 // dropping an entry would leave the client believing a destination is excluded
 // when nothing excludes it.
+// handleCaptureDNS points the machine's resolver at the tunnel.
+//
+// It refuses before the TUN is configured rather than deferring, because the
+// address it points the resolver at is derived from the TUN's own — a capture
+// installed earlier would name an address that is not yet on any interface,
+// and the failure would show up as "DNS silently does not work" rather than as
+// a refused request.
+func (h *helper) handleCaptureDNS(sess *session) *netdwire.Reply {
+	if err := h.captureDNS(sess); err != nil {
+		return netdwire.Failf(netdwire.CodeInternal, "capture DNS: %v", err)
+	}
+	h.log("DNS captured for uid %d", sess.uid)
+	return &netdwire.Reply{OK: true}
+}
+
+// handleReleaseDNS restores it. Always succeeds: the restore is best-effort by
+// contract on the client side too (osnet_linux.go's releaseDNS is silent), and
+// there is nothing a client could usefully do with a failure that this process
+// has not already logged.
+func (h *helper) handleReleaseDNS(sess *session) *netdwire.Reply {
+	h.releaseDNS(sess)
+	return &netdwire.Reply{OK: true}
+}
+
 func parsePrefixes(entries []string, wantV6 bool) ([]netip.Prefix, *netdwire.Reply) {
 	out := make([]netip.Prefix, 0, len(entries))
 	for _, e := range entries {

@@ -550,3 +550,114 @@ it arm?" check passes — an `rt_protocol` id that collided with `RTPROT_BGP`, a
 a buffer-aliasing bug that corrupted any netlink dump spanning more than one
 datagram. That is the verification §"How #37 gets tested" promised, and it is
 verification bacchus#59 never had.
+
+## Amendment (2026-08-02): §3.1's session check, DNS, and a wrong Consequence (#104, #111)
+
+**DNS is now answered.** The primitive this record identified and deliberately
+left open is decided in ADR-0051, which also corrects the reason recorded above.
+The `127.0.0.53` analysis is right about the first hop and incomplete about the
+second: resolved's own upstream query does not fall into the tunnel behind the
+stub either, because that socket is scoped to its link and link scoping
+overrides the routing table. Measured. The practical consequence is that this
+record's phrasing — "an nftables redirect of loopback-stub traffic" as a
+plausible implementation — describes something that does not work; ADR-0051 §"The
+measurement" has the numbers. What survives intact is the claim this record
+actually staked: that `osNet` was short exactly one method, and that its
+three-way distribution across Windows and macOS was the reason not to fold it
+into #37.
+
+**§3.1 said less than the code does, and #111 is the correction.**
+`uidHasActiveSession` accepts logind's `online` as well as `active`, where §3.1
+says only "the peer's uid must own an active local session (logind seat)". The
+code is right and this record was wrong; the words are amended rather than the
+gate narrowed, and the reason is worth stating because the card's own premise
+did not survive checking.
+
+#111 supposed `online` was the state admitting a seatless SSH login. It is not.
+For a uid, logind reports `active` when it owns at least one session that is its
+seat's foreground session **or has no seat at all** — a session with no seat is
+unconditionally active. So a plain SSH login, and a cron job, already arrive as
+`active`. Narrowing this gate to `active` would not have excluded a single
+remote login. What it would have excluded is the case `online` exists for: a
+local user at a seat who has been switched away from, by fast user switching or
+a VT switch. Their session stops being their seat's foreground session and the
+uid drops to `online` while they remain logged in at the machine. Refusing that
+would tear down a live tunnel because somebody else took the console.
+
+Three things follow, and all three are now in the code:
+
+1. **`online` stays, with the reason stated** where previously only the
+   exclusions carried one.
+2. **The exclusions' stated reason was wrong** and is corrected. `lingering` and
+   `closing` were excluded here because "a lingering user has no seat, which is
+   the whole point of asking" — but seats are not what separates them.
+   `lingering` is a uid that is *not logged in* with user services still
+   running; `closing` is one that is *not logged in* with processes winding
+   down. Presence is the discriminator, not seats.
+3. **§3.1's parenthetical "(logind seat)" is withdrawn.** This gate does not
+   assert a seat and cannot: neither state it accepts implies one. The question
+   it actually answers is *is this uid logged in on this machine right now, as
+   opposed to lingering, closing, or gone*. If a seat is ever genuinely
+   required — to exclude remote logins from device-wide enforcement, which is a
+   real question this record never asked — the primitive is logind's `SEATS=`
+   field, not `STATE=`, and it deserves its own card rather than being smuggled
+   in as a tightening of this one.
+
+A locked screen is unaffected either way: logind's state computation does not
+consult `LockedHint`, so a locked desktop session stays `active`. Multi-seat is
+unaffected too, since each seat has its own foreground session and both uids
+read `active`.
+
+One consequence for §4 is recorded in ADR-0051 §3 rather than here: the helper
+now links a D-Bus client, so `uidHasActiveSession`'s comment no longer justifies
+its file read by the cost of that dependency. The file read stays, for the
+reason that survives — it is on the connection-accept path, where a file read
+cannot block on a bus that is starting or wedged.
+
+**One Consequence is wrong about its mechanism, and the shipped code is right.**
+The Consequences section says `clients/fyne` "must fail the connect when the
+helper is unreachable ... and `Controller.DeviceEnforced` must stay false". The
+first clause is correct and is what the client does. **The second is wrong, and
+following it would build the exact failure this record exists to prevent.**
+
+`Controller.DeviceEnforced()` is `c.enf != nil` — a property of the platform,
+not of the moment, which is what makes it safe to call from an `OnState`
+callback. On Linux it is true as of #37 because a Linux `Enforcer` exists, and
+it is fixed at build time on purpose. `enforcement_linux.go`'s "Why this does
+not probe for the helper" section argues the case at length, and the argument
+is the reason this sentence cannot be followed: a probe that failed would leave
+`DeviceEnforced()` false, the UI saying "Proxy ready", and the user quietly
+unprotected on a machine that was supposed to route everything. That is parity
+item 7's failure with the polarity reversed — not a claim of protection that
+does not exist, but a claim of *no* protection being expected on a machine
+where it was, which is the same lie told from the other end.
+
+The sentence conflates two different things:
+
+- **"Never claim protection you do not have."** Correct, and this record should
+  keep saying it. It is satisfied by the connect *failing* — loudly, at `Start`,
+  where an unreachable helper actually surfaces — and by never falling back to a
+  working SOCKS proxy under a "Protected" banner.
+- **"`DeviceEnforced` must be false."** The wrong mechanism for it.
+  `DeviceEnforced` answers *can this build enforce on this platform*, not *did
+  this session succeed*. Those are different questions, and the session's answer
+  is `Start`'s error, not this boolean.
+
+So the amended rule is: **an unreachable helper fails the connect; it does not
+change `DeviceEnforced`.** The original sentence stands in the record above,
+uncorrected in place, because this repo amends rather than rewrites — but it
+should not be implemented as written.
+
+Worth recording that the tree already noticed. `enforcement_linux.go`'s doc
+cites this record's Consequences *selectively*: it quotes the half that is right
+("must fail the connect when the helper is unreachable, never fall back to a
+working SOCKS proxy under a 'Protected' banner") and silently omits the
+`DeviceEnforced` clause. That was the correct call at the time and it left the
+disagreement implicit, which is the state #111 was opened about elsewhere in
+this same file. It is now explicit in both directions.
+
+This matters beyond Linux, which is why it is here rather than in a code
+comment. `[E9]` will read this Consequences line while implementing macOS, and
+ADR-0050 puts macOS behind a system extension whose availability is genuinely a
+runtime property — exactly the platform most likely to read "`DeviceEnforced`
+must stay false" as licence to make it a probe.

@@ -345,6 +345,28 @@ func (o *linuxOS) refreshKillSwitchAllowIP(ip string) {
 	o.silent(netdwire.VerbRefreshAllowIP, &netdwire.Request{IP: ip})
 }
 
+// captureDNS sends no parameters at all, which is the narrowest this file gets
+// and is the point. ADR-0049 §2 fixes the inward vocabulary at prefixes, an
+// address, an allowlist and a token; a DNS verb is exactly the kind of thing
+// that would have widened it, because the obvious encodings carry an interface
+// name, a unit name or /etc/resolv.conf's path. None of them needs to: the
+// helper created the TUN, so it already knows the interface and the address,
+// and osnet.go's method doc explains why the address the resolver is pointed at
+// is derivable rather than chosen. See ADR-0051 §2.
+func (o *linuxOS) captureDNS() error {
+	_, err := o.do(&netdwire.Request{Verb: netdwire.VerbCaptureDNS})
+	return err
+}
+
+// releaseDNS is silent, and unlike disableKillSwitch it is not the only thing
+// standing between the machine and its prior state. The helper restores the
+// resolver when the session ends however it ends, including a client that died
+// without sending this (ADR-0051 §4). This is the tidy path, not the safety
+// net — which is why a transport failure here is logged rather than returned.
+func (o *linuxOS) releaseDNS() {
+	o.silent(netdwire.VerbReleaseDNS, &netdwire.Request{})
+}
+
 // unixClose closes a raw descriptor we still own.
 func unixClose(fd int) {
 	if fd >= 0 {

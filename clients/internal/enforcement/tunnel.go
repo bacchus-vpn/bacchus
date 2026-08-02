@@ -250,6 +250,27 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 	// blocks it while connected, rather than leaving it alone as never-tunnelled
 	// traffic. Fails safe (no leak), but is a real, undecided UX question for
 	// include+kill-switch together; flagged, not solved here.
+	// Point the machine's resolver at the tunnel, now that there is something
+	// on the other side of it to answer.
+	//
+	// The position in this sequence is doing two jobs. It is AFTER the netstack
+	// starts, because between the two the interceptor would not yet be reading
+	// the device and every redirected query would be dropped rather than
+	// resolved — a window with no DNS, where the point of the step is to have
+	// DNS. And it is BEFORE the kill-switch, which stays the last thing that
+	// happens (tunnel_test.go pins that literally: enableKillSwitch must be the
+	// final recorded osNet call). On a platform that needs no capture this is a
+	// no-op returning nil, so the ordering costs nothing there — see
+	// routes_windows.go.
+	if err := osn.captureDNS(); err != nil {
+		return nil, fmt.Errorf("point the resolver at the tunnel: %w", err)
+	}
+	defer func() {
+		if !ok {
+			osn.releaseDNS()
+		}
+	}()
+
 	if cfg.KillSwitch {
 		// Nest the pool-allowlist arming inside the bypass arming so the pool's
 		// reserved underlays and the bypass dynamic set are both snapshotted
@@ -301,6 +322,10 @@ func (t *tunnel) Close() {
 	if t.killSwitch {
 		t.os.disableKillSwitch()
 	}
+	// Give the resolver back immediately after egress is restored and before
+	// the device goes away, so the machine is never simultaneously able to
+	// reach the network and pointed at a tunnel that is being dismantled.
+	t.os.releaseDNS()
 	if t.nt != nil {
 		t.nt.Close()
 	}
