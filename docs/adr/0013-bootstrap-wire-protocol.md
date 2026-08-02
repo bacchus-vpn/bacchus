@@ -7,7 +7,7 @@
 
 ADR-0012 decided cold-start rendezvous blends with STUN/WebRTC and is
 authenticated by per-user secrets, but left the concrete wire scheme as
-design doc open question #3. Issue #18's acceptance criterion — a
+design doc open question #3. `old #18`'s acceptance criterion — a
 documented, tested bootstrap a cold client completes with no operator
 pre-screening — needs a real implementation of that scheme, not just the
 design.
@@ -49,7 +49,7 @@ design.
 
 ## Consequences
 
-- Issue #18's acceptance criterion is met: `core/coldstart` is a tested,
+- `old #18`'s acceptance criterion is met: `core/coldstart` is a tested,
   documented, per-user-secret-authenticated fetch of a coordinator-signed
   snapshot, runnable end-to-end via `cmd/coldstart-issue` +
   `cmd/coldstart-bootstrap` (verified live, loopback, real OS UDP sockets

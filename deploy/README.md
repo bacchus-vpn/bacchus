@@ -198,8 +198,10 @@ place is a load-balancing pool, not an ambiguity. There is no exact-exit pinning
 > That number is from the **retired** tracker (see the tracker note in the root
 > [README](../README.md)). It is written as a code span so it cannot autolink —
 > in the current tracker `#18` is the installer at the top of this file, which is
-> a different thing entirely. The rest of the repo still carries this reference
-> bare in about twenty places; those are tracked separately.
+> a different thing entirely. The eighteen other places that carried this
+> reference bare were swept the same way in #119; the only bare `#18` left in the
+> repo's markdown is in [docs/RUNNING.md](../docs/RUNNING.md), and that one really
+> does mean the installer.
 
 The coordinator generates its snapshot-signing keypair on first run and logs
 the public key once:

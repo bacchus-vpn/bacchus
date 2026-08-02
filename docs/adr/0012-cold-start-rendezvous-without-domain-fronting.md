@@ -1,6 +1,6 @@
 # 12. Cold-start rendezvous without domain fronting
 
-- Status: proposed (design spike, issue #18)
+- Status: proposed (design spike, `old #18`)
 - Date: 2026-07-02
 
 ## Context

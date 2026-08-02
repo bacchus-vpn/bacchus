@@ -1,6 +1,6 @@
 # Cold-start bootstrap — wire protocol
 
-- Status: **implemented (issue #18, `core/coldstart`; port-blended by issue #30;
+- Status: **implemented (`old #18`, `core/coldstart`; port-blended by issue #30;
   FINGERPRINT shape parity by issue #46)**
 - Date: 2026-07-03
 - Companion decision records: [ADR-0013](../adr/0013-bootstrap-wire-protocol.md)

@@ -1,6 +1,6 @@
 # Rendezvous cold-start — design
 
-- Status: **implemented (issue #18; design spike #18a + bootstrap implementation #18b)**
+- Status: **implemented (`old #18`; design spike `old #18a` + bootstrap implementation `old #18b`)**
 - Date: 2026-07-02 (design), 2026-07-03 (bootstrap implementation)
 - Track: rendezvous (M3)
 - Companion decision records: [ADR-0012](../adr/0012-cold-start-rendezvous-without-domain-fronting.md) (design), [ADR-0013](../adr/0013-bootstrap-wire-protocol.md) (wire protocol)
@@ -472,7 +472,7 @@ immune), and the global admission-rate cap stays on as the circuit breaker.
 
 ## 6. Evaluation & acceptance
 
-**Acceptance criterion (issue #18):** a documented, tested bootstrap that a cold
+**Acceptance criterion (`old #18`):** a documented, tested bootstrap that a cold
 client completes from an in-region vantage with **no operator pre-screening step**.
 
 **The one empirical question the spike must answer first:** does a STUN-shaped,

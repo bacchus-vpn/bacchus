@@ -83,5 +83,5 @@ unchanged. Instead the pool lives entirely in the node engine
   route (not just one coordinator), so the client can rotate to any member
   without the kill-switch cutting off its signaling.
 - Out of scope, tracked separately: how a *fresh* client with no prior config
-  learns its first pool at all (issue #18, cold-start bootstrap — this ADR
+  learns its first pool at all (`old #18`, cold-start bootstrap — this ADR
   assumes the pool is already known to the node).

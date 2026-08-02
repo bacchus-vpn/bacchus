@@ -1,6 +1,6 @@
 # coldstart-probe — cold-start reachability measurement (spike)
 
-A throwaway measurement tool for the rendezvous cold-start spike (issue #18). It
+A throwaway measurement tool for the rendezvous cold-start spike (`old #18`). It
 sends STUN Binding Requests to a target UDP endpoint and reports whether a valid,
 transaction-matched reply comes back, with the round-trip time and the reflexive
 address the server observed.

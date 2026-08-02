@@ -981,7 +981,7 @@ executable version of this section.
   whole design is arranged so this stays true by construction.
 - **#96 / #105 / #106 (relay reselect/failover)** — reused for first-hop death; the
   client's ADR-0028 stall-detection covers downstream death (§5).
-- **#18 / ADR-0037 (cold-start + mesh-walk)** — supplies the signed directory the
+- **`old #18` / ADR-0037 (cold-start + mesh-walk)** — supplies the signed directory the
   client selects the chain from; multi-hop needs the deferred ingress-advertisement
   seam (§9.3).
 - **rendezvous-cold-start §5 (trust model)** — the vouch/tenure/AS-diversity machinery

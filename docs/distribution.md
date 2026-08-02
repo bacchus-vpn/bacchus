@@ -132,7 +132,7 @@ the harder problem.
    independently of Android's own install-time check — defense in depth,
    and the only check available *before* installing.
 3. **Same signing discipline the cold-start bootstrap already established**
-   (`core/coldstart`, Ed25519 snapshot signing, issue #18): this document
+   (`core/coldstart`, Ed25519 snapshot signing, `old #18`): this document
    recommends the *same pattern*, not the same key, for a future in-app
    updater — a signed update manifest the client verifies against a baked-in
    public key, the way it already verifies a directory snapshot. That
@@ -163,7 +163,7 @@ the harder problem.
 
 ## 7. Relationship to other work
 
-- **#18 / core/coldstart** — the signing pattern this document recommends
+- **`old #18` / core/coldstart** — the signing pattern this document recommends
   reusing for a future update mechanism.
 - **#6 coordinator pool** — the closest existing analogue for "avoid a
   single point of failure in an infrastructure component we run" (§6 Q1).

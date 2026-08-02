@@ -534,18 +534,23 @@ EOF
 	log "installed $dest"
 }
 
-# seed_client_config writes the per-user config, and WHERE it writes is the
-# point.
+# seed_client_config writes the per-user config.
 #
-# clients/fyne looks for its config next to the executable first and in the
-# user's config directory second, and DefaultConfigPath — where Settings saves
-# when it loaded nothing — is the FIRST of those. With the GUI in
-# /usr/local/bin, a fresh install with no config would therefore try to save to
-# /usr/local/bin/bacchus-fyne.config.json, which the desktop user cannot write.
-# Seeding the per-user copy here means LoadConfig finds a file, reports that
-# path, and Settings saves back to the same writable place. This is worked
-# around here rather than fixed there because clients/ is not this change's to
-# touch; it is filed as a follow-up.
+# This used to be load-bearing. clients/fyne saved a first config next to the
+# executable, so with the GUI in /usr/local/bin a fresh install's first Save
+# targeted a root-owned directory and failed on permissions; seeding the
+# per-user copy here meant LoadConfig found a file, reported that path, and
+# Settings saved back to it. That was a workaround for a client bug, and it
+# masked the bug for installer users while leaving it live for anyone running a
+# downloaded binary. Issue #118 fixed it where it belonged: a first Save now
+# goes to the per-user directory whatever the binary's directory is, and
+# SaveConfig creates that directory itself.
+#
+# So this is kept for what is left once the bug is gone: a first-run
+# convenience. A new user gets the example template, with the keys they need to
+# fill in already present and commented on by client_next_steps, instead of an
+# app with no config file to edit. Removing it would break nothing and help
+# nobody.
 seed_client_config() {
 	user_home=$(getent passwd "$desktop_user" | cut -d: -f6)
 	[ -n "$user_home" ] || refuse "cannot resolve a home directory for $desktop_user"

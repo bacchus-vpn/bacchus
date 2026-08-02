@@ -1,6 +1,6 @@
 # coldstart-bootstrap — run a cold-start fetch from an invite (client tool)
 
-Client-side half of the cold-start bootstrap (issue #18, see
+Client-side half of the cold-start bootstrap (`old #18`, see
 [docs/design/bootstrap-protocol.md](../../docs/design/bootstrap-protocol.md)).
 Given an invite string from [`cmd/coldstart-issue`](../coldstart-issue),
 performs the authenticated STUN-shaped fetch, verifies the coordinator's
