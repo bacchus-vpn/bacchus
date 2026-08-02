@@ -75,8 +75,16 @@ own signalling survives, split tunnelling honoured, and a fail-closed kill-switc
 armed by default. This is the enforcement code the retired Windows tray client
 shipped, moved behind one interface by bacchus#59 rather than reimplemented.
 
-If that enforcement cannot be brought up — most commonly **because the app is not
-running as Administrator** — the connect **fails** and tells you why. It does not
+All of that needs Administrator, and the binary **asks Windows for it itself**: it
+carries an application manifest requesting `requireAdministrator`, so launching it
+raises a UAC prompt rather than starting unelevated and failing at the first route
+call (bacchus#136). Unsigned, that prompt says "Publisher: Unknown" — signing is
+bacchus#38 and deferred to the end of 1.0. If you decline the prompt the app does
+not start at all, which is the honest outcome: it could not have protected anything.
+
+If enforcement still cannot be brought up — with elevation arranged, the usual
+remaining cause is a missing or wrong-architecture **`wintun.dll`** (see below) —
+the connect **fails** and tells you which of the two it was. It does not
 quietly fall back to leaving you with a working proxy: you asked to be protected,
 and a green banner over traffic that is still in the clear is the exact failure
 ADR-0039 exists to prevent.
@@ -140,6 +148,16 @@ coordinator/STUN/TURN + TURN password. `coordinators` is a JSON array; the clien
 rotates across them (issue #6). This file is gitignored — never commit it. A missing
 file isn't an error at startup; pressing Connect with nothing configured surfaces a
 plain-language explanation instead of hanging.
+
+**`coordinators`, `stun` and `turn` are the one group Settings cannot set** — there
+is no widget for any of them, deliberately (ADR-0039 separates operator config from
+user preference). So the Connect refusal names this file by its full path and says
+that outright, rather than sending you to a window with no such field (bacchus#134).
+It names the file to *edit* when one is already there — `deploy/install.sh` seeds
+one on Linux and the Windows release bundle is to place one beside the exe
+(bacchus#136) — and the file to *create* when there is not. An entry that is blank
+(`"coordinators": [""]`) counts as no coordinator and gets the same message, rather
+than reaching the dialer as an address.
 
 **Which of the two the client reads, and which it writes, are different questions**
 (issue #118). It **reads** the exe-adjacent file first and the per-user one second, so
@@ -324,13 +342,66 @@ GOOS=windows CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
   go build -ldflags "-H=windowsgui" -o bacchus-fyne.exe ./clients/fyne   # cross-compile from Linux
 ```
 
+### The Windows application manifest (elevation)
+
+Two files in this directory exist only for Windows builds:
+
+| File | What it is |
+|---|---|
+| `bacchus-fyne.manifest` | The manifest itself — reviewable XML. It requests `requestedExecutionLevel level="requireAdministrator"` and nothing else. |
+| `rsrc_windows_amd64.syso` | That manifest compiled into a COFF resource object. `go build` links any `*.syso` in the package directory whose name matches the target, so a `windows/amd64` build carries the manifest **inside the exe** with no extra step, and a Linux or macOS build ignores the file entirely. |
+
+Embedded rather than shipped beside the exe as `bacchus-fyne.exe.manifest`, so it
+travels with the binary through any channel in
+[docs/distribution.md](../../docs/distribution.md) — a sidecar manifest that got
+separated from its exe would silently stop asking for elevation.
+
+**Regenerate the `.syso` whenever you edit the manifest**, with
+[`rsrc`](https://github.com/akavel/rsrc):
+
+```
+go run github.com/akavel/rsrc@v0.10.2 \
+  -manifest bacchus-fyne.manifest -arch amd64 -o rsrc_windows_amd64.syso
+```
+
+Forgetting is caught: `manifest_test.go` walks the resource directory in the
+committed object and fails if the manifest embedded in it is not byte-for-byte the
+`.manifest` beside it, or if it is not under `RT_MANIFEST`/id 1 where Windows looks.
+It runs on every platform, because the `.syso` is committed data and a check only
+the Windows job runs is one a Linux contributor never sees fail.
+
+Only `amd64` is committed, which is the only Windows architecture anything here
+builds. A `windows/arm64` build would link no `.syso` at all and would therefore
+launch unelevated — generate one with `-arch arm64` first; the drift test covers
+whatever `.syso` files are present.
+
+One cost, and it is only a local-development one: the `.syso` is linked into
+whatever the Go linker builds from this package, **including the test binary**. Go
+runs tests through `CreateProcess`, which does not elevate — it fails with "the
+requested operation requires elevation" — so on a Windows machine with UAC on,
+`go test ./clients/fyne` needs an elevated shell. `go test ./clients/fyne/internal/...`
+does not, and neither does anything on Linux. CI is unaffected: the GitHub-hosted
+Windows images run as administrator with UAC disabled.
+
+Two things this manifest deliberately does *not* declare, both in its own comment:
+Common Controls v6 (the retired tray client needed it for `lxn/walk`; Fyne draws its
+own widgets and links no comctl32) and DPI awareness (Fyne's GLFW driver sets that
+through the API, and a manifest declaration would override it).
+
 ### wintun runtime dependency, Windows only (fetch separately — not vendored)
 
 **A Windows build that compiles will still not connect without this.** The client
 loads **`wintun.dll`** at runtime (via `golang.zx2c4.com/wintun`) to create the TUN
-adapter, and it must sit next to `bacchus-fyne.exe` or on the DLL search path.
-Without it, bring-up fails with `create wintun adapter` — the same message an
-unelevated run produces, so the two are easy to confuse (bacchus#135).
+adapter, and it must sit next to `bacchus-fyne.exe` or in `System32` — those are the
+only two places it is searched for (`LOAD_LIBRARY_SEARCH_APPLICATION_DIR` plus
+`LOAD_LIBRARY_SEARCH_SYSTEM32`), so anywhere else on `PATH` will not do.
+
+Without it, bring-up fails with `create wintun adapter`, and the message now names
+**which** of the two causes it was: a DLL that could not be loaded, or a process
+that is not elevated. It used to name only elevation, for both (bacchus#135), which
+sent whoever had the other problem in the wrong direction. A wrong-**architecture**
+`wintun.dll` reads as the DLL case too, which is worth knowing because the download
+below carries one per arch and they all have the same file name.
 
 It is deliberately **not** committed to this repo: `wintun.dll` is proprietary
 (© WireGuard LLC, "licensed, not sold" — see its own `LICENSE.txt`), so it does not
@@ -434,7 +505,11 @@ cgo compiling `go-gl/glfw`. See `.github/workflows/ci.yml`.
   Set-NetFirewallProfile -All -DefaultOutboundAction Allow
   Remove-NetFirewallRule -Group BacchusKillSwitch
   ```
-- **On Windows there is no installer**, so a downloaded binary needs `wintun.dll` placed
-  beside it and a config file written by hand before it can connect (bacchus#136, with
-  bacchus#134 and bacchus#135 as the symptoms). `deploy/install.sh` covers Linux only.
+- **On Windows there is no installer.** `deploy/install.sh` covers Linux only;
+  bacchus#136 is the card for the release bundle that replaces it, and the bundle is
+  not built yet. The client's own half of it is: the exe asks Windows for elevation
+  itself, it prefers a config placed beside it over the per-user one, and both
+  first-run failures name what is wrong and where (bacchus#134, bacchus#135). A
+  **bare exe with nothing beside it still cannot connect** — it needs `wintun.dll`
+  and a config file, and until the bundle ships both are placed by hand.
 - Requires a C toolchain to build (see Build above).

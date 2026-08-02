@@ -43,10 +43,10 @@ func main() {
 	// A config file that exists but doesn't parse must be SEEN, not logged. This is
 	// built with -H=windowsgui (see README): there is no console, so log.Println goes
 	// nowhere at all — the same trap issue #50 fixed for the Windows tray client. Worse than
-	// silent: cfg stays zero, so Connect then reports "no coordinators configured —
-	// copy the example into place" at a user whose file IS in place and has a typo,
-	// pointing them away from the one thing wrong. So it is carried to the UI and
-	// shown on the detail line instead.
+	// silent: cfg stays zero, so Connect then reports "no coordinators configured"
+	// and sends the user to edit a file that is already there and already says what
+	// it should — pointing them away from the one thing wrong, which is the typo.
+	// So it is carried to the UI and shown on the detail line instead.
 	cfg, cfgPath, err := appstate.LoadConfig()
 	var cfgErr error
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

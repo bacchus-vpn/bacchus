@@ -79,8 +79,128 @@ func TestController_NoCoordinators(t *testing.T) {
 	if s := rec.next(t, 2*time.Second); s != Disconnected {
 		t.Fatalf("state = %v, want Disconnected", s)
 	}
-	if got := rec.detailsSnapshot(); len(got) == 0 || got[len(got)-1] != errNoCoordinators.Error() {
+	if got := rec.detailsSnapshot(); len(got) == 0 || got[len(got)-1] != noCoordinatorsError().Error() {
 		t.Fatalf("details = %v, want the last entry to explain the missing config", got)
+	}
+}
+
+// TestController_BlankCoordinatorIsNoCoordinator is the near miss of the
+// release bundle's empty template: `"coordinators": [""]`, which is what
+// deleting a host from between the quotes leaves behind. Its length is 1 and
+// it names nothing, so a length check waves it through to core, which drops
+// blanks itself and then refuses - correctly, but with a sentence that names
+// no file, no key and no window. The client's own refusal is the one worth
+// getting, so this must abort here.
+//
+// Mutation check: put `len(c.cfg.Coordinators) == 0` back in connectAsync and
+// this hangs on a real dial attempt instead of landing on Disconnected with an
+// actionable line.
+func TestController_BlankCoordinatorIsNoCoordinator(t *testing.T) {
+	ctrl := NewController(Config{Coordinators: []string{"", "   "}})
+	rec := newStateRecorder()
+	ctrl.OnState, ctrl.OnDetail = rec.onState, rec.onDetail
+
+	ctrl.Connect()
+	if s := rec.next(t, 2*time.Second); s != Connecting {
+		t.Fatalf("first state = %v, want Connecting", s)
+	}
+	if s := rec.next(t, 2*time.Second); s != Disconnected {
+		t.Fatalf("state = %v, want Disconnected", s)
+	}
+	if got := rec.detailsSnapshot(); len(got) == 0 || got[len(got)-1] != noCoordinatorsError().Error() {
+		t.Fatalf("details = %v, want this client's own no-coordinators message, not core's", got)
+	}
+}
+
+// TestHasCoordinator pins the counting rule itself, including the two entries
+// that look like addresses to len() and are not.
+func TestHasCoordinator(t *testing.T) {
+	for _, tc := range []struct {
+		in   []string
+		want bool
+	}{
+		{nil, false},
+		{[]string{}, false},
+		{[]string{""}, false},
+		{[]string{" \t\n"}, false},
+		{[]string{"", ""}, false},
+		{[]string{"203.0.113.10:8080"}, true}, // TEST-NET-3 (RFC 5737)
+		{[]string{"", "203.0.113.10:8080"}, true},
+	} {
+		if got := hasCoordinator(tc.in); got != tc.want {
+			t.Errorf("hasCoordinator(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestNoCoordinatorsErrorNamesTheFileToCreate is bacchus#134's first half: the
+// message must name a path the user can act on. It used to say to copy
+// bacchus-fyne.config.example.json "into place" — a file that is in the
+// repository and in no artifact, at a path it did not name.
+//
+// The per-user branch is the one a fresh binary with no config anywhere lands
+// on, which is what a #115-style download does before anybody has saved
+// anything.
+func TestNoCoordinatorsErrorNamesTheFileToCreate(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	want := DefaultConfigPath()
+	if _, err := os.Stat(want); err == nil {
+		t.Fatalf("%s already exists; this test needs the no-config-anywhere case", want)
+	}
+
+	got := noCoordinatorsError().Error()
+	if !strings.Contains(got, want) {
+		t.Errorf("message %q does not name %q — a path the user can act on is the whole point of bacchus#134", got, want)
+	}
+	if !strings.Contains(got, "create") {
+		t.Errorf("message %q does not tell the user to create the file, which is what has to happen when it is not there: %q", got, want)
+	}
+}
+
+// TestNoCoordinatorsErrorNamesAnExistingConfig is the case the release bundle
+// creates and the reason bacchus#136's third ruling is enough on the client
+// side: the bundle ships bacchus-fyne.config.json beside the exe with the
+// endpoint keys present and empty, so the file the user must edit already
+// exists and the message has to say "add to" rather than "create".
+func TestNoCoordinatorsErrorNamesAnExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	exePath := writeExeAdjacentConfig(t, Config{})
+
+	got := noCoordinatorsError().Error()
+	if !strings.Contains(got, exePath) {
+		t.Errorf("message %q does not name the config that exists (%q)", got, exePath)
+	}
+	if strings.Contains(got, "create") {
+		t.Errorf("message %q tells the user to create a file that is already there (%q)", got, exePath)
+	}
+}
+
+// TestNoCoordinatorsErrorHasNoDeadEnds is the regression guard for the two
+// pieces of advice bacchus#134 found unactionable, kept separate because each
+// was independently a dead end: a file that ships in no artifact, and a
+// Settings window with no widget for the field in question.
+//
+// The second is asserted as a REQUIREMENT to mention Settings, not a ban on
+// it. Saying nothing sends the user hunting through that window for a control
+// that is not in it — which is what bacchus#134's own reporter did within
+// minutes. Naming it in order to rule it out is what stops the hunt. If the
+// endpoint fields ever gain widgets, this test is where that shows up.
+func TestNoCoordinatorsErrorHasNoDeadEnds(t *testing.T) {
+	got := noCoordinatorsError().Error()
+	if strings.Contains(got, "bacchus-fyne.config.example.json") {
+		t.Errorf("message %q still points at the example file, which is in the repository and in no artifact", got)
+	}
+	if !strings.Contains(got, settingsMenuPath) {
+		t.Errorf("message %q does not mention %s, so nothing tells the user that window cannot set this field", got, settingsMenuPath)
+	}
+	if !strings.Contains(got, "coordinators") {
+		t.Errorf("message %q does not name the config key to set, which is the one token a user hand-editing JSON needs", got)
 	}
 }
 

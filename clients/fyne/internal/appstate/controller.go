@@ -2,8 +2,9 @@ package appstate
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/bacchus-vpn/bacchus/clients/internal/enforcement"
@@ -217,9 +218,84 @@ func (c *Controller) logf(format string, args ...any) {
 // documentation covers both. Loopback-only, so nothing off the machine can use it.
 const SocksAddr = "127.0.0.1:1080"
 
-var (
-	errNoCoordinators = errors.New("no coordinators configured — copy bacchus-fyne.config.example.json into place and set at least one")
-)
+// hasCoordinator reports whether cfg names at least one coordinator, counting
+// them the way core.New counts them: it runs the pool through dedupNonEmpty
+// before deciding, so a whitespace-only entry is not an address there and must
+// not be one here either.
+//
+// Asking the same question rather than `len(...) == 0` is what keeps the
+// answer this client's. A config carrying `"coordinators": [""]` — one
+// keystroke from the empty template the release bundle ships beside the exe
+// (bacchus#136), and exactly what deleting a host between the quotes leaves
+// behind — has a non-zero length and no coordinator in it. It used to sail
+// past this check and come back from core as "at least one coordinator address
+// required": true, and naming neither the file to edit nor the key to put it
+// in, which is the whole of bacchus#134.
+func hasCoordinator(addrs []string) bool {
+	for _, a := range addrs {
+		if strings.TrimSpace(a) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// settingsMenuPath is how the Settings window is reached, spelled the way
+// main.go's menu actually reads (File → Settings…). Named here because the
+// message below has to be exact about what that window can and cannot do.
+const settingsMenuPath = "File → Settings…"
+
+// noCoordinatorsError is the refusal a client with nothing configured meets
+// the first time it is asked to connect. The refusal itself has always been
+// right; bacchus#134 is that its ADVICE was a dead end in three separate ways,
+// all of which a downloaded binary meets at once and an install.sh install
+// meets none of (install.sh seeds a config, which is why this never bit a
+// Linux user):
+//
+//  1. It told the user to copy bacchus-fyne.config.example.json. That file
+//     lives in the repository and is in no artifact, so it named something the
+//     user does not have and has no reason to know exists.
+//  2. It said to copy it "into place", which names no path. DefaultConfigPath
+//     computes the real one and always has.
+//  3. It did not mention the Settings window — and the reason that omission
+//     was not simply a miss is that Settings CANNOT set Coordinators, STUN or
+//     TURN. There is no widget for any of them. So a message pointing at
+//     Settings for this would have been the same dead end wearing a menu item,
+//     and one the user would search the whole window for before believing.
+//
+// So the sentence names the file, and names Settings only to rule it out.
+// Whether those three fields should JOIN the Settings window is a live
+// question and not settled here; if they ever do, this message is one of the
+// two places that has to change (the other is Config's own doc comment).
+//
+// The path is resolved at each call rather than once at init: DefaultConfigPath
+// stats the exe-adjacent candidate, and a user who creates that file while the
+// app is running should be told about the file they actually have. Cheap
+// enough — this runs only when a user pressed Connect on an empty config.
+func noCoordinatorsError() error {
+	const noCoordinators = "no coordinators configured"
+	const settingsCaveat = settingsMenuPath + " covers the rest of that file, but not the coordinator, STUN and TURN addresses."
+
+	path := DefaultConfigPath()
+	if path == "" {
+		// Neither candidate could be named: this OS reported no per-user
+		// config directory AND no path for the running binary. SaveConfig
+		// refuses an empty path for the same reason, so there is genuinely
+		// nothing to point at but the file name.
+		return fmt.Errorf("%s — put at least one in the \"coordinators\" list of a bacchus-fyne.config.json beside this program. %s",
+			noCoordinators, settingsCaveat)
+	}
+	if _, err := os.Stat(path); err == nil {
+		// The file is there — the release bundle ships one beside the exe with
+		// the endpoint keys present and empty (bacchus#136), and that is the
+		// case this branch is for. "Create" would be wrong and confusing
+		// advice for a user looking straight at the file.
+		return fmt.Errorf("%s — add at least one to the \"coordinators\" list in %s. %s",
+			noCoordinators, path, settingsCaveat)
+	}
+	return fmt.Errorf("%s — create %s and put at least one in its \"coordinators\" list. %s",
+		noCoordinators, path, settingsCaveat)
+}
 
 // Connect resolves an exit and brings up a session, entirely off the calling
 // goroutine. A no-op if a connect/connected session is already in flight. The
@@ -253,8 +329,8 @@ func (c *Controller) Connect() {
 }
 
 func (c *Controller) connectAsync(gen uint64) {
-	if len(c.cfg.Coordinators) == 0 {
-		c.abort(gen, errNoCoordinators)
+	if !hasCoordinator(c.cfg.Coordinators) {
+		c.abort(gen, noCoordinatorsError())
 		return
 	}
 
