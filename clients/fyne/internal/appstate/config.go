@@ -235,17 +235,40 @@ func JoinBypassLines(bypass []string) string {
 	return strings.Join(bypass, "\n")
 }
 
-// configPaths lists candidate config locations, most-specific first: next to
-// the executable, then this OS's per-user config directory. A relative,
-// portable install (a laptop with the exe on a USB stick, say) wants the
-// former; a normal per-machine install wants the latter.
-func configPaths() []string {
-	var p []string
+// configCandidates returns the two places this client's config can live, each
+// empty when the OS cannot answer for it: exePath is next to the executable,
+// userPath is under this OS's per-user config directory.
+//
+// They are returned separately rather than as one list because LOADING and
+// SAVING rank them differently - see configPaths and DefaultConfigPath.
+func configCandidates() (exePath, userPath string) {
 	if exe, err := os.Executable(); err == nil {
-		p = append(p, filepath.Join(filepath.Dir(exe), "bacchus-fyne.config.json"))
+		exePath = filepath.Join(filepath.Dir(exe), "bacchus-fyne.config.json")
 	}
 	if dir, err := os.UserConfigDir(); err == nil {
-		p = append(p, filepath.Join(dir, "Bacchus", "fyne-client.json"))
+		userPath = filepath.Join(dir, "Bacchus", "fyne-client.json")
+	}
+	return exePath, userPath
+}
+
+// configPaths is the LOAD order, most-specific first: next to the executable,
+// then this OS's per-user config directory. A relative, portable install (a
+// laptop with the exe on a USB stick, say) wants the former; a normal
+// per-machine install wants the latter.
+//
+// This is deliberately NOT the order a save picks from. Which file to read is
+// "whose config is most specific to this copy of the program", and an
+// exe-adjacent file is a deliberate act that should win. Where to WRITE a
+// first config is a different question with a different answer - see
+// DefaultConfigPath.
+func configPaths() []string {
+	var p []string
+	exePath, userPath := configCandidates()
+	if exePath != "" {
+		p = append(p, exePath)
+	}
+	if userPath != "" {
+		p = append(p, userPath)
 	}
 	return p
 }
@@ -281,6 +304,17 @@ var errNoConfigPath = errors.New("no config file path to save to")
 // LoadConfig reported reading from, so a Settings save lands back in the same
 // file the user is already using, and DefaultConfigPath covers the
 // fresh-install case where nothing was loaded yet.
+//
+// The parent directory is created if it is missing, and that is not a
+// convenience: the per-user candidate is `<config dir>/Bacchus/fyne-client.json`,
+// and nothing creates that `Bacchus` directory on a machine where this client
+// has never saved. os.WriteFile does not create parents, so without this the
+// very first save on a fresh install fails with "no such file or directory" -
+// which is issue #118's failure again wearing a different errno. 0700 because
+// the file underneath is 0600 and holds TURNPass and VolunteerExitKey; a
+// world-readable directory around a 0600 secret is a smaller leak than the
+// file itself but still a leak of what is installed and when it was last
+// changed.
 func SaveConfig(path string, c Config) error {
 	if path == "" {
 		return errNoConfigPath
@@ -289,12 +323,60 @@ func SaveConfig(path string, c Config) error {
 	if err != nil {
 		return err
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	return os.WriteFile(path, b, 0o600)
 }
 
-// DefaultConfigPath is where SaveConfig should write when LoadConfig found no
-// existing file (its path return was "") - the first, most specific
-// candidate configPaths lists.
+// DefaultConfigPath is the SAVE target: where SaveConfig should write when
+// LoadConfig found no existing file (its path return was ""). It prefers the
+// per-user config directory, which is the reverse of configPaths' load order,
+// and the reversal is the fix for issue #118.
+//
+// It used to be configPaths()[0] - next to the executable. That was harmless
+// only while every user ran the binary out of a build directory they owned.
+// Issue #18's installer puts the GUI at /usr/local/bin, so the first thing a
+// fresh user does in Settings tried to write /usr/local/bin/bacchus-fyne.config.json
+// and failed on permissions. deploy/install.sh works around it by seeding the
+// per-user file, which masks the bug for anyone who installed that way and
+// leaves it live for anyone who did not - a downloaded binary, or a build
+// installed into a system path by hand.
+//
+// Preference, in order:
+//
+//   - An exe-adjacent config that ALREADY EXISTS. That is a portable install
+//     in use, and configPaths ranks it first, so saving anywhere else would
+//     write a second file that load then permanently shadows - the user's
+//     edits would appear to save and never take effect. Settings normally
+//     passes the path LoadConfig reported and never reaches here in that case;
+//     this keeps the guarantee inside the package that owns the ordering
+//     rather than resting it on one caller in another file.
+//   - The per-user config directory. Per-user settings belong in the user's
+//     own directory, which they own by construction.
+//   - Next to the executable, only when the OS cannot name a per-user config
+//     directory at all.
+//
+// Deliberately NOT a writability probe, which is the other obvious fix. "Can I
+// write here" is the wrong question: run this client under sudo and
+// /usr/local/bin becomes writable, so a probe would put the config there, and
+// the same user's next ordinary launch could read it but never save it again.
+// Ownership answers the question correctly without depending on how the
+// process happens to be privileged.
+//
+// Returns "" when neither candidate can be named - SaveConfig rejects an empty
+// path with errNoConfigPath, so that surfaces as a save error on the Settings
+// status line. The old form indexed configPaths()[0] unconditionally and
+// panicked on that same case, taking the GUI down with it.
 func DefaultConfigPath() string {
-	return configPaths()[0]
+	exePath, userPath := configCandidates()
+	if exePath != "" {
+		if _, err := os.Stat(exePath); err == nil {
+			return exePath
+		}
+	}
+	if userPath != "" {
+		return userPath
+	}
+	return exePath
 }

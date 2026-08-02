@@ -137,6 +137,18 @@ rotates across them (issue #6). This file is gitignored — never commit it. A m
 file isn't an error at startup; pressing Connect with nothing configured surfaces a
 plain-language explanation instead of hanging.
 
+**Which of the two the client reads, and which it writes, are different questions**
+(issue #118). It **reads** the exe-adjacent file first and the per-user one second, so
+a portable install — binary and config together on a USB stick — wins over anything
+already in the user's config directory. It **writes** to the per-user file: a Settings
+save normally goes straight back to whichever file was loaded, and when nothing was
+loaded at all the new file is created under the per-user directory (`Bacchus/` included,
+mode 0700), not beside the binary. Beside the binary is wrong for anything installed
+system-wide — `deploy/install.sh` puts the GUI in `/usr/local/bin`, which the desktop
+user cannot write, so the first Save used to fail on permissions. An existing
+exe-adjacent config still keeps the save, because that is the file the client would go
+on reading.
+
 `admissionPubKey` / `admissionCrlPath` are optional and mirror `clients/windows`'s
 fields of the same name (and `core.Config`'s). Both empty means the client verifies no
 exit credential and checks no revocation — fail-open, matching a coordinator with
