@@ -551,7 +551,7 @@ a buffer-aliasing bug that corrupted any netlink dump spanning more than one
 datagram. That is the verification §"How #37 gets tested" promised, and it is
 verification bacchus#59 never had.
 
-## Amendment (2026-08-02): §3.1's session check, and DNS (#104, #111)
+## Amendment (2026-08-02): §3.1's session check, DNS, and a wrong Consequence (#104, #111)
 
 **DNS is now answered.** The primitive this record identified and deliberately
 left open is decided in ADR-0051, which also corrects the reason recorded above.
@@ -613,3 +613,51 @@ now links a D-Bus client, so `uidHasActiveSession`'s comment no longer justifies
 its file read by the cost of that dependency. The file read stays, for the
 reason that survives — it is on the connection-accept path, where a file read
 cannot block on a bus that is starting or wedged.
+
+**One Consequence is wrong about its mechanism, and the shipped code is right.**
+The Consequences section says `clients/fyne` "must fail the connect when the
+helper is unreachable ... and `Controller.DeviceEnforced` must stay false". The
+first clause is correct and is what the client does. **The second is wrong, and
+following it would build the exact failure this record exists to prevent.**
+
+`Controller.DeviceEnforced()` is `c.enf != nil` — a property of the platform,
+not of the moment, which is what makes it safe to call from an `OnState`
+callback. On Linux it is true as of #37 because a Linux `Enforcer` exists, and
+it is fixed at build time on purpose. `enforcement_linux.go`'s "Why this does
+not probe for the helper" section argues the case at length, and the argument
+is the reason this sentence cannot be followed: a probe that failed would leave
+`DeviceEnforced()` false, the UI saying "Proxy ready", and the user quietly
+unprotected on a machine that was supposed to route everything. That is parity
+item 7's failure with the polarity reversed — not a claim of protection that
+does not exist, but a claim of *no* protection being expected on a machine
+where it was, which is the same lie told from the other end.
+
+The sentence conflates two different things:
+
+- **"Never claim protection you do not have."** Correct, and this record should
+  keep saying it. It is satisfied by the connect *failing* — loudly, at `Start`,
+  where an unreachable helper actually surfaces — and by never falling back to a
+  working SOCKS proxy under a "Protected" banner.
+- **"`DeviceEnforced` must be false."** The wrong mechanism for it.
+  `DeviceEnforced` answers *can this build enforce on this platform*, not *did
+  this session succeed*. Those are different questions, and the session's answer
+  is `Start`'s error, not this boolean.
+
+So the amended rule is: **an unreachable helper fails the connect; it does not
+change `DeviceEnforced`.** The original sentence stands in the record above,
+uncorrected in place, because this repo amends rather than rewrites — but it
+should not be implemented as written.
+
+Worth recording that the tree already noticed. `enforcement_linux.go`'s doc
+cites this record's Consequences *selectively*: it quotes the half that is right
+("must fail the connect when the helper is unreachable, never fall back to a
+working SOCKS proxy under a 'Protected' banner") and silently omits the
+`DeviceEnforced` clause. That was the correct call at the time and it left the
+disagreement implicit, which is the state #111 was opened about elsewhere in
+this same file. It is now explicit in both directions.
+
+This matters beyond Linux, which is why it is here rather than in a code
+comment. `[E9]` will read this Consequences line while implementing macOS, and
+ADR-0050 puts macOS behind a system extension whose availability is genuinely a
+runtime property — exactly the platform most likely to read "`DeviceEnforced`
+must stay false" as licence to make it a probe.
