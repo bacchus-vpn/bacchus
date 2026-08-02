@@ -921,9 +921,18 @@ hand would have added a screenshot, not a fact.
 ### The qualifier, which belongs in this section and not a footnote
 
 **The run used `clients/windows`.** It had to: `clients/fyne` needs a mingw-w64
-toolchain to produce a Windows binary, the run had none, and no such artifact existed
-anywhere — because, as #115 then established, **no CI job had ever built `clients/fyne`
-for Windows at all.**
+toolchain to produce a Windows binary, the run had none, and no current binary existed
+to reach for — because, as #115 then established, **no CI job had ever built
+`clients/fyne` for Windows.**
+
+The precise version of that, since this document's whole subject is the difference
+between "not checked" and "not checkable": the "new build prerequisite" section above
+records a Windows binary of this client being cross-compiled with mingw and *executed
+on a Windows host* as part of the original spike. So the target was known to build —
+on 2026-07-15, before #59 folded the enforcement layer in, before #93 wired six more
+config fields through it, and before everything since. It was proven once and then
+watched by nothing, which is the same gap the #153 amendment closed for Linux and the
+same distinction it drew: proven once is not proven continuously.
 
 What follows from that, precisely:
 
