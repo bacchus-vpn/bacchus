@@ -53,6 +53,15 @@ const (
 	nftTableName = "bacchus"
 	nftChainName = "output"
 	nftAllowSet  = "allow4"
+
+	// nftServeSet holds the one source address a volunteered relay or exit
+	// egresses under (ADR-0053, bacchus#109). A set rather than a literal in
+	// the rule, for a reason the kill-switch's own shape does not need: the
+	// allowance has to be withdrawable from the DISCONNECT path — including
+	// the crash path, where the lockdown is deliberately held. Emptying a set
+	// is one atomic element deletion; retracting a literal would mean finding
+	// and deleting a rule by handle while the table stays armed.
+	nftServeSet = "serve4"
 )
 
 // netfilter netlink constants. Not in x/sys/unix, so they are spelled out here
@@ -71,6 +80,7 @@ const (
 	nftMsgNewRule    = 6
 	nftMsgNewSet     = 9
 	nftMsgNewSetElem = 12
+	nftMsgDelSetElem = 14
 
 	// Attribute ids, per object.
 	nftaTableName = 1
@@ -417,6 +427,18 @@ type killSwitchSpec struct {
 	LoIfIndex  int
 	Hosts      []netip.Addr   // single addresses: control plane, bypass hosts, learned
 	Nets       []netip.Prefix // CIDR bypass entries
+
+	// ServedSrc is this machine's own address, and it is present only when a
+	// volunteered relay or exit is serving through the carve-out (ADR-0053).
+	// Invalid — the ordinary case — builds exactly the lockdown that existed
+	// before #109: no set, no rule, nothing to match.
+	//
+	// This is the one allowance in here that is not a DESTINATION. Every other
+	// rule says "this specific place may be reached"; this one says "traffic
+	// this machine sent as itself may leave", which for an exit is necessarily
+	// the whole internet. ADR-0053 §4 is about that difference and it is why
+	// the record exists at all.
+	ServedSrc netip.Addr
 }
 
 // enableKillSwitch builds the whole lockdown as one transaction.
@@ -452,6 +474,29 @@ func (c *nftConn) enableKillSwitch(spec killSwitchSpec) error {
 		)},
 	}
 
+	if spec.ServedSrc.IsValid() {
+		// The served-egress set and its element, created inside the SAME
+		// transaction as the drop policy above. That matters in the direction
+		// this whole file cares about: there is no ordering in which the chain
+		// is armed and this set does not yet exist, so a volunteer's served
+		// traffic is never briefly blackholed by its own kill-switch.
+		msgs = append(msgs, nftMsg{
+			typ:   nftMsgNewSet,
+			flags: unix.NLM_F_CREATE,
+			body: concat(
+				nfgenmsg(nfprotoInet),
+				nftAttrStr(nftaSetTable, nftTableName),
+				nftAttrStr(nftaSetName, nftServeSet),
+				nftAttrU32(nftaSetKeyType, 7), // NFT_TYPE_IPADDR, userspace metadata
+				nftAttrU32(nftaSetKeyLen, 4),
+				nftAttrU32(nftaSetID, 2),
+			),
+		})
+		if elem := serveElemMsg(spec.ServedSrc); elem != nil {
+			msgs = append(msgs, *elem)
+		}
+	}
+
 	if elems := setElemMsg(spec.Hosts); elems != nil {
 		msgs = append(msgs, *elems)
 	}
@@ -478,6 +523,17 @@ func (c *nftConn) enableKillSwitch(spec killSwitchSpec) error {
 		exprLookup(nftAllowSet),
 		exprVerdict(nfAccept),
 	))
+	// The served-egress allowance: SOURCE address, offset 12 in the IPv4
+	// header, where every rule above reads the destination at offset 16.
+	if spec.ServedSrc.IsValid() {
+		msgs = append(msgs, rule(
+			exprMetaLoad(nftMetaNFProto),
+			exprCmpEq([]byte{nfprotoIPv4}),
+			exprPayloadLoad(nftPayloadNetworkHeader, 12, 4),
+			exprLookup(nftServeSet),
+			exprVerdict(nfAccept),
+		))
+	}
 	// One masked compare per CIDR entry.
 	for _, n := range spec.Nets {
 		mask := net4Mask(n.Bits())
@@ -510,6 +566,25 @@ func (c *nftConn) enableKillSwitch(spec killSwitchSpec) error {
 
 // setElemMsg builds one NEWSETELEM message for a batch of addresses.
 func setElemMsg(addrs []netip.Addr) *nftMsg {
+	return elemMsg(nftMsgNewSetElem, unix.NLM_F_CREATE, nftAllowSet, addrs)
+}
+
+// serveElemMsg adds the served-egress source to its own set; serveElemDelMsg
+// takes it back out. Same encoding as the allowlist's, a different set name —
+// which is the whole reason the two allowances are separate sets rather than
+// one: withdrawing served egress must not disturb the control-plane allowlist
+// the rest of the session is still riding.
+func serveElemMsg(addr netip.Addr) *nftMsg {
+	return elemMsg(nftMsgNewSetElem, unix.NLM_F_CREATE, nftServeSet, []netip.Addr{addr})
+}
+
+func serveElemDelMsg(addr netip.Addr) *nftMsg {
+	return elemMsg(nftMsgDelSetElem, 0, nftServeSet, []netip.Addr{addr})
+}
+
+// elemMsg builds one set-element message. Returns nil when nothing encodable
+// is left, so callers can append it unconditionally.
+func elemMsg(typ uint16, flags uint16, setName string, addrs []netip.Addr) *nftMsg {
 	var elems []byte
 	n := 0
 	for _, a := range addrs {
@@ -526,15 +601,39 @@ func setElemMsg(addrs []netip.Addr) *nftMsg {
 		return nil
 	}
 	return &nftMsg{
-		typ:   nftMsgNewSetElem,
-		flags: unix.NLM_F_CREATE,
+		typ:   typ,
+		flags: flags,
 		body: concat(
 			nfgenmsg(nfprotoInet),
 			nftAttrStr(nftaSetElemListTable, nftTableName),
-			nftAttrStr(nftaSetElemListSet, nftAllowSet),
+			nftAttrStr(nftaSetElemListSet, setName),
 			nftAttrNested(nftaSetElemListElements, elems),
 		),
 	}
+}
+
+// revokeServedEgress empties the served-egress set, leaving every other part of
+// the lockdown exactly as it was.
+//
+// This is the half of the carve-out that has to work on the CRASH path, where
+// ADR-0049 §8 holds the lockdown because holding it fails closed. Holding this
+// would not: the process that was serving is dead, so there is nothing left to
+// carve out for, and an allowance nobody is using is just a hole. Both
+// decisions are the same rule applied to opposite state — keep what fails
+// closed, drop what fails open — which is why they end up asymmetric.
+func (c *nftConn) revokeServedEgress(addr netip.Addr) error {
+	msg := serveElemDelMsg(addr)
+	if msg == nil {
+		return nil
+	}
+	err := c.batch([]nftMsg{*msg})
+	// Not there is the intended end state: the whole table may already be gone
+	// (a clean disconnect lifts it first), or the element may never have been
+	// added because the kill-switch was not armed at all.
+	if errors.Is(err, unix.ENOENT) {
+		return nil
+	}
+	return err
 }
 
 // refreshAllowIP folds one late-learned address into the live allowlist.

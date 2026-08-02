@@ -179,9 +179,9 @@ config file yet, to this OS's per-user config directory — see Config above):
 | Relay directory file and its public key | `relayDirectoryPath`, `relayDirectoryKey` | **Yes** |
 | Admission authority public key | `admissionPubKey` | **Yes** |
 | Revocation list file | `admissionCrlPath` | **Yes** |
-| Carry other people's traffic as a relay | `volunteerRelay` | **macOS only** — see below |
-| Let other people's traffic reach the internet through your connection | `volunteerExit` | **macOS only** — see below |
-| Your address for exiting, and your exit identity key | `volunteerAdvertise`, `volunteerExitKey` | **macOS only** — see below |
+| Carry other people's traffic as a relay | `volunteerRelay` | Linux and macOS — see below |
+| Let other people's traffic reach the internet through your connection | `volunteerExit` | Linux and macOS — see below |
+| Your address for exiting, and your exit identity key | `volunteerAdvertise`, `volunteerExitKey` | Linux and macOS — see below |
 
 The lower five arrived with #93 and carry no platform caveat: they are `core` config,
 enforced by `core`, and so mean the same thing on every platform this client runs on.
@@ -244,6 +244,12 @@ The last three rows point the other way from everything above them: at what this
 client *gives* the network rather than what it takes. `bacchus-node` got the same
 switch as `-volunteer-relay` / `-volunteer-exit`; see
 [docs/RUNNING.md](../../docs/RUNNING.md) for the node side.
+
+On a build that routes the whole device these are live only where enforcement can
+carve the served roles' own egress back out of the tunnel — Linux, as of
+bacchus#109. Where it cannot, the controls are disabled with the reason on them
+rather than accepting a choice that would fail at connect. See "Volunteering is
+refused on Windows" under the honesty list below.
 
 **Relay and exit are two separate checkboxes, and neither one turns on the other.**
 Both off by default. The two costs are not comparable:
@@ -339,15 +345,25 @@ launch a GUI binary, matching `clients/windows`'s own job.
   are not captured (bacchus#104). The Settings window says so next to the field.
 - Settings (`old #152`) for split-tunnel/kill-switch/DNS enforce nothing on macOS —
   same root cause as the first point. Live on Windows and Linux. See Settings above.
-- **Volunteering is refused on any build that routes the device, which now includes
-  every Linux build.** Serving and device-wide routing cannot share a process
-  (`ErrVolunteerWhileRouted`), and `DeviceEnforced()` is a property of the platform
-  rather than of whether the helper happens to be installed. A Linux user who had
-  volunteered under the proxy-only client has those opt-ins turned off on their
-  first save, with a message saying so (bacchus#101). To keep donating capacity
-  from a Linux machine, run `cmd/node` with `-volunteer-relay` / `-volunteer-exit`
-  instead — see
+- **Volunteering is refused on Windows, and available on Linux.** Serving and
+  device-wide routing cannot share a process unless the served roles' own egress is
+  carved back out of the tunnel, which Linux does as of bacchus#109 (ADR-0053) and
+  Windows cannot: Windows selects a route by destination and has no source-based
+  rule layer, so a served socket bound to the physical adapter's address still goes
+  into the tunnel. The gate is what the platform can DO
+  (`Enforcer.ServesWhileRouted`), not whether it routes the device, so a Windows
+  user still gets `ErrVolunteerWhileRouted` and disabled controls. To donate
+  capacity from Windows, run `cmd/node` with `-volunteer-relay` /
+  `-volunteer-exit` instead — see
   [docs/RUNNING.md](../../docs/RUNNING.md#volunteering-your-connection-issue-12).
+- **What volunteering on Linux widens.** While either opt-in is on, the kill-switch
+  gains one allowance that is a SOURCE rather than a destination: traffic this
+  machine sent as itself may leave, which for an exit is necessarily the whole
+  internet. It is scoped to the volunteering user's uid and to this machine's own
+  address, so another user's processes and every ordinary unbound socket — the
+  volunteer's own browsing included — still go through the tunnel. It is dropped
+  the moment the session ends, including a crash, where the lockdown itself is
+  deliberately held. ADR-0053 §4 states the residue this leaves.
 - `Blocked` makes no claim about leakage on any platform. On Windows an armed
   kill-switch is holding the machine closed; the banner still does not say so,
   because the kill-switch is a setting you can turn off and the banner does not

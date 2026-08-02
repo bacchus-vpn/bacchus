@@ -67,7 +67,7 @@ var splitTunnelModes = []string{appstate.BypassModeExclude, appstate.BypassModeI
 // showSettings opens the settings window seeded from cfg. onSaved is called
 // with the new config and the path it was written to after a successful
 // save, so main.go can update the config it holds for the next connect.
-func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool, onSaved func(appstate.Config, string)) {
+func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced, volunteeringRefused bool, onSaved func(appstate.Config, string)) {
 	if settingsOpen {
 		return
 	}
@@ -219,15 +219,22 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 		volunteerExitKeyEntry.SetText(k)
 	})
 
-	// A build that routes the whole device cannot serve, and says so on the
-	// controls themselves rather than accepting the choice and failing at
-	// connect. Disabled-with-a-reason is the honest state here: the refusal is
-	// not about anything the user typed, so there is nothing for them to fix,
-	// and an enabled checkbox that always errors on save would imply otherwise.
+	// A build that routes the whole device AND cannot carve a served role's
+	// egress back out of it cannot serve, and says so on the controls
+	// themselves rather than accepting the choice and failing at connect.
+	// Disabled-with-a-reason is the honest state here: the refusal is not about
+	// anything the user typed, so there is nothing for them to fix, and an
+	// enabled checkbox that always errors on save would imply otherwise.
 	// PlanVolunteer refuses the same combination anyway — this is the UI half of
 	// one rule, not the rule itself, which is why a hand-edited config file is
 	// still caught (Controller.connectAsync).
-	if enforced {
+	//
+	// volunteeringRefused rather than enforced, and the two are no longer the
+	// same answer (bacchus#109, ADR-0053): Linux routes the device and CAN carve
+	// the served egress out, so the toggles are live there; Windows routes it
+	// and cannot, so they are not. Every other use of `enforced` in this window
+	// still asks the old question, which is why both are parameters.
+	if volunteeringRefused {
 		// TextStyle before SetText: SetText is what triggers the Label's
 		// Refresh, so assigning the style after it would leave the style out of
 		// that refresh and rely on Show() rendering the widget fresh instead.
@@ -376,7 +383,7 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 		// here is what makes the next launch consistent no matter which machine
 		// the file came from.
 		var volunteeringCleared bool
-		next, volunteeringCleared = appstate.ClearVolunteeringIfRouted(next, enforced)
+		next, volunteeringCleared = appstate.ClearVolunteeringIfRouted(next, volunteeringRefused)
 		// VolunteerAdvertise and VolunteerExitKey are deliberately KEPT. #100's
 		// reasoning applies unchanged and is stronger here than for the toggles:
 		// they are read only for the exit role, so keeping them costs nothing,
@@ -388,7 +395,7 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced bool
 		// PlanVolunteer against the config it loads from disk, which is the path
 		// that genuinely must fail closed — a hand-edited file saying "serve" on
 		// a build that routes the device must not connect.
-		volunteer, err := appstate.PlanVolunteer(next, enforced)
+		volunteer, err := appstate.PlanVolunteer(next, volunteeringRefused)
 		if err != nil {
 			status.SetText(lang.L(err.Error()))
 			return

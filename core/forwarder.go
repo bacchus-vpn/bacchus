@@ -195,7 +195,12 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 		e.exitTerminateUDP(sid, pace, nc, addr)
 		return
 	}
-	remote, err := net.DialTimeout("tcp", target, 10*time.Second)
+	// dialServed, not net.DialTimeout: this is the egress that the exit opt-in
+	// promises leaves under this operator's own address, and on a machine that
+	// routes itself through Bacchus it only does so if the socket says which
+	// address it is (issue #109, ADR-0053). Unchanged on every node that is not
+	// routing itself, which is all of cmd/node.
+	remote, err := e.dialServed("tcp", target, 10*time.Second)
 	if err != nil {
 		return
 	}
@@ -347,7 +352,10 @@ func (e *Engine) meterN(n int) error {
 // disclosure is materially smaller than the credential-to-exit design §4 rejected.
 func (e *Engine) relayPipe(st Stream, pace *capacity.Limiter, exitAddr string) {
 	defer st.Close()
-	up, err := net.DialTimeout("tcp", exitAddr, 10*time.Second)
+	// Served, like the exit's own egress above: this leg carries a client's
+	// traffic onward, so it must leave this relay under this relay's address
+	// rather than through a Bacchus connection this machine is also using.
+	up, err := e.dialServed("tcp", exitAddr, 10*time.Second)
 	if err != nil {
 		// A relay that cannot reach its assigned exit is a real operational fault
 		// (exit down, stale advertised address, or a partitioned relay->exit leg),

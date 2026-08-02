@@ -2451,7 +2451,10 @@ func (e *Engine) relayForward(nc *noiseConn, next string) {
 			e.emit(EventInfo, "", "onion: forwarding for %s is back under its limits after turning away %d circuit(s)", peerLabel(peer), refused)
 		}
 	}()
-	up, err := net.DialTimeout("tcp", next, forwardDialTimeout)
+	// Served (issue #109): an onion forward carries a client's layer onward, so
+	// it leaves under this relay's own address rather than through a Bacchus
+	// connection this machine may also be using as a client.
+	up, err := e.dialServed("tcp", next, forwardDialTimeout)
 	if err != nil {
 		e.emit(EventError, "", "onion: dial next hop %s: %v", next, err)
 		return

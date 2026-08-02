@@ -67,7 +67,15 @@ import (
 // because the helper is old is parity item 7's failure mode wearing a version
 // skew." So this is compared for equality, not for ">=", and there is
 // deliberately no capability handshake to fall back through.
-const Version = 1
+//
+// 2 adds the served-egress carve-out (ADR-0053, bacchus#109). Bumped rather
+// than left at 1 with two new verbs, and the equality rule is exactly why: a
+// new client against an old helper would Open successfully and only discover
+// at the carve-out verb that this helper cannot do it — after core.Config was
+// already built with a serving role in it. That is the "silently loses" shape
+// the rule above exists to forbid, one field over. An old helper now refuses
+// the session at Open instead, which is a sentence the user can act on.
+const Version = 2
 
 const (
 	// MaxFrame caps one encoded request or reply. The largest legitimate
@@ -125,6 +133,23 @@ const (
 	// legibly rather than confusingly if that ever changes.
 	VerbCaptureDNS Verb = "capture-dns"
 	VerbReleaseDNS Verb = "release-dns"
+
+	// VerbAllowServedEgress carves this machine's own egress out of the tunnel
+	// so a volunteered relay or exit can serve while the device is routed
+	// (ADR-0053, bacchus#109); VerbRevokeServedEgress puts it back.
+	//
+	// Like the DNS pair these carry no fields beyond the token, and for a
+	// stronger version of the same reason. The obvious encodings for a
+	// carve-out all widen §2's inward vocabulary — a firewall mark, a routing
+	// table id, a source address, a uid, a port range — and none of them needs
+	// to cross, because the helper already holds every one of those values: it
+	// read the default route, so it knows the address; SO_PEERCRED told it the
+	// uid; the table id and the rule priority are its own compile-time
+	// constants. The whole request is "turn it on", and the address the client
+	// must bind travels OUTWARD in ServedSource, the direction §2 already
+	// allows for Gateway.
+	VerbAllowServedEgress  Verb = "allow-served-egress"
+	VerbRevokeServedEgress Verb = "revoke-served-egress"
 )
 
 // Error codes. These are part of the protocol rather than free text because
@@ -195,6 +220,13 @@ type Reply struct {
 
 	// Gateway is set only by a successful VerbDefaultGateway.
 	Gateway *Gateway `json:"gateway,omitempty"`
+
+	// ServedSource is set only by a successful VerbAllowServedEgress: the
+	// address a served role's own sockets must bind as their source for the
+	// carve-out to apply to them. Derived by the helper from its own
+	// default-route read, never accepted back — the same outward-only footing
+	// Gateway has, and for the same reason.
+	ServedSource string `json:"served_source,omitempty"`
 
 	// TUNCreated marks the reply that carries a file descriptor out of band
 	// via SCM_RIGHTS. The fd is not in the JSON — it cannot be — so a reader

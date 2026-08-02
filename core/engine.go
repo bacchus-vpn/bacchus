@@ -323,6 +323,41 @@ type Config struct {
 	// the struct layout stays a stable seam for parallel callers.
 	OnUnderlayDial func(addr string)
 
+	// ServedSource, when set, is asked for the local IP that this node's SERVED
+	// sockets — the exit's egress to the internet, and a relay's onward dial to
+	// the next hop — must bind as their source address. "" means bind nothing,
+	// which is what every node did before issue #109 and what a node with no
+	// device-wide tunnel still does.
+	//
+	// It exists because serving and routing the whole device cannot otherwise
+	// share a process. When this client installs the OS default route into its
+	// own TUN, a served role's forwarding is caught by that route: other
+	// people's traffic leaves through this machine's own Bacchus connection and
+	// egresses at the UPSTREAM exit's address, which makes the exit opt-in's
+	// "under YOUR own IP and jurisdiction" false in the direction that matters.
+	// The client-side half of the fix is here — bind the served sockets to this
+	// machine's own address — and the routing half is in
+	// clients/internal/enforcement, which carves that source back out of the
+	// tunnel (ADR-0053).
+	//
+	// A FUNCTION rather than a string, for a sequencing reason that is not
+	// obvious: clients/fyne builds this Config and connects the engine before it
+	// starts enforcement, so at construction time the tunnel does not exist and
+	// the address is not yet known. Asked per served socket instead, by which
+	// point bring-up has run. Cheap enough to call per dial — the implementation
+	// is a mutex and a field read — and re-asking is a feature rather than a
+	// cost, since a session that ended must stop handing out an address whose
+	// carve-out went with it.
+	//
+	// Note what this is NOT. It is not per-app classification and it does not
+	// reopen ADR-0025's scope cut: a process binding its own sockets is a
+	// different thing from a system classifying somebody else's. Nor could
+	// destination-based split tunnelling do this job — served traffic and the
+	// user's own traffic go to the same destinations and are indistinguishable
+	// by address. The socket is what tells them apart, and this is the engine
+	// saying which of its own sockets are serving.
+	ServedSource func() string
+
 	// Mesh-walk recovery config (issue #31/#115), client role. When every
 	// coordinator this engine was built with goes unreachable — at first connect
 	// OR mid-session — a client with these set walks known peer couriers for a

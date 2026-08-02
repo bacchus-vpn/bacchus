@@ -60,6 +60,19 @@ const (
 	// systemd-resolved's 127.0.0.53 cannot be intercepted by routing at all,
 	// which is bacchus#104 and deliberately not solved here.
 	rulePriority = 0x2BAC
+
+	// servedRulePriority is the served-egress carve-out (ADR-0053, bacchus#109),
+	// and it sits ONE ahead of rulePriority. That single number is the whole
+	// mechanism: a lookup that matches it consults `main` and finds the physical
+	// default, so it never reaches the split-default in our own table one
+	// priority later. Anything that does not match falls straight through to
+	// rulePriority exactly as before, which is what keeps the volunteer's own
+	// traffic in the tunnel.
+	//
+	// Ahead of ours rather than behind it, because behind is inert: our table
+	// answers every destination via the split-default, so a rule after it is
+	// never consulted.
+	servedRulePriority = rulePriority - 1
 )
 
 // nlConn is one netlink socket. Not safe for concurrent use — each caller
@@ -371,6 +384,93 @@ func (c *nlConn) fibRuleOp(msgType uint16, extraFlags uint16, family uint8) erro
 }
 
 // -------------------------------------------------------------------------
+// The served-egress carve-out
+// -------------------------------------------------------------------------
+
+// addServedRule sends traffic that a served role's own socket has bound to src,
+// from uid, to the `main` table — out of the tunnel and onto the physical
+// interface, under this machine's own address (ADR-0053, bacchus#109).
+//
+// Both selectors are load-bearing and neither crosses the boundary:
+//
+//   - src is this machine's address on the physical interface, read by
+//     defaultGateway. Without it the rule would carve out everything and the
+//     tunnel would be over. With it, only a socket that has explicitly bound
+//     that address as its source matches, and an ordinary unbound socket — the
+//     volunteer's own browser, and every other program on the machine — still
+//     resolves through our table into the TUN.
+//   - uid is the client's, from SO_PEERCRED. It narrows the carve-out from
+//     "anything on this machine that binds that address" to "anything the
+//     volunteering user runs that binds that address". It does not shrink it to
+//     Bacchus alone; nothing available here can, because the kernel selector
+//     that would (a firewall mark) cannot be set by an unprivileged process at
+//     all. ADR-0053 §4 states that residue rather than implying it away.
+func (c *nlConn) addServedRule(src netip.Addr, uid uint32) error {
+	if !src.Is4() {
+		return fmt.Errorf("served-egress source is not IPv4: %v", src)
+	}
+	body := make([]byte, 0, 96)
+	body = append(body, servedRuleHdr(32)...)
+
+	b := src.As4()
+	body = append(body, attr(unix.FRA_SRC, b[:])...)
+	// RT_TABLE_MAIN, not our own table: the point of the carve-out is to reach
+	// the physical default route the split-default was installed to override.
+	body = append(body, attrU32(unix.FRA_TABLE, unix.RT_TABLE_MAIN)...)
+	body = append(body, attrU32(unix.FRA_PRIORITY, servedRulePriority)...)
+	body = append(body, attr(unix.FRA_UID_RANGE, uidRange(uid))...)
+
+	err := c.exec(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, body)
+	if errors.Is(err, unix.EEXIST) {
+		return nil // already ours from this session
+	}
+	return err
+}
+
+// delServedRule removes it, matching on the priority and table alone.
+//
+// Deliberately not on the source and uid it was created with, even though the
+// live revoke path has both. The other caller does not: reapRoutes runs after a
+// helper restart, where the session that created the rule — and with it the
+// address and the uid — is gone, and a delete that needed them could never
+// clean up an orphan. Matching on a priority this helper owns is what
+// delFibRule already does for the table rule beside it, so this is the same
+// scoping rather than a weaker one.
+func (c *nlConn) delServedRule() error {
+	body := make([]byte, 0, 64)
+	// src_len 0: unspecified selectors are not compared by the kernel's
+	// delete-matching, so leaving it out is what makes this match a rule whose
+	// source this caller may not know.
+	body = append(body, servedRuleHdr(0)...)
+	body = append(body, attrU32(unix.FRA_TABLE, unix.RT_TABLE_MAIN)...)
+	body = append(body, attrU32(unix.FRA_PRIORITY, servedRulePriority)...)
+
+	err := c.exec(unix.RTM_DELRULE, 0, body)
+	if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
+		return nil
+	}
+	return err
+}
+
+// servedRuleHdr builds the fib_rule_hdr both operations share.
+func servedRuleHdr(srcLen uint8) []byte {
+	hdr := make([]byte, unix.SizeofRtMsg) // fib_rule_hdr shares rtmsg's layout
+	hdr[0] = unix.AF_INET
+	hdr[2] = srcLen
+	hdr[4] = unix.RT_TABLE_UNSPEC
+	hdr[7] = unix.FR_ACT_TO_TBL
+	return hdr
+}
+
+// uidRange encodes struct fib_rule_uid_range: one uid, as a range of itself.
+func uidRange(uid uint32) []byte {
+	var b [8]byte
+	binary.NativeEndian.PutUint32(b[0:4], uid)
+	binary.NativeEndian.PutUint32(b[4:8], uid)
+	return b[:]
+}
+
+// -------------------------------------------------------------------------
 // Addresses and links
 // -------------------------------------------------------------------------
 
@@ -459,6 +559,54 @@ func (c *nlConn) defaultGateway() (gatewayInfo, error) {
 		info.NextHopV6 = v6.gw
 	}
 	return info, nil
+}
+
+// physicalSource is this machine's own IPv4 address on the interface the
+// physical default route leaves by — the address a served role's sockets bind
+// so addServedRule's carve-out applies to them, and the address a volunteer
+// exit's traffic is therefore seen to come from.
+//
+// It reads the interface named by gw.IfIndex, and that index is trustworthy for
+// the whole of the tunnel's life for a reason worth stating: bestDefault filters
+// its dump to RT_TABLE_MAIN, so defaultGateway keeps reporting the PHYSICAL
+// default even after the split-default is installed — because that one lives in
+// our own table, not in main. So this never resolves to the TUN.
+//
+// A link-local address is skipped: 169.254.0.0/16 is what an interface has when
+// DHCP failed, and binding it would advertise an exit nothing can reach.
+//
+// On an interface carrying several routable IPv4 addresses this takes the
+// first, which is the kernel's own answer in the ordinary single-address case
+// and a guess otherwise. The consequence of guessing wrong is a served role
+// that binds an address the operator's NAT does not forward — an exit that does
+// not work, not one that leaks — so it fails in the safe direction. Reading
+// RTA_PREFSRC would narrow it and is not done here; ADR-0053's scope section
+// names it.
+func physicalSource(gw gatewayInfo) (netip.Addr, error) {
+	iface, err := net.InterfaceByIndex(gw.IfIndex)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("default route interface %d: %w", gw.IfIndex, err)
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("addresses of %s: %w", iface.Name, err)
+	}
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(n.IP)
+		if !ok {
+			continue
+		}
+		ip = ip.Unmap()
+		if !ip.Is4() || ip.IsLinkLocalUnicast() || ip.IsLoopback() {
+			continue
+		}
+		return ip, nil
+	}
+	return netip.Addr{}, fmt.Errorf("interface %s has no routable IPv4 address", iface.Name)
 }
 
 type defaultRoute struct {

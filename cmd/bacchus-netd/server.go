@@ -66,6 +66,14 @@ type session struct {
 	dns dnsState
 
 	killSwitchArmed bool
+
+	// servedSrc is this machine's own address once served egress has been
+	// carved out of the tunnel for this session (ADR-0053, bacchus#109), and
+	// invalid otherwise. Held here rather than recomputed because the two
+	// places that must undo the carve-out — a clean revoke and the disconnect
+	// path — have to remove exactly the rule and set element that were
+	// installed, and by disconnect time the client that asked for them is gone.
+	servedSrc netip.Addr
 }
 
 // helper is the whole privileged service.
@@ -174,6 +182,15 @@ func (h *helper) clientGone(uid uint32) {
 	// longer has anything reading it fails to a machine that resolves nothing,
 	// which is not a safer state, it is just a broken one. ADR-0051 §4.
 	h.releaseDNS(sess)
+
+	// The served-egress carve-out goes on both paths too, and unlike DNS it is
+	// dropped for the same reason the kill-switch below is held: because that
+	// is the direction that fails closed. The process that was serving is dead,
+	// so nothing needs the carve-out any more, and an allowance nobody is using
+	// is a hole in a lockdown that is otherwise being kept deliberately. See
+	// ADR-0053 §5 — the asymmetry with the line below is the point, not an
+	// inconsistency.
+	h.revokeServedEgress(sess)
 
 	if sess.killSwitchArmed {
 		h.log("client uid %d disconnected with the kill-switch armed: holding the lockdown (it is lifted by the next Open, or a reboot)", uid)
@@ -329,6 +346,10 @@ func (h *helper) dispatch(conn *net.UnixConn, cred *unix.Ucred, req *netdwire.Re
 		return h.reply(conn, h.handleCaptureDNS(sess))
 	case netdwire.VerbReleaseDNS:
 		return h.reply(conn, h.handleReleaseDNS(sess))
+	case netdwire.VerbAllowServedEgress:
+		return h.reply(conn, h.handleAllowServedEgress(sess))
+	case netdwire.VerbRevokeServedEgress:
+		return h.reply(conn, h.handleRevokeServedEgress(sess))
 	default:
 		return h.reply(conn, netdwire.Failf(netdwire.CodeUnknownVerb, "unknown verb %q", req.Verb))
 	}
@@ -438,6 +459,10 @@ func (h *helper) reapRoutes() {
 		}
 		_ = c.delFibRule(unix.AF_INET)
 		_ = c.delFibRule(unix.AF_INET6)
+		// The served-egress carve-out too (ADR-0053): it is one more fib rule
+		// at a priority this helper owns, and an orphaned one would keep
+		// sending a dead session's source address straight past the tunnel.
+		_ = c.delServedRule()
 		return nil
 	})
 	if err != nil {
@@ -715,7 +740,11 @@ func (h *helper) handleEnableKillSwitch(sess *session, req *netdwire.Request) *n
 		return netdwire.Failf(netdwire.CodeInternal, "find loopback: %v", err)
 	}
 
-	spec := killSwitchSpec{TunIfIndex: tunIndex, LoIfIndex: lo.Index}
+	h.mu.Lock()
+	servedSrc := sess.servedSrc
+	h.mu.Unlock()
+
+	spec := killSwitchSpec{TunIfIndex: tunIndex, LoIfIndex: lo.Index, ServedSrc: servedSrc}
 	for _, list := range [][]string{req.Control, req.Bypass} {
 		for _, entry := range list {
 			addr, prefix, err := parseHostOrPrefix(entry)
@@ -834,15 +863,6 @@ func (h *helper) handleRefreshAllowIP(sess *session, req *netdwire.Request) *net
 	return &netdwire.Reply{OK: true}
 }
 
-// -------------------------------------------------------------------------
-// Parsing: every string from the client stops here
-// -------------------------------------------------------------------------
-
-// parsePrefixes turns the client's strings into typed prefixes, dropping any
-// that do not belong to the requested family. Anything unparseable is a refusal
-// rather than a skip: ADR-0049 §3.3 makes parsing the boundary, and silently
-// dropping an entry would leave the client believing a destination is excluded
-// when nothing excludes it.
 // handleCaptureDNS points the machine's resolver at the tunnel.
 //
 // It refuses before the TUN is configured rather than deferring, because the
@@ -867,6 +887,116 @@ func (h *helper) handleReleaseDNS(sess *session) *netdwire.Reply {
 	return &netdwire.Reply{OK: true}
 }
 
+// handleAllowServedEgress carves this machine's own egress out of the tunnel so
+// a volunteered relay or exit can serve while the device is routed (ADR-0053,
+// bacchus#109), and answers with the address the client's served sockets must
+// bind for it to apply to them.
+//
+// The gateway is re-read here rather than taken from sess.gw. That is not
+// caution about staleness — handleExclusionRoutes is happy with the cached one
+// — it is that this handler needs something the cache does not hold: the
+// interface's own ADDRESS, which is a second lookup on the index the read
+// returns. Doing both at once keeps the index and the address from disagreeing
+// if the machine roamed between them.
+//
+// It returns an error rather than succeeding quietly when there is no routable
+// address to bind, and that is the fail-closed direction: a client told "served
+// egress is carved out" that then binds nothing would egress through the tunnel
+// under the upstream exit's address, with the exit checkbox's disclosure saying
+// otherwise. Refusing here fails the connect instead, which is bacchus#109's
+// whole point.
+// The carve-out must be taken out BEFORE the kill-switch is armed, and this
+// refuses rather than reorders when it is not. The filter allowance is built
+// into the same transaction as the drop policy (nft.go), so the set it looks up
+// does not exist on a lockdown armed without one — meaning a carve-out granted
+// afterwards would install a route whose traffic the volunteer's own kill-switch
+// then drops. Refusing says so; succeeding would leave an exit that is
+// advertised, routed, and silently unable to answer. tunnel.go's bring-up
+// already arms last, so nothing in-tree reaches this.
+func (h *helper) handleAllowServedEgress(sess *session) *netdwire.Reply {
+	h.mu.Lock()
+	armed := sess.killSwitchArmed
+	h.mu.Unlock()
+	if armed {
+		return netdwire.Failf(netdwire.CodeBadRequest,
+			"served egress must be carved out before the kill-switch is armed, not after")
+	}
+
+	var src netip.Addr
+	err := h.nl.do(func(c *nlConn) error {
+		gw, err := c.defaultGateway()
+		if err != nil {
+			return err
+		}
+		src, err = physicalSource(gw)
+		if err != nil {
+			return err
+		}
+		return c.addServedRule(src, sess.uid)
+	})
+	if err != nil {
+		return netdwire.Failf(netdwire.CodeInternal, "carve served egress out of the tunnel: %v", err)
+	}
+
+	h.mu.Lock()
+	sess.servedSrc = src
+	h.mu.Unlock()
+
+	h.log("served egress carved out for uid %d under %s", sess.uid, src)
+	return &netdwire.Reply{OK: true, ServedSource: src.String()}
+}
+
+// handleRevokeServedEgress puts it back. Silent by contract on the client side
+// (osnet_linux.go), so this always reports success and logs what went wrong.
+func (h *helper) handleRevokeServedEgress(sess *session) *netdwire.Reply {
+	h.revokeServedEgress(sess)
+	return &netdwire.Reply{OK: true}
+}
+
+// revokeServedEgress withdraws the carve-out: the fib rule first, then the
+// filter allowance.
+//
+// That order is the fail-closed one and it is not interchangeable. Dropping the
+// route first means the served traffic has nowhere to go the moment the
+// allowance is still there; dropping the allowance first would leave a window
+// where the route still carries traffic the lockdown now blocks — which is
+// harmless — but also one where a revoke that fails halfway leaves a live route
+// with no allowance rather than an allowance with no route. Both halves are
+// best-effort, so which residue a partial failure leaves is a real choice: a
+// route to nowhere leaks nothing, a hole in the filter does.
+func (h *helper) revokeServedEgress(sess *session) {
+	h.mu.Lock()
+	src := sess.servedSrc
+	sess.servedSrc = netip.Addr{}
+	h.mu.Unlock()
+	if !src.IsValid() {
+		return
+	}
+
+	if err := h.nl.do(func(c *nlConn) error { return c.delServedRule() }); err != nil {
+		h.log("could not remove the served-egress rule: %v", err)
+	}
+
+	c, err := dialNftables()
+	if err != nil {
+		h.log("netfilter socket: %v", err)
+		return
+	}
+	defer c.Close()
+	if err := c.revokeServedEgress(src); err != nil {
+		h.log("could not withdraw the served-egress allowance: %v", err)
+	}
+}
+
+// -------------------------------------------------------------------------
+// Parsing: every string from the client stops here
+// -------------------------------------------------------------------------
+
+// parsePrefixes turns the client's strings into typed prefixes, dropping any
+// that do not belong to the requested family. Anything unparseable is a refusal
+// rather than a skip: ADR-0049 §3.3 makes parsing the boundary, and silently
+// dropping an entry would leave the client believing a destination is excluded
+// when nothing excludes it.
 func parsePrefixes(entries []string, wantV6 bool) ([]netip.Prefix, *netdwire.Reply) {
 	out := make([]netip.Prefix, 0, len(entries))
 	for _, e := range entries {

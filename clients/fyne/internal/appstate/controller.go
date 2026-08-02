@@ -164,6 +164,37 @@ func newEnforcedController(cfg Config, enf enforcement.Enforcer) *Controller {
 // through the same code.
 func (c *Controller) DeviceEnforced() bool { return c.enf != nil }
 
+// VolunteeringRefused reports whether the volunteer opt-ins must be refused on
+// this build: it routes the whole device AND cannot carve a served role's own
+// egress back out of the tunnel it installs (bacchus#109, ADR-0053).
+//
+// The two halves are asked separately because as of #109 they have different
+// answers. Before it, "routes the device" implied "cannot serve", so
+// DeviceEnforced() was the whole question — and once #37 gave Linux an
+// Enforcer, that made the GUI volunteer toggles reachable on no platform that
+// ships. Now Linux carves the egress out and Windows does not, so the question
+// that decides the toggles is the second half, not the first.
+//
+// Like DeviceEnforced this is a property of the platform rather than of the
+// moment, and for the same reason: the settings window asks it to decide
+// whether to offer the checkboxes at all, and connectAsync asks it again
+// against whatever is on disk. Two different answers to one user's one choice
+// is how a box gets ticked that the connect then refuses.
+func (c *Controller) VolunteeringRefused() bool {
+	return c.enf != nil && !c.enf.ServesWhileRouted()
+}
+
+// servedSourceHook is what core asks, per served socket, for the local address
+// to bind (core.Config.ServedSource). nil on a platform with no Enforcer, which
+// core treats as "bind nothing" — the proxy-only case, where there is no tunnel
+// for served traffic to be caught by and nothing to carve out of it.
+func (c *Controller) servedSourceHook() func() string {
+	if c.enf == nil {
+		return nil
+	}
+	return c.enf.ServedSource
+}
+
 func (c *Controller) logf(format string, args ...any) {
 	if c.Logf != nil {
 		c.Logf(format, args...)
@@ -257,12 +288,12 @@ func (c *Controller) connectAsync(gen uint64) {
 	// this machine's own tunnel while the settings window's disclosure claimed
 	// it left under this machine's address (ErrVolunteerWhileRouted).
 	//
-	// DeviceEnforced() is the same answer settings.go was given when the user
-	// ticked the box, so the two agree by construction rather than by comment.
-	// A refusal aborts the connect with its own sentence, exactly as
+	// VolunteeringRefused() is the same answer settings.go was given when the
+	// user ticked the box, so the two agree by construction rather than by
+	// comment. A refusal aborts the connect with its own sentence, exactly as
 	// LoadRelayDirectory's does, rather than surfacing later as one of core's
 	// construction errors naming a field the user never saw.
-	volunteer, err := PlanVolunteer(c.cfg, c.DeviceEnforced())
+	volunteer, err := PlanVolunteer(c.cfg, c.VolunteeringRefused())
 	if err != nil {
 		c.abort(gen, err)
 		return
@@ -354,6 +385,15 @@ func (c *Controller) connectAsync(gen uint64) {
 		// records it and bring-up installs it (issue #109). nil when this
 		// platform has no Enforcer, which core treats as "no hook".
 		OnUnderlayDial: c.underlayDialHook(),
+		// The local address a served role's own sockets bind, so other
+		// people's traffic leaves under THIS machine's address instead of
+		// through the tunnel this machine is also using (bacchus#109,
+		// ADR-0053). Wired to the Enforcer rather than the Session for the
+		// same reason OnUnderlayDial is, and asked lazily rather than passed
+		// as a value for a stronger version of it: enforcement has not started
+		// yet on this line, so the address does not exist yet. nil when this
+		// platform has no Enforcer, which core treats as "bind nothing".
+		ServedSource: c.servedSourceHook(),
 	})
 	if err != nil {
 		cancel()
@@ -386,7 +426,7 @@ func (c *Controller) connectAsync(gen uint64) {
 	// degrading to unprotected is the one failure mode this whole bar exists
 	// to rule out" — and the overwhelmingly common cause is running
 	// unelevated, which is fixable, but only by a user who is told.
-	sess, err := c.startEnforcement()
+	sess, err := c.startEnforcement(volunteer.Serving())
 	if err != nil {
 		eng.Stop()
 		cancel()
@@ -431,7 +471,13 @@ func (c *Controller) underlayDialHook() func(string) {
 // connected. Returns (nil, nil) — no session, no error — on a platform with
 // no Enforcer, which is this client's documented proxy-only posture rather
 // than a failure; see DeviceEnforced.
-func (c *Controller) startEnforcement() (enforcement.Session, error) {
+//
+// serving is VolunteerPlan.Serving(): whether this session carries anybody
+// else's traffic. It is passed in rather than re-derived from c.cfg because
+// the plan is the validated answer and the config is only the request — a
+// stored opt-in that PlanVolunteer refused must not turn into a carve-out
+// here.
+func (c *Controller) startEnforcement(serving bool) (enforcement.Session, error) {
 	if c.enf == nil {
 		return nil, nil
 	}
@@ -447,7 +493,14 @@ func (c *Controller) startEnforcement() (enforcement.Session, error) {
 		Bypass:       c.cfg.Bypass,
 		BypassMode:   NormalizeBypassMode(c.cfg.BypassMode),
 		KillSwitch:   !c.cfg.DisableKillSwitch,
-		Logf:         c.logf,
+		// Carve this node's own served egress out of the tunnel about to be
+		// installed, when the volunteer plan says it is serving (bacchus#109).
+		// PlanVolunteer has already refused this combination on a platform
+		// that cannot honor it, so a true here is a platform that can — and
+		// enforcement.Policy's contract makes Start fail rather than ignore
+		// it if that is ever wrong.
+		ServeEgress: serving,
+		Logf:        c.logf,
 	}, SocksAddr)
 	if err != nil {
 		return nil, fmt.Errorf("could not route this device: %w", err)

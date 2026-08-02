@@ -23,6 +23,7 @@
 package enforcement
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -310,3 +311,43 @@ func (o *winOS) enablePhysicalIPv6(ifAlias string) {
 func (o *winOS) captureDNS() error { return nil }
 
 func (o *winOS) releaseDNS() {}
+
+// errServedEgressUnsupported is the honest refusal, and the thing it protects
+// is a disclosure rather than a tunnel. See allowServedEgress below.
+var errServedEgressUnsupported = errors.New(
+	"carving a volunteered relay or exit's egress out of the tunnel is not implemented on Windows yet (see bacchus#109)")
+
+// allowServedEgress is not implemented on Windows, and this is a refusal rather
+// than a stub because the mechanism the Linux side uses does not transfer.
+//
+// Linux carves the traffic out with a source address the served sockets bind
+// plus a fib rule that sends that source to the `main` table (ADR-0053 §2). The
+// socket half of that works anywhere — binding a local address needs no
+// privilege on either platform. The routing half does not exist here: Windows
+// selects a route by longest-match on the DESTINATION and then by metric, and
+// its route table has no source selector and no policy-rule layer to add one
+// to. So a Windows socket bound to the physical adapter's address still meets
+// the `0.0.0.0/1` and `128.0.0.0/1` routes addSplitDefaultRoute installed on the
+// tunnel adapter, and still goes into the tunnel. Binding the source changes
+// which address the packet claims, not which adapter it leaves by — which is
+// the worst of the available outcomes, because it looks like it worked.
+//
+// The lever that would work is a different one: IP_UNICAST_IF, which pins a
+// socket's outgoing interface directly and needs no privilege. That is a real
+// route to a Windows implementation, and it is deliberately not taken here for
+// two reasons. It is a second, differently-shaped hook in core — an interface
+// index, not a local address — so it is not a matter of passing the same value
+// to a different call. And bacchus#109's bar is traffic-level: served traffic
+// OBSERVED leaving the physical adapter under this machine's own address while
+// the user's own traffic is still in the tunnel. The Windows CI job builds and
+// smoke-runs this client but cannot arm a kill-switch, create a TUN or route a
+// packet, so nothing here could establish that. bacchus#88 is the precedent for
+// what a Windows enforcement claim costs: a hardware run.
+//
+// Until then the refusal in clients/fyne stands on Windows and this returns an
+// error, which fails the connect for a serving policy rather than letting one
+// through under a claim that would be false. An empty string and a nil error
+// would be the one genuinely dangerous answer.
+func (o *winOS) allowServedEgress() (string, error) { return "", errServedEgressUnsupported }
+
+func (o *winOS) revokeServedEgress() {}
