@@ -1,6 +1,6 @@
 # coldstart-issue — mint a per-user cold-start secret (operator tool)
 
-Operator-side half of the cold-start bootstrap (issue #18, see
+Operator-side half of the cold-start bootstrap (`old #18`, see
 [docs/design/bootstrap-protocol.md](../../docs/design/bootstrap-protocol.md)).
 Mints a fresh per-user secret, appends it to the coordinator's secrets file,
 and prints an invite string to hand the new user out of band.

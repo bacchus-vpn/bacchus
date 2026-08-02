@@ -9,9 +9,9 @@ Design doc [§4.3](../design/rendezvous-cold-start.md) calls for a **warm
 re-bootstrap**: once a client has *ever* connected, if every coordinator it knows
 goes unreachable, it must not fail cold. It should ask any node it has met — even a
 plain relay — for a current, coordinator-signed snapshot and walk the mesh until it
-finds a live rendezvous point. This *complements* the cold-start bootstrap (issue
-#18, ADR-0013): cold-start gets a brand-new client its first contact; mesh-walk
-recovers a client that had contact and lost it.
+finds a live rendezvous point. This *complements* the cold-start bootstrap
+(`old #18`, ADR-0013): cold-start gets a brand-new client its first contact;
+mesh-walk recovers a client that had contact and lost it.
 
 The design also says (§4.3, §8) this is the **coordinator pool (issue #6)
 generalized** — #6 rotates among a configured set of coordinators, mesh-walk lets

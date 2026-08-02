@@ -160,7 +160,7 @@ client verifies it **end-to-end** against the admission root.
 - **The admission root is now distributed to clients.** It is a public key, so
   distribution is not secret — but the channel that carries it (the invite) is
   the trust anchor, exactly as it already is for the coordinator address and the
-  snapshot-signing key (ADR-0013, issue #18). An adversary who could forge an
+  snapshot-signing key (ADR-0013, `old #18`). An adversary who could forge an
   invite end-to-end could substitute their own root; that is the pre-existing
   out-of-band-channel assumption, not new exposure.
 

@@ -13,7 +13,7 @@ default `:3479`), not literally the same port/process as the real STUN/TURN
 server (`cmd/turn`, pion/turn). A censor's DPI keying on port number alone —
 not just packet shape — could still separate bootstrap traffic from ordinary
 STUN/TURN traffic to the same box. That gap was filed as issue #30 rather
-than blocking #18's acceptance.
+than blocking `old #18`'s acceptance.
 
 ## Decision
 
