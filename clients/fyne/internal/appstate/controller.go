@@ -105,12 +105,44 @@ func NewController(cfg Config) *Controller {
 // the SOCKS tunnel genuinely carries bytes — which is a real configuration on
 // every platform and the only one on macOS. The enforced path is covered
 // instead where it can be covered against a real kernel, in
-// cmd/bacchus-netd's namespace tests. A controller-level test of the FULL
-// enforced connect would need a live helper, a network namespace and a real
-// coordinator in one process; that is not built here and is named in the PR
-// rather than implied.
+// cmd/bacchus-netd's namespace tests — and, as of issue #112, at this seam by
+// newEnforcedController below, which supplies a fake Enforcer. A
+// controller-level test of the FULL enforced connect would still need a live
+// helper, a network namespace and a real coordinator in one process; that is
+// not built here and is named in the PR rather than implied.
 func newProxyOnlyController(cfg Config) *Controller {
 	return &Controller{cfg: cfg}
+}
+
+// newEnforcedController is NewController with the Enforcer supplied, so the
+// enforced connect path — the one bacchus#37 gave Linux, and the one
+// clients/windows has had since bacchus#59 — can be driven at this seam with
+// no live bacchus-netd. It mirrors NewController exactly, Recover() included,
+// so what a test drives is the object production builds rather than a
+// near-miss of it. The production path is NewController; nothing else calls
+// this.
+//
+// It is the other half of newProxyOnlyController, and it is a narrowing too.
+// The honest statement of what it costs is: the Enforcer is a fake, so nothing
+// BELOW this seam is checked by it — no TUN, no routes, no kill-switch, and no
+// evidence that a packet goes anywhere. That half is covered where it can be:
+// against a real kernel in cmd/bacchus-netd's namespace tests, and against the
+// real cmdlet sequences in clients/internal/enforcement.
+//
+// What this reaches that neither of those can is the CONTROLLER's own
+// behaviour on the enforced path — a failed Start aborting the connect instead
+// of leaving a working proxy under a banner (parity item 7), each helper
+// failure keeping its own sentence, disconnect and reconnect unwinding and
+// re-arming through here, and DeviceEnforced staying a property of the
+// platform across a session that failed.
+//
+// Still not built, and named rather than implied: the FULL enforced connect,
+// which needs a live helper, a network namespace and a real coordinator
+// co-resident in one process. Issue #112 holds that as a separate judgement.
+func newEnforcedController(cfg Config, enf enforcement.Enforcer) *Controller {
+	c := &Controller{cfg: cfg, enf: enf}
+	enf.Recover()
+	return c
 }
 
 // DeviceEnforced reports whether a Protected session on this build routes the
