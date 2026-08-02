@@ -47,6 +47,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,6 +80,19 @@ const (
 	// core/engine.go registerLoop), so a relay that stops heartbeating is caught
 	// about as fast as the directory itself notices it go stale.
 	reselectInterval = 10 * time.Second
+
+	// answerGrace is how long an assigned forwarder has to say ANYTHING at all about
+	// a session before reportUnansweredNodes counts that session against it (issue
+	// #114). A node answers as a consequence of receiving its assign, not of the
+	// client's offer — core's startFwdSession runs transport.Accept the moment the
+	// assignment lands — so this window is not waiting on a negotiation, only on one
+	// datagram being processed.
+	//
+	// Set past the client's own patience on every path (core gives a direct attempt
+	// 12s and a relayed one 18s), so a session that trips this has already outlived
+	// the connect it was minted for and no live attempt is being second-guessed. Well
+	// inside sessionTTL, so a direct session is still in the table when it trips.
+	answerGrace = 30 * time.Second
 
 	snapshotTTL     = 5 * time.Minute
 	snapshotRefresh = 10 * time.Second
@@ -285,7 +299,47 @@ func relayTag(id string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
+// forwarderHealth is what this coordinator remembers about a registered forwarder
+// that is NOT restated on every register: the build it says it is running, and what
+// this coordinator has already said about it (issue #114). Embedded in both
+// relayNode and exitNode, because both roles are assigned work and both can fail to
+// do it without failing to register.
+//
+// It is the one part of a registry entry that must be CARRIED across the wholesale
+// replacement each register performs (carryHealth) rather than rebuilt from the
+// register itself. A forwarder re-announces every 10s (core/engine.go registerLoop)
+// and this handler replaces its entry each time, so state that exists precisely to
+// stop something being said twice would be forgotten before its second chance to
+// say it.
+type forwarderHealth struct {
+	// release is the node's self-reported product release (semver, ADR-0015) as of
+	// its last register. Stored rather than only logged so the NEXT register can be
+	// compared against it: the "registered" line below fires only for a node not
+	// already in the registry, so a node rebuilt and restarted under a running
+	// coordinator — a staged rollout, which is when skew actually appears — would
+	// otherwise change build entirely silently. A restart takes about a second and
+	// the entry survives 35s (ttl), so the new build never reaches that line.
+	release string
+	// silentWarned latches reportUnansweredNodes's warning so it is said once per
+	// episode rather than once per 10s sweep. Cleared the moment the node answers
+	// anything, so a node that fails, recovers and fails again is reported both
+	// times rather than once forever.
+	silentWarned bool
+}
+
+// carryHealth builds the health record for a node that has just registered: the
+// release this register states, plus whatever this coordinator has already said
+// about the node. prior is nil for a node not currently in the registry.
+func carryHealth(prior *forwarderHealth, release string) forwarderHealth {
+	h := forwarderHealth{release: release}
+	if prior != nil {
+		h.silentWarned = prior.silentWarned
+	}
+	return h
+}
+
 type relayNode struct {
+	forwarderHealth
 	id   string
 	addr *net.UDPAddr
 	// ingressPort is the relay's self-reported onion-forward TCP listener port (issue
@@ -326,6 +380,7 @@ type relayNode struct {
 	countrySource string
 }
 type exitNode struct {
+	forwarderHealth
 	id, tcpAddr string
 	udp         *net.UDPAddr // signaling addr (for direct mode)
 	// Declared limits (issue #143, ADR-0040; declaredQuota is issue #49); see
@@ -371,6 +426,22 @@ type session struct {
 	// client's aged out in two minutes. Distinguishing "never brought up" from "up and
 	// quiet" reaps the first without weakening the second.
 	signaled bool
+	// answered records whether the ASSIGNED FORWARDER — the peer, so the exit on a
+	// direct or TURN-fallback session and the relay on a peer-relayed one — has ever
+	// spoken on this session. It is the other half of signaled, and the two answer
+	// genuinely different questions (issue #114): signaled is true as soon as EITHER
+	// side speaks, and a client speaks first on every path, so a session the assigned
+	// node never even received is signaled. That is what made the failure this field
+	// exists for invisible — the client posted its candidates, the coordinator relayed
+	// them, and the session looked used.
+	//
+	// A node answers as a consequence of its ASSIGN, not of the client's offer:
+	// core's startFwdSession calls transport.Accept the moment the assignment lands,
+	// and the responder's answer and candidates come straight back through this
+	// coordinator. So !answered does not mean "the client gave up early" — it means
+	// the assignment was never acted on. A client walking away before it ever spoke
+	// leaves !signaled instead, which reportUnansweredNodes deliberately ignores.
+	answered bool
 	lastSeen time.Time // last signaling activity; the rendezvous state is reaped sessionTTL after it goes quiet
 }
 
@@ -458,9 +529,9 @@ func main() {
 	servingFloor = floor
 	coordRelease = version.Current().String()
 	if servingFloor == (version.Version{}) {
-		log.Printf("version fence DISABLED (-min-serving-version 0.0.0) — any node version may serve (issue #36); coordinator release %s", coordRelease)
+		log.Printf("version fence DISABLED (-min-serving-version 0.0.0) — any node version may serve (issue #36); coordinator release %s", coordBuild())
 	} else {
-		log.Printf("version fence ENABLED — nodes below %s are dropped from matchmaking (issue #36); coordinator release %s", servingFloor, coordRelease)
+		log.Printf("version fence ENABLED — nodes below %s are dropped from matchmaking (issue #36); coordinator release %s", servingFloor, coordBuild())
 	}
 	v, admissionAnchors, err := setupAdmission(context.Background(), *admissionPubKey, admissionAuthorities, *admissionRevocations)
 	if err != nil {
@@ -649,9 +720,17 @@ func handle(m wire, src *net.UDPAddr) {
 		country, countrySrc := deriveCountry(src, m.Country)
 		switch m.Role {
 		case "relay":
-			if _, ok := relays[m.ID]; !ok {
-				log.Printf("relay registered: %s (%s) country=%s (%s)", m.ID, src, countryOrUnknown(country), countrySourceLabel(countrySrc))
+			// prior is this node's health record from before this register, and nil
+			// exactly when the node is new to the registry. Both readers below need it
+			// BEFORE the assignment at the end of this branch replaces the entry.
+			var prior *forwarderHealth
+			if r, ok := relays[m.ID]; ok {
+				prior = &r.forwarderHealth
 			}
+			if prior == nil {
+				log.Printf("relay registered: %s (%s) country=%s (%s) release=%s", m.ID, src, countryOrUnknown(country), countrySourceLabel(countrySrc), releaseOrUnknown(m.Release))
+			}
+			noteRelease("relay", m.ID, prior, m.Release)
 			// ingressPort is the relay's onion-forward listener port (issue #124); the
 			// coordinator pairs it with the observed src IP in buildSnapshot to advertise a
 			// forwarding ingress. Absent (zero) => this relay is not advertised as a hop.
@@ -664,15 +743,21 @@ func handle(m wire, src *net.UDPAddr) {
 				log.Printf("relay %s (%s) reported ingress port %d, outside 1..65535 — ignoring it; this relay advertises no forwarding ingress and is not relay-eligible (issue #11)", m.ID, src, port)
 				port = 0
 			}
-			relays[m.ID] = &relayNode{id: m.ID, addr: src, ingressPort: port, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
+			relays[m.ID] = &relayNode{forwarderHealth: carryHealth(prior, m.Release), id: m.ID, addr: src, ingressPort: port, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
 		case "exit":
 			// An exit, unlike a relay, advertises a data-plane endpoint of its own, so
 			// its country is derived against that too: signaling arriving from one
 			// country while traffic egresses from another is the jurisdiction
 			// misrouting country selection exists to prevent (issue #136, ADR-0042 §8).
 			country, countrySrc = deriveExitCountry(src, m.Country, m.Addr)
-			if _, ok := exits[m.ID]; !ok {
-				log.Printf("exit registered: %s -> %s country=%s (%s)", m.ID, m.Addr, countryOrUnknown(country), countrySourceLabel(countrySrc))
+			// See the relay branch: prior is nil exactly for a node new to the
+			// registry, and is read before the assignment below replaces the entry.
+			var prior *forwarderHealth
+			if e, ok := exits[m.ID]; ok {
+				prior = &e.forwarderHealth
+			}
+			if prior == nil {
+				log.Printf("exit registered: %s -> %s country=%s (%s) release=%s", m.ID, m.Addr, countryOrUnknown(country), countrySourceLabel(countrySrc), releaseOrUnknown(m.Release))
 				if countrySrc == countrySplit {
 					// Loud, because it is the one case where a client is shown a
 					// country this coordinator has NOT tied to the egress path.
@@ -701,7 +786,8 @@ func handle(m wire, src *net.UDPAddr) {
 					}
 				}
 			}
-			exits[m.ID] = &exitNode{id: m.ID, tcpAddr: m.Addr, udp: src, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
+			noteRelease("exit", m.ID, prior, m.Release)
+			exits[m.ID] = &exitNode{forwarderHealth: carryHealth(prior, m.Release), id: m.ID, tcpAddr: m.Addr, udp: src, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
 		}
 	case "heartbeat":
 		// A heartbeat refreshes the observed address, so the derived country is
@@ -1062,6 +1148,11 @@ func handle(m wire, src *net.UDPAddr) {
 		other := s.peer
 		if src.String() == s.peer.String() {
 			other = s.client
+			// This frame came from the forwarder this coordinator assigned, which is
+			// the one thing that proves the assignment was acted on at all (issue
+			// #114). Recorded on ARRIVAL, before it is relayed, so a client that has
+			// itself gone away does not make a healthy node look silent.
+			s.answered = true
 		}
 		send(other, m)
 	case "capacity-report":
@@ -1161,12 +1252,99 @@ func reselectDeadRelays(now time.Time) {
 	}
 }
 
+// reportUnansweredNodes names a forwarder that is being assigned work and silently
+// dropping it (issue #114) — the failure every other signal this coordinator has is
+// blind to.
+//
+// The blindness is structural: registration is stable across builds and session
+// setup is not, so a node running a diverged binary registers cleanly, re-announces
+// every 10s, is never pruned, appears in the signed snapshot, is offered to clients
+// and is assigned sessions it never acts on. Liveness, capacity, quota and country
+// all keep reporting health, because all of them exercise the half of the protocol
+// that did not change. What breaks is only ever visible one layer up: the assignment
+// went out and nothing came back.
+//
+// The predicate is per-SESSION evidence, aggregated per node:
+//
+//   - answered — the assigned node has spoken on this session. It is healthy, full
+//     stop, and one of these is enough to clear the node.
+//   - signaled && !answered && quiet for answerGrace — a client tried to bring this
+//     session up and the node it was handed to has said nothing back for longer than
+//     the client itself was willing to wait. This is the fault.
+//   - !signaled — the client never spoke either. NOT counted, and that exclusion is
+//     what keeps this quiet: "a client walked away before it tried" is the ordinary,
+//     blameless case the issue worried would make this cry wolf, and it is
+//     distinguishable rather than merely rare (see session.answered).
+//
+// A node is reported only when it has at least one unanswered session and NO
+// answered one — the issue's "a node whose sessions are ALL unsignalled is serving
+// nobody". One client hitting a snag against an otherwise-working node therefore
+// says nothing, and a single dropped assign datagram costs at most one line, once,
+// until the node answers anything at all.
+//
+// Deliberately a sweep over LIVE sessions rather than a check at reap time. Two
+// reasons: a peer-relayed session that was signaled is exempt from prune's idle
+// sweep (see prune) and so would never reach a reap-time check while its relay
+// keeps heartbeating, which is precisely the state a diverged relay is in; and a
+// live sweep reports the fault while it is still happening rather than sessionTTL
+// after the client gave up.
+func reportUnansweredNodes(now time.Time) {
+	type tally struct {
+		answered, unanswered int
+		waiting              time.Duration // how long the longest-waiting unanswered session has been quiet
+	}
+	byNode := map[nodeRef]*tally{}
+	for _, s := range sessions {
+		ref, ok := assignedNode(s)
+		if !ok {
+			continue
+		}
+		t := byNode[ref]
+		if t == nil {
+			t = &tally{}
+			byNode[ref] = t
+		}
+		switch {
+		case s.answered:
+			t.answered++
+		case s.signaled && now.Sub(s.lastSeen) > answerGrace:
+			t.unanswered++
+			if quiet := now.Sub(s.lastSeen); quiet > t.waiting {
+				t.waiting = quiet
+			}
+		}
+	}
+	for ref, t := range byNode {
+		h := healthOf(ref)
+		if h == nil {
+			continue // pruned since this session was minted: there is nobody left to report
+		}
+		if t.answered > 0 {
+			// Serving somebody. Re-arm, so a node that fails, recovers and fails
+			// again is reported on the second episode too.
+			h.silentWarned = false
+			continue
+		}
+		if t.unanswered == 0 || h.silentWarned {
+			continue
+		}
+		h.silentWarned = true
+		log.Printf("WARNING: %s %s was assigned %d session(s) that a client tried to bring up and has answered NONE of them (the longest has been waiting %s). It registers and heartbeats normally, so nothing else here reports it: check it is reachable and running a build compatible with this coordinator — it reports release %s, this coordinator is %s (issue #114)",
+			ref.role, ref.id, t.unanswered, t.waiting.Truncate(time.Second), releaseOrUnknown(h.release), coordRelease)
+	}
+}
+
 // reselectLoop runs prune + reselectDeadRelays on a fixed timer so a peer relay that
 // dies mid-session is detected and its client nudged within a heartbeat window,
 // without waiting for an incoming packet to drive handle() (issue #96). Pruning here
 // too means an idle coordinator (no traffic at all) still expires stale peers and
 // sessions, which was previously packet-driven only. Runs for the process lifetime,
 // like the TURN/bootstrap background loops; this coordinator has no shutdown path.
+//
+// reportUnansweredNodes rides this timer rather than handle()'s per-packet prune
+// (issue #114): it is a whole-table pass whose answer changes on the scale of tens
+// of seconds, so running it per datagram would be pure cost. Last of the three, so
+// it sees the table the other two leave behind.
 func reselectLoop(ctx context.Context) {
 	t := time.NewTicker(reselectInterval)
 	defer t.Stop()
@@ -1176,12 +1354,23 @@ func reselectLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			mu.Lock()
-			now := time.Now()
-			prune(now)
-			reselectDeadRelays(now)
+			sweepTick(time.Now())
 			mu.Unlock()
 		}
 	}
+}
+
+// sweepTick is one pass of reselectLoop's timer, split from the loop so a test can
+// drive the real sequence — and the real composition — without waiting out a
+// reselectInterval. The order is load-bearing: prune first so the two checks below
+// it see the table it leaves, and reportUnansweredNodes last so it does not report a
+// node about a session reselectDeadRelays is in the middle of retiring.
+//
+// Callers hold mu.
+func sweepTick(now time.Time) {
+	prune(now)
+	reselectDeadRelays(now)
+	reportUnansweredNodes(now)
 }
 
 // pickRelay chooses a Bacchus relay node to splice a client<->exit data path
@@ -1319,6 +1508,153 @@ func versionCheck(release string) (reason string, ok bool) {
 		return fmt.Sprintf("node version %s is below the minimum serving version %s — update to serve", nv, floor), false
 	}
 	return "", true
+}
+
+// coordBuild renders this coordinator's build identity for its startup line (issue
+// #114): its release, plus the VCS revision the Go toolchain records in the binary.
+//
+// The revision is there because the release alone does not identify a build.
+// Nothing in this repository stamps core/version.current — deploy/install.sh and
+// docs/RUNNING.md both build with a plain `go build`, and the -ldflags -X hook
+// core/version documents is used by nobody — so every binary ever produced here
+// reports the same release, and two builds three weeks apart are indistinguishable
+// by it. The revision is the one thing that does differ, and it costs nothing: the
+// toolchain stamps it into any build made from a checkout.
+//
+// It is the coordinator's HALF of the comparison, not the comparison: a node's
+// revision is not on the register wire, so pairing this against a node still means
+// reading the node's own binary (go version -m). Half is what can be had from inside
+// this binary, and it is the half an operator otherwise has to go and fetch.
+//
+// Absent, and printed as such, for a build made in a git WORKTREE (the toolchain
+// records VCS data only from a checkout with a real .git directory) and under
+// `go test`. The release is printed either way, so the line degrades to exactly what
+// it said before this existed.
+//
+// The value goes to the log only. It is not put on any wire and not folded into
+// coordRelease, which is a wire field that clients parse as semver (ADR-0015).
+func coordBuild() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return coordRelease
+	}
+	return describeBuild(coordRelease, bi.Settings)
+}
+
+// describeBuild is coordBuild's rendering half, split out because the reading half
+// cannot be exercised from a test: a test binary carries the settings the toolchain
+// gave it and there is no way to hand it different ones. Everything about the format
+// is decided here, so the format is what a test can pin.
+func describeBuild(release string, settings []debug.BuildSetting) string {
+	var revision, dirty string
+	for _, s := range settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = ", uncommitted changes"
+			}
+		}
+	}
+	if revision == "" {
+		return release + " (no build revision recorded — see coordBuild)"
+	}
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	return fmt.Sprintf("%s (revision %s%s)", release, revision, dirty)
+}
+
+// releaseOrUnknown renders a node's self-reported release for the operator log,
+// naming the empty case rather than printing a blank (as countryOrUnknown does for
+// a country tag). Empty is what a node predating ADR-0015 sends, and — with the
+// fence at its default 0.0.0 — such a node serves, so the blank is a state an
+// operator really can be looking at.
+func releaseOrUnknown(release string) string {
+	if release == "" {
+		return "unknown"
+	}
+	return release
+}
+
+// noteRelease says what a register reveals about the build a node is running, and
+// says it at most once per (node, release) rather than on all 8,640 registers a
+// node sends in a day (issue #114).
+//
+// prior is the node's health record from before this register, nil for a node new
+// to the registry. The three cases it separates:
+//
+//   - New node. The "registered" line has just printed the release, so there is
+//     nothing to add but the mismatch warning below.
+//   - Same release as last time. The steady state — say nothing at all.
+//   - Different release. Said out loud, because this is the ONLY place a rebuild
+//     under a running coordinator is visible: the "registered" line fires only for
+//     a node not already in the registry, an update restarts a node in about a
+//     second, and the entry survives 35s (ttl) — so a staged rollout swaps every
+//     binary in the fleet without that line firing once.
+//
+// The mismatch is a WARNING and never a refusal. Refusing by default would turn one
+// silent failure into a fleet-wide outage on any staged rollout; -min-serving-version
+// is the fence for operators who want the strict posture, and its 0.0.0 default is
+// deliberate (ADR-0015).
+//
+// Caveat worth knowing before trusting this: it compares release strings, and
+// nothing in this repository stamps core/version.current at build time — install.sh
+// and docs/RUNNING.md both build with a plain `go build`. Until a build does stamp
+// it, every binary reports the same release and this warning cannot fire. That is
+// why reportUnansweredNodes exists rather than this being the whole answer to #114.
+func noteRelease(role, id string, prior *forwarderHealth, release string) {
+	if prior != nil {
+		if prior.release == release {
+			return
+		}
+		log.Printf("%s %s changed release: %s -> %s", role, id, releaseOrUnknown(prior.release), releaseOrUnknown(release))
+	}
+	if release == coordRelease {
+		return
+	}
+	log.Printf("WARNING: %s %s reports release %s and this coordinator is %s — a node and a coordinator built from different commits register and heartbeat normally and can still drop every session between them, because registration is stable across builds and session setup is not (issue #114). It is NOT refused: -min-serving-version is the fence for that, and it is unaffected by this line",
+		role, id, releaseOrUnknown(release), coordRelease)
+}
+
+// nodeRef names one registered forwarder ROLE. The role is part of the key because
+// a node that serves both roles registers BOTH under a single id (core/engine.go
+// builds each register from the same e.cfg.ID), so relays["n"] and exits["n"] are
+// two registrations of one box which are assigned work — and can fail to do it —
+// independently of each other.
+type nodeRef struct{ role, id string }
+
+// assignedNode names the forwarder this coordinator handed a session to: the peer
+// relay on a peer-relayed session, the terminating exit on a direct or TURN-fallback
+// one. It reports false for the single shape that names neither — a chained connect
+// that found no peer relay and fell through to the TURN fallback, which records no
+// exit id by construction (ADR-0042 §9) — and such a session is skipped rather than
+// attributed to a node this coordinator did not choose.
+func assignedNode(s *session) (nodeRef, bool) {
+	if s.relayID != "" {
+		return nodeRef{role: "relay", id: s.relayID}, true
+	}
+	if s.exitID != "" {
+		return nodeRef{role: "exit", id: s.exitID}, true
+	}
+	return nodeRef{}, false
+}
+
+// healthOf returns the live health record of the forwarder ref names, or nil if it
+// is no longer registered. The role decides which map is consulted — see nodeRef.
+func healthOf(ref nodeRef) *forwarderHealth {
+	switch ref.role {
+	case "relay":
+		if r, ok := relays[ref.id]; ok {
+			return &r.forwarderHealth
+		}
+	case "exit":
+		if e, ok := exits[ref.id]; ok {
+			return &e.forwarderHealth
+		}
+	}
+	return nil
 }
 
 // coordAdvertise picks the host:port a client should dial for this
