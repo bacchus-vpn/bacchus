@@ -16,13 +16,13 @@
       bacchus-fyne-setup-<version>-windows-amd64.exe  the installer
       SHA256SUMS.txt                                  hashes over both
 
-    The zip contains exactly one directory holding exactly five files:
+    The zip contains exactly one directory holding exactly six files:
 
-      bacchus-fyne.exe  wintun.dll  LICENSE.wintun.txt
+      bacchus-fyne.exe  wintun.dll  LICENSE.txt  LICENSE.wintun.txt
       bacchus-fyne.config.json  README.txt
 
-    That layout is fixed. Do not add a sixth file without checking what else
-    depends on it - see deploy/windows/README.md.
+    That layout is fixed. Do not change it without checking what else depends
+    on it - see deploy/windows/README.md.
 
     The installer builds from the SAME staging directory and deliberately does
     NOT install bacchus-fyne.config.json beside the exe; bacchus.iss explains
@@ -112,6 +112,7 @@ $WintunSha256  = '07C256185D6EE3652E09FA55C0B673E2624B565E02C4B9091C79CA7D2F24EF
 $BundleFiles = @(
     'bacchus-fyne.exe',
     'wintun.dll',
+    'LICENSE.txt',
     'LICENSE.wintun.txt',
     'bacchus-fyne.config.json',
     'README.txt'
@@ -119,6 +120,27 @@ $BundleFiles = @(
 
 function Step { param([string] $Text) Write-Host "==> $Text" }
 function Note { param([string] $Text) Write-Host "    $Text" }
+
+function Write-WindowsText {
+    # Stage a text file the way Windows wants to read it: CRLF, UTF-8 with no
+    # BOM, ASCII only.
+    #
+    # The repo normalises to LF (.gitattributes) and that is right for the
+    # sources; the conversion belongs here, at package time. ASCII is asserted
+    # rather than assumed because these are read on a user's machine by whatever
+    # they have, which for a first-run reader is Notepad: without a BOM a stray
+    # smart quote or em dash renders wrong somewhere, and with one the file
+    # starts with visible junk in editors that do not expect it. Staying inside
+    # ASCII is the only option that is right everywhere, so a file that leaves
+    # it fails the build instead of shipping unreadable.
+    param([string] $Text, [string] $Destination, [string] $What)
+    $nonAscii = [regex]::Matches($Text, '[^\x00-\x7F]')
+    if ($nonAscii.Count -gt 0) {
+        throw "$What contains $($nonAscii.Count) non-ASCII character(s), e.g. '$($nonAscii[0].Value)'. Keep it ASCII - see Write-WindowsText."
+    }
+    $Text = ($Text -replace "`r`n", "`n") -replace "`n", "`r`n"
+    [System.IO.File]::WriteAllText($Destination, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
 
 function Invoke-Native {
     # & alone does not fail a script on a non-zero exit code, and a build that
@@ -318,32 +340,46 @@ if (-not (Test-Path $example)) {
 Copy-Item $example (Join-Path $StageDir 'bacchus-fyne.config.json')
 
 # --------------------------------------------------------------------------
-# 4. README.txt
+# 4. This program's own licence
+# --------------------------------------------------------------------------
+
+Step 'staging LICENSE.txt'
+
+# Compliance, not decoration. Bacchus is AGPL-3.0, and conveying a binary under
+# GPL-family terms means giving the recipient a copy of the licence along with
+# the work - a URL is a pointer, not the copy that requirement asks for. The
+# asymmetry made it starker: the bundle already shipped a third party's
+# proprietary licence for wintun.dll while omitting the licence of the program
+# itself.
+#
+# Named LICENSE.txt beside LICENSE.wintun.txt so a user opening the folder can
+# see at a glance which covers what, and README.txt says which is which. The
+# repository's own file has no extension; the .txt is so Windows opens it in an
+# editor rather than asking what to open it with.
+$license = Join-Path $RepoRoot 'LICENSE'
+if (-not (Test-Path $license)) {
+    throw "missing $license - the bundle must carry this program's licence"
+}
+Write-WindowsText -Text (Get-Content -Raw -Path $license) `
+    -Destination (Join-Path $StageDir 'LICENSE.txt') -What 'LICENSE'
+
+# wintun's own licence is NOT run through this. It was copied verbatim out of
+# the archive in step 2, byte for byte, because rewriting somebody else's
+# licence file - even only its line endings - is not this script's business.
+
+# --------------------------------------------------------------------------
+# 5. README.txt
 # --------------------------------------------------------------------------
 
 Step 'staging README.txt'
 
-$readmeSrc = Join-Path $PSScriptRoot 'README.txt'
-$readme = Get-Content -Raw -Path $readmeSrc
+$readme = Get-Content -Raw -Path (Join-Path $PSScriptRoot 'README.txt')
 $readme = $readme.Replace('{{VERSION}}', $Version).Replace('{{WINTUN_VERSION}}', $WintunVersion)
-
-# Kept ASCII on purpose. Written without a BOM (so it does not start with
-# visible junk in editors that do not expect one) and read on Windows by
-# whatever the user has, which for a first-run reader is Notepad. ASCII is the
-# one encoding every one of those agrees on; the moment a smart quote or an
-# em dash gets in, the file needs a BOM or it renders wrong somewhere. Fail
-# rather than ship an unreadable first-run instruction.
-$nonAscii = [regex]::Matches($readme, '[^\x00-\x7F]')
-if ($nonAscii.Count -gt 0) {
-    throw "deploy/windows/README.txt contains $($nonAscii.Count) non-ASCII character(s), e.g. '$($nonAscii[0].Value)'. Keep it ASCII - see the comment here."
-}
-# CRLF: it is a .txt read on Windows, and the repo normalises to LF
-# (.gitattributes). Convert at package time so the source file stays normal.
-$readme = ($readme -replace "`r`n", "`n") -replace "`n", "`r`n"
-[System.IO.File]::WriteAllText((Join-Path $StageDir 'README.txt'), $readme, (New-Object System.Text.UTF8Encoding($false)))
+Write-WindowsText -Text $readme -Destination (Join-Path $StageDir 'README.txt') `
+    -What 'deploy/windows/README.txt'
 
 # --------------------------------------------------------------------------
-# 5. Check the staged bundle, then zip it
+# 6. Check the staged bundle, then zip it
 # --------------------------------------------------------------------------
 
 Step 'checking the staged bundle'
@@ -384,7 +420,7 @@ if (($entries -join '|') -ne ($wantEntries -join '|')) {
 Note "$BundleName.zip: $($entries.Count) entries under $BundleName/"
 
 # --------------------------------------------------------------------------
-# 6. The installer
+# 7. The installer
 # --------------------------------------------------------------------------
 
 $setupPath = Join-Path $OutDir "$SetupName.exe"
@@ -430,7 +466,7 @@ or pass -SkipInstaller to build the portable zip only.
 }
 
 # --------------------------------------------------------------------------
-# 7. Hashes
+# 8. Hashes
 #
 # Published with the release and printed here. This is not ceremony: these
 # artifacts are meant to travel by mirror, messenger and USB stick

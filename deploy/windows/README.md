@@ -36,15 +36,25 @@ Both are built from one staging directory in one run, so they cannot drift.
 bacchus-fyne-<version>-windows-amd64/
     bacchus-fyne.exe
     wintun.dll
-    LICENSE.wintun.txt
+    LICENSE.txt             this program's, AGPL-3.0
+    LICENSE.wintun.txt      wintun's, which is a different licence
     bacchus-fyne.config.json
     README.txt
 ```
 
-Five files, flat, one directory. `build-bundle.ps1` asserts the set twice —
-once on the staging directory and again by reading the finished zip back — so
-adding a file here fails the build rather than silently changing what other
-work depends on.
+Six files, flat, one directory. `build-bundle.ps1` asserts the set twice — once
+on the staging directory and again by reading the finished zip back — so
+changing it fails the build rather than silently changing what other work
+depends on. The installer places the same set in `{app}`, minus the config,
+which goes elsewhere for the reason below.
+
+**`LICENSE.txt` is compliance, not decoration.** Conveying a binary under
+GPL-family terms means giving the recipient a copy of the licence along with
+the work; a link is a pointer, not that copy. It is deliberately not wired to
+Inno's `LicenseFile=`, which would make the user click "I accept" — the AGPL is
+not an agreement acceptance is conditioned on, and gating on it would
+misrepresent it. wintun's licence is copied out of its archive byte for byte;
+this one is converted to CRLF like `README.txt`, because it is ours.
 
 ### They seed the config in opposite places, on purpose
 
@@ -65,6 +75,13 @@ This is the one thing to understand before changing either artifact.
 
 Getting this backwards does not fail the build. It fails on a user's machine,
 once, the first time they change a setting.
+
+Both copy `clients/fyne/bacchus-fyne.config.example.json` verbatim, placeholder
+hosts and all, rather than generating a file with the endpoint keys present and
+empty. One template serving both platforms is worth more than two that can
+drift, and `COORDINATOR_HOST`/`CHANGE_ME` tell someone editing the file by hand
+what shape of value belongs there in a way `""` does not. `install.sh` reaches
+for its empty-key form only when the example is not beside it.
 
 ### Which `%APPDATA%` — a limitation to confirm on hardware
 

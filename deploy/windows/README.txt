@@ -15,8 +15,13 @@ WHAT IS IN THIS FOLDER
                              without it. Version {{WINTUN_VERSION}}, copied
                              here exactly as published on wintun.net.
 
-  LICENSE.wintun.txt         wintun's own licence. wintun is (c) WireGuard LLC
-                             and is not part of Bacchus; it is redistributed
+  LICENSE.txt                Bacchus's licence: the GNU Affero General Public
+                             License, version 3. This is the licence of the
+                             program itself.
+
+  LICENSE.wintun.txt         wintun's licence -- a different licence, for a
+                             different thing. wintun is (c) WireGuard LLC and
+                             is not part of Bacchus; it is redistributed
                              unmodified, which is what its licence allows.
 
   bacchus-fyne.config.json   Your settings. You have to edit this before the
@@ -24,7 +29,7 @@ WHAT IS IN THIS FOLDER
 
   README.txt                 This file.
 
-Keep the five files together in one folder. The client looks for wintun.dll
+Keep the six files together in one folder. The client looks for wintun.dll
 and for its config file next to itself.
 
 
@@ -126,9 +131,11 @@ IF SOMETHING GOES WRONG
 LICENCE
 
 Bacchus is free software under the GNU Affero General Public License version
-3. The source, the full licence text and the issue tracker:
+3. The full text is in LICENSE.txt in this folder. Among other things it
+gives you the right to the source code of what you are running:
 
   https://github.com/bacchus-vpn/bacchus
 
-wintun.dll is not ours and is not under that licence -- see
-LICENSE.wintun.txt.
+wintun.dll is not ours and is not under that licence. It is (c) WireGuard LLC,
+redistributed unmodified as its own licence allows, and that licence is in
+LICENSE.wintun.txt -- the other one, for the other thing.

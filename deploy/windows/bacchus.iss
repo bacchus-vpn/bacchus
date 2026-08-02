@@ -104,8 +104,16 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; with "create wintun adapter" - the same message an unelevated run produces,
 ; which is why issue #135 was so easy to misread. It ships beside the exe in
 ; both artifacts.
+;
+; LICENSE.txt is this program's own, AGPL-3.0, and it ships for compliance
+; rather than for form: conveying a binary under GPL-family terms means giving
+; the recipient a copy of the licence along with the work. Deliberately NOT
+; wired to LicenseFile= - that page makes the user click "I accept" before the
+; install proceeds, and the AGPL is not an agreement acceptance is conditioned
+; on. Shipping the file is the requirement; gating on it would misrepresent it.
 Source: "{#StageDir}\bacchus-fyne.exe";     DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\wintun.dll";           DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\LICENSE.txt";          DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE.wintun.txt";   DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.txt";           DestDir: "{app}"; Flags: ignoreversion
 
