@@ -337,10 +337,22 @@ does; everything under `cmd/` builds with `CGO_ENABLED=0`.
   `gcc`.
 
 ```
-go build -o bacchus-fyne ./clients/fyne          # native
+# The release this binary will report, from VERSION at the root of the repo.
+stamp="-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)"
+
+go build -ldflags "$stamp" -o bacchus-fyne ./clients/fyne          # native
 GOOS=windows CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc \
-  go build -ldflags "-H=windowsgui" -o bacchus-fyne.exe ./clients/fyne   # cross-compile from Linux
+  go build -ldflags "-H=windowsgui $stamp" -o bacchus-fyne.exe ./clients/fyne   # cross-compile from Linux
 ```
+
+**The stamp is not decoration** (bacchus#128). `VERSION` is the single source of truth
+for the release every binary reports, and the same `-X` is applied by CI and by
+`deploy/install.sh`. A build with no `-X` still works and is a supported development
+build — but it reports the release `0.0.0` and prints one loud
+line at startup saying it was not stamped, because a development build passing for a
+release build is what feeds a wrong number to the client's own force-major/skip-minor
+check and to the coordinator's build-skew warning. See
+[docs/RUNNING.md](../../docs/RUNNING.md#the-release-version-comes-from-version-issue-128).
 
 ### The Windows application manifest (elevation)
 
@@ -426,7 +438,8 @@ every push. CI's `linux-client` job installs the same package list above, builds
 `go vet`/`go test`, then launches the binary under `xvfb-run` and confirms it is
 still alive five seconds later. `windows-fyne-client` does the equivalent on a
 Windows runner: locate a mingw-w64 gcc, refuse to run at `CGO_ENABLED=0`, vet, build
-with `-H=windowsgui`, check the output is a real PE image of plausible size, test,
+with `-H=windowsgui` and the release stamp above, check the output is a real PE image
+of plausible size, test,
 smoke-launch against the real Windows session, and upload the exe as an artifact
 (bacchus#115). A third job, `windows-enforcement`, vets and tests
 `clients/internal/...` on Windows without any toolchain — the shared enforcement
