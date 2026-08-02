@@ -9,8 +9,8 @@ jobs:
   server:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - name: gofmt
@@ -82,8 +82,8 @@ jobs:
   windows-client:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - name: build
@@ -152,8 +152,8 @@ jobs:
       # why 0 is the dangerous value here and not merely the wrong one.
       CGO_ENABLED: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       # clients/fyne/README.md's Build section states the requirement as a
@@ -261,7 +261,7 @@ jobs:
       # is a test artifact, not a release (Windows signing identity is its own
       # open question).
       - name: upload the Windows build
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bacchus-fyne-windows-amd64
           path: bacchus-fyne.exe
@@ -276,8 +276,8 @@ jobs:
     # runs on every push instead of living only in that one-time record.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - name: install GUI toolchain
