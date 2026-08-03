@@ -152,10 +152,12 @@ func TestCountrySourceWireContract(t *testing.T) {
 	if coldstart.CountryObserved != "observed" ||
 		coldstart.CountryHinted != "hint" ||
 		coldstart.CountrySignalingOnly != "observed-signaling-only" ||
-		coldstart.CountryNoEndpoint != "unverifiable-no-endpoint" {
-		t.Fatalf("country provenance literals drifted: %q %q %q %q",
+		coldstart.CountryNoEndpoint != "unverifiable-no-endpoint" ||
+		coldstart.CountryAdminOverride != "admin-override" {
+		t.Fatalf("country provenance literals drifted: %q %q %q %q %q",
 			coldstart.CountryObserved, coldstart.CountryHinted,
-			coldstart.CountrySignalingOnly, coldstart.CountryNoEndpoint)
+			coldstart.CountrySignalingOnly, coldstart.CountryNoEndpoint,
+			coldstart.CountryAdminOverride)
 	}
 	// And the predicate the client fails closed on must fire for exactly one of them.
 	for _, tc := range []struct {
@@ -166,6 +168,10 @@ func TestCountrySourceWireContract(t *testing.T) {
 		{coldstart.CountryHinted, false},
 		{coldstart.CountrySignalingOnly, true},
 		{coldstart.CountryNoEndpoint, false},
+		// An admin correction is not a discovered disagreement: a coordinator operator
+		// asserted this country, which is the opposite of two observations failing to
+		// agree (issue #113).
+		{coldstart.CountryAdminOverride, false},
 		{"", false},
 	} {
 		if got := (coldstart.Entry{Country: "NL", CountrySource: tc.source}).CountryContradicted(); got != tc.want {
