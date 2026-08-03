@@ -1,13 +1,16 @@
 # 44. An independent IP→AS lookup behind one seam, AS-diverse hop selection, and the distribution question left open
 
-- Status: accepted (issue #23); amended twice — see the amendments at the end.
+- Status: accepted (issue #23); amended four times — see the amendments at the end.
   The seam, the unknown-case rule, the hop-selection ladder and the coordinator's
   use of it were accepted and implemented when this record was written. **How the
   table ships and refreshes was left open**, and was then ruled on: option A,
   embedded in the client build (first amendment). The two questions that ruling
   explicitly left unsettled — the encoding, and the source's licence — are measured
   and closed in the second amendment, which is where the bytes actually reach a
-  client (#55). Issue #23 is delivered on both sides as of that amendment.
+  client (#55). Issue #23 is delivered on both sides as of that amendment. The third
+  amendment (#61) records that the vetted source covers country as well as AS. The
+  fourth (#66) makes "refreshed per release" enforceable now that a release process
+  exists, and adds a release-time bar tighter than the 90-day build floor.
 - Date: 2026-07-29
 
 ## Context
@@ -605,6 +608,12 @@ bytes are here.
 
   Wiring the refresh into the release process proper still belongs with #34, and is
   tracked separately rather than assumed.
+
+  > **Update (2026-08-03):** done, in the enforcement half — #34's build half shipped a
+  > release workflow, and #66 attached a gate to it. There are now **two** bars on this
+  > date rather than the one 90-day threshold described above: the floor, unchanged, and
+  > a 30-day bar that a release has to clear. The refresh itself is still a human step.
+  > See the fourth amendment below.
 - **Release cadence remains a security parameter**, on §6's numbers: ~1.3% drift per
   month, ~3.6% per quarter, degrading toward §3's unknown handling rather than toward
   a false claim of diversity.
@@ -695,3 +704,204 @@ consumer, not the terms.
   and a Sybil node can claim any country — and country is the only thing a client selects
   on (ADR-0042). The deployment step is the fix, and it is deliberately named here so that
   a closed issue is not read as a closed gap.
+
+## Amendment (2026-08-03, #66) — "refreshed per release" becomes enforceable: a release-time bar tighter than the build-time floor
+
+The first amendment ruled §6 in favour of option A — embedded in the client build,
+**refreshed per release**. The second built the thing that notices when it has not been:
+`TableRetrieved` and `TestEmbeddedTableIsFresh`, a 90-day floor. Neither could make "per
+release" mean anything on its own, because there was no release process to attach it to,
+and both said so.
+
+There is one now. #34's build half shipped as `.github/workflows/release.yml`: a `v*` tag
+builds the Windows bundle and drafts a GitHub release. So this amendment is not a change
+of mind about anything §6 decided — it is the enforcement §6's ruling has been waiting
+for, plus one defect that arrived with the release process and one number that turns out
+to have been measuring the wrong end of the table's life.
+
+### 1. The defect the release process arrived with
+
+`release.yml` ran **no tests at all**. `TestEmbeddedTableIsFresh` ran, and still runs, in
+`ci.yml`. On a tag push GitHub starts both workflows from the same event and there is no
+native way to order them — `needs:` is intra-workflow, and `workflow_run` is a different
+tool for a different problem. So the freshness check was a **bystander**: it could go red
+beside a bundle that had already been built and a draft release that had already been
+created. A check that cannot stop the thing it is checking gates nothing.
+
+On one tag spelling it was worse than a bystander. `release.yml` triggers on `v[0-9]*`
+**and** `[0-9]*`; `ci.yml` triggers on `v*`. A tag pushed as `1.0.0` rather than `v1.0.0`
+starts `release.yml` and does not start `ci.yml` at all, so on that spelling the
+freshness check does not run anywhere — not in parallel, not at all.
+
+This is the same finding the release workflow already records about the version
+assertion, arrived at from a different direction, and it has the same fix: a first job
+**inside** `release.yml` that the bundle job `needs:`. The shape was already proven in
+this repository, in both directions, before this card reused it.
+
+### 2. Two bars on one quantity, and why the release one is tighter
+
+`tableMaxAge` is 90 days and is the floor under *any* build. It is not wrong; it is
+measuring the wrong end.
+
+90 days is a budget on how wrong the table may be **in the hands of somebody running
+it** — §6's ~3.6%-per-quarter figure is about a client resolving hops, not about a
+repository. That budget is spent on both sides of a release: the age of the table when
+the artifact is built, plus however long the person who installed it keeps running that
+build. Against the floor alone, the whole of it can be spent before the artifact leaves
+the building. A release cut on day 89 hands a user a table that is already at the limit
+on the day they install it, and every day after that is over budget — with no further
+refresh possible until the next release, because the bytes are in the binary.
+
+So the release bar is where that split gets chosen, and it is **30 days**:
+
+- it leaves roughly 60 of the 90 days on the user's side, which is the side §6's
+  measurement is about;
+- it is the unit §6's own churn table is written in — the one-month row is the 1.30%
+  figure the entire cadence argument rests on, so the bar is read off the measurement
+  rather than picked for looking careful;
+- and it is the coarsest bar that still leaves most of the budget where it belongs.
+
+**The cost of a tighter bar, named rather than waved past.** Every refresh commits a
+wholly new ~3.14 MB blob and git cannot delta gzip it (second amendment §7). At 30 days
+a hotfix cut within a month of a feature release inherits no refresh at all, which is the
+common shape; at a week, every hotfix would drag one in, and the repository would grow by
+a table per patch release. 30 days buys the accuracy without buying that.
+
+The floor stays at 90 for the reason `TestEmbeddedTableIsFresh` already gives: it blocks
+unrelated work when it fires, and a 30-day floor would fire on every unrelated pull
+request one month after a refresh. Two bars, one date, one arithmetic — the release bar
+is inert unless `BACCHUS_ASN_RELEASE_TABLE` is set, and exactly one thing sets it.
+
+### 3. What the gate asserts, and what it deliberately does not
+
+It runs `./core/asn/` and stops there. It is **not** a second copy of the test suite.
+
+"It duplicates `ci.yml`" is not the reason, and is not an argument against a release
+gate at all — a parallel `ci.yml` gates nothing, which is the whole finding in §1. The
+reason to stop at the table is different and specific:
+
+**Every other assertion in this repository is a function of the tree.** `ci.yml`'s run on
+the pull request that merged those bytes is durable evidence about them; re-running it at
+tag time re-derives the same verdict from the same input.
+`TestEmbeddedTableIsFresh` is the only assertion here whose verdict changes with the
+**calendar** rather than with the tree — it compares `TableRetrieved` against today, so a
+tree that passed it on the day it merged fails it on day 91 with nothing having changed.
+What has to be re-asserted at the moment of release is what expires.
+
+And re-asserting the rest has a cost that is easy to miss: `ci.yml`'s `server` job needs
+user namespaces, `nftables`, `iproute2` and two sysctls before `cmd/bacchus-netd`'s
+real-kernel tests can run at all (ADR-0049). A second copy of that apparatus inside
+`release.yml` would rot unnoticed, because release runs are rare — and a **half** copy is
+actively worse than none, because those tests would silently SKIP and the job would
+report green over the only real-kernel coverage the repo has. That is the same
+green-over-nothing shape the gate exists to remove.
+
+Two smaller decisions fall out of the same worry:
+
+- The gate runs the **package**, not `go test -run <name>`. A `-run` filter matching
+  nothing exits 0, which is the linker's silent-`-X` failure in a different costume.
+- The existence of the assertion is **checked**, not assumed: the job asserts
+  `go test -list` names `TestEmbeddedTableIsFresh` before running anything.
+
+And the wiring is asserted from the other side.
+`core/asn.TestReleaseWorkflowGatesTheTable` reads `release.yml` and fails if the gate job
+is missing, if it stops setting the environment variable, or if `windows-bundle` stops
+`needs:`-ing it. It runs in `ci.yml`, on every ordinary pull request — so the workflow
+that gates merges is what guards the workflow that gates releases. Mutation-testing it
+found a real hole before it shipped: a plain substring search for the environment
+variable was satisfied by the comment that explains the environment variable, so deleting
+the `env:` entry left the check green.
+
+**One residual, named rather than hidden.** Nothing in `release.yml` checks that the
+tagged commit is one `ci.yml` ever saw. A tag on a commit that never went through a pull
+request has been tested by nothing at all, which weakens §3's "durable evidence" argument
+for everything except the table. That is a property of the release process rather than of
+this table, and it is filed separately rather than fixed here.
+
+### 4. Which platform this actually covers
+
+**Covered: Windows.** `release.yml` builds the Windows portable zip and installer, so the
+gate covers everyone who installs Bacchus for Windows from a GitHub release. Release
+scope for 1.0 is Windows and Linux desktop, so that is one of the two.
+
+**Not covered: Linux.** `deploy/install.sh` builds `clients/fyne` from the checkout it is
+run in, at whatever revision that checkout happens to be at, stamps it from `VERSION` and
+runs no tests. There is no Linux release artifact, so there is no Linux release to gate.
+A Linux user's table age is bounded by the 90-day floor on `main` **plus however stale
+their clone is**, and the second term is unbounded — a year-old clone installs a
+year-old table and nothing anywhere says so.
+
+Stated plainly because the phrase "refreshed per release" reads as covering both and does
+not: **"per release" only bites on the platform that has releases.** Making the source
+install assert the floor is one `go test ./core/asn/` before the build, in a file this
+change does not own, and it is a different bar — an install is not a release. Filed.
+
+### 5. The scheduled refresh: options priced, not ruled
+
+#66 named a scheduled job that opens a refresh PR as worth considering and explicitly did
+not decide it, and #85's closing comment gives the argument for it: a detector that only
+fails a build after the fact still depends on somebody remembering, which is exactly the
+failure mode the country-database timer removed. The gate above does not change that. It
+refuses a stale release; it refreshes nothing.
+
+What the country database never had to answer, and this does: **who holds the repository
+write credential.** The country refresh writes a file into `/var/lib` on an operator's own
+machine, which needs no credential and no repository. This one produces a *commit*.
+
+**A. Scheduled job opening a PR with a stored repository-write credential** (a PAT or a
+GitHub App installation token in a secret). Removes "somebody must remember" outright.
+Costs a credential that can write to this repository sitting in CI, reachable by anything
+that runs in a workflow. ADR-0052 §6 refuses to let CI hold the *update signing key* on
+the ground that a build machine that can sign is a build machine that can push code; a
+repository-write token is a weaker form of the same object and the sentence still applies
+to it.
+
+**B. The same, using the built-in `GITHUB_TOKEN`** with `contents: write` and
+`pull-requests: write`. No stored secret at all — but GitHub does not start workflow runs
+for events created by `GITHUB_TOKEN`, so the refresh PR would arrive **with no CI on it**,
+including the very freshness test that motivated it. (Documented platform behaviour;
+nothing here has observed it.) A pull request nothing checks, whose entire diff is 3 MB of
+opaque binary, is a worse artifact than a reminder.
+
+**C. Scheduled job with no repository write at all.** Fetch upstream, run `asn-stage`,
+compare against the committed table, and fail loudly when it differs — carrying over
+`bacchus-geoip-refresh.sh`'s discipline for the fetch half: stage atomically, fail loudly,
+leave the previous file intact on a bad download. No credential, no PR, no branch. It
+removes "somebody must remember" — the run is on a timer and its failure is visible — but
+not "somebody must act".
+
+**The argument that cuts across all three**, and that this record thinks is the real one:
+the table is 3 MB of third-party bytes, and this ADR committed it *specifically so a
+reviewer can regenerate it from the same feed and compare byte for byte*. That check needs
+a human to perform it. An auto-opened PR whose diff no reviewer can read invites
+rubber-stamping precisely the property the determinism was bought to make checkable. It
+does not make A wrong, but it raises A's bar: an automated refresh PR is only as good as
+the regenerate-and-compare that CI would have to do on it, and B cannot do that at all.
+
+**Recommendation, not a ruling — C**, because it buys most of what A buys at no custody
+cost, and because the honest reason to still want A is that C leaves a human in the loop,
+which is the thing the timer was supposed to remove. The choice is the owner's; it is a
+credential decision, not a CI one.
+
+### 6. Consequences
+
+- **A release cannot be cut on a stale table** — on Windows, which is where releases are
+  cut. The refusal happens before anything is compiled and before any release object
+  exists, so recovering from it costs a refresh commit and moving the tag, not deleting a
+  draft.
+- **A pull request that touches the release path now carries the 30-day bar too.** The
+  workflow's `pull_request` trigger is path-filtered to `release.yml` and
+  `deploy/windows/**`, so this is rare, and it is deliberate: a change to how releases are
+  cut should not be green if a release could not be cut from it. It is also the only way
+  the refusal path gets rehearsed before a real tag exists, which is the argument
+  `release.yml`'s own header makes about every other release-only path in it.
+- **The 90-day floor is unchanged**, and so is everything §6 measured. Nothing here
+  revisits embedding, the source, the encoding or the fetch question.
+- **`BACCHUS_ASN_RELEASE_TABLE` is a third environment variable of the same family** as
+  `BACCHUS_REQUIRE_STAMP` and `BACCHUS_NETD_REQUIRE_NS`. The family is becoming a
+  convention: an assertion that is inert by default because it would otherwise block
+  unrelated work, made mandatory by the one job that needs it. Worth naming as a pattern
+  before a fourth one is invented differently.
+- **The gate is enforcement, not schedule.** §5 is undecided, and until it is decided the
+  refresh remains a documented human step with two tripwires under it rather than a thing
+  that happens.
