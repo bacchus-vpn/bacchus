@@ -456,6 +456,50 @@ read_release_version() {
 		"startup by every binary carrying it. This refuses it here instead."
 }
 
+# check_asn_table warns about the one thing in this checkout whose correctness
+# expires on the CALENDAR rather than on the code: the IP→AS table behind
+# AS-diverse hop selection (ADR-0044). It is embedded in the binary at build
+# time, so a client built from an old clone carries an old table, and nothing at
+# runtime can tell it so. `release.yml` puts a hard bar on that for the Windows
+# artifacts; a Linux source install has no release to gate, which left the whole
+# platform uncovered (issue #149).
+#
+# IT WARNS AND DOES NOT REFUSE, and that is the ruling rather than an oversight.
+# The user this project exists for is on a censored network installing from the
+# clone they managed to obtain. Refusing them a working client over a degradation
+# that fails TOWARD ADR-0044 §3's unknown pooling — never toward a false claim of
+# diversity — gets the trade backwards. An install is not a release.
+#
+# It runs the PACKAGE rather than `go test -run TestEmbeddedTableIsFresh`,
+# because a -run filter matching nothing exits 0: a renamed test would silently
+# turn this into a check that always passes, which is the linker's ignored-`-X`
+# failure in a different costume.
+check_asn_table() {
+	log 'checking the age of the IP→AS table this build will embed'
+	if ( cd "$repo_root" && go test ./core/asn/ >/dev/null 2>&1 ); then
+		return 0
+	fi
+	warn 'the IP→AS table in this checkout did not pass its freshness check.'
+	cat >&2 <<EOF
+$progname:   go test ./core/asn/ failed on the tree about to be compiled, and an
+$progname:   out-of-date table is what that test is there to catch. Run it by
+$progname:   hand for the exact age; the table is embedded in the binary, so its
+$progname:   age is this clone's age and no update after the build can fix it.
+$progname:
+$progname:   WHAT IS DEGRADED: AS-diversity scoring for multi-hop chains, and
+$progname:   nothing else. A year-old table mis-scores roughly one verdict in
+$progname:   nine (ADR-0044 §6) — toward counting a hop's network as unknown,
+$progname:   never toward claiming diversity that is not there.
+$progname:
+$progname:   WHAT TO DO: update the clone and run this again.
+$progname:
+$progname:     git pull
+$progname:
+$progname:   Continuing anyway. This is a quality degradation and not a broken
+$progname:   client, and a client you cannot install is worse than a stale table.
+EOF
+}
+
 # prepare_build_dir makes the scratch directory in the CALLING shell, which is
 # not a stylistic preference: resolve_binary is used as `x=$(resolve_binary …)`,
 # and a variable assigned inside a command substitution is assigned in a
@@ -471,6 +515,7 @@ prepare_build_dir() {
 		"--binaries DIR pointing at binaries you built elsewhere."
 	need_cmd go 'Install Go, or build elsewhere and pass --binaries DIR.'
 	read_release_version
+	check_asn_table
 	build_dir=$(mktemp -d)
 }
 
@@ -1155,6 +1200,13 @@ if [ -n "$binaries_dir" ]; then
 	log "using prebuilt binaries from $binaries_dir: their release is whatever stamped them."
 	log "  Cross-build them the way docs/RUNNING.md documents; a bare \`go build\` leaves"
 	log "  a binary that reports 0.0.0 and warns at every start."
+	# The same gap, for the other thing this script cannot see: check_asn_table
+	# asserts something about a TREE, and on this path there is no tree. Named
+	# rather than left silent, because a gap nobody states is one nobody closes
+	# (issue #149).
+	log "  Nor is the embedded IP→AS table checked here: these binaries carry whatever"
+	log "  table their own checkout had. Check it there, before building:"
+	log "    go test ./core/asn/          (ADR-0044)"
 fi
 
 cleanup() { [ -z "$build_dir" ] || rm -rf "$build_dir"; }
