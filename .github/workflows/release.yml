@@ -186,7 +186,7 @@ jobs:
   # One residual, named rather than hidden: nothing here checks that the tagged
   # commit is one ci.yml ever saw. A tag on a commit that never went through a
   # pull request has been tested by nothing at all. That is a property of the
-  # release process rather than of this table, and it is filed separately.
+  # release process rather than of this table - bacchus-vpn/bacchus#151.
   verify-table:
     runs-on: ubuntu-latest
     steps:

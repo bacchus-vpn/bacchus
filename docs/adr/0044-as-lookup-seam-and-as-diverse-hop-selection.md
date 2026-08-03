@@ -816,7 +816,7 @@ the `env:` entry left the check green.
 tagged commit is one `ci.yml` ever saw. A tag on a commit that never went through a pull
 request has been tested by nothing at all, which weakens §3's "durable evidence" argument
 for everything except the table. That is a property of the release process rather than of
-this table, and it is filed separately rather than fixed here.
+this table, and it is #151 rather than something fixed here.
 
 ### 4. Which platform this actually covers
 
@@ -834,7 +834,9 @@ year-old table and nothing anywhere says so.
 Stated plainly because the phrase "refreshed per release" reads as covering both and does
 not: **"per release" only bites on the platform that has releases.** Making the source
 install assert the floor is one `go test ./core/asn/` before the build, in a file this
-change does not own, and it is a different bar — an install is not a release. Filed.
+change does not own, and it is a different bar — an install is not a release. That
+decision, with the reason refusing may be exactly wrong for the user this client is for,
+is #149.
 
 ### 5. The scheduled refresh: options priced, not ruled
 
@@ -881,7 +883,7 @@ the regenerate-and-compare that CI would have to do on it, and B cannot do that 
 **Recommendation, not a ruling — C**, because it buys most of what A buys at no custody
 cost, and because the honest reason to still want A is that C leaves a human in the loop,
 which is the thing the timer was supposed to remove. The choice is the owner's; it is a
-credential decision, not a CI one.
+credential decision, not a CI one. Carried as #150.
 
 ### 6. Consequences
 
@@ -902,6 +904,10 @@ credential decision, not a CI one.
   convention: an assertion that is inert by default because it would otherwise block
   unrelated work, made mandatory by the one job that needs it. Worth naming as a pattern
   before a fourth one is invented differently.
-- **The gate is enforcement, not schedule.** §5 is undecided, and until it is decided the
-  refresh remains a documented human step with two tripwires under it rather than a thing
-  that happens.
+- **The gate is enforcement, not schedule.** §5 is undecided (#150), and until it is
+  decided the refresh remains a documented human step with two tripwires under it rather
+  than a thing that happens.
+- **Three cards carry what this amendment names and does not build**: #149 (a Linux
+  source install is outside the gate), #150 (the scheduled refresh's credential
+  question), #151 (nothing checks a release tag points at a commit CI ever saw).
+  #66 closes on the enforcement; none of the three is folded into it.
