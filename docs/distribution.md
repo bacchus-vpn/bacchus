@@ -21,6 +21,11 @@ with the censor) to find and remove. Unlike rendezvous, this fight is mostly
 fought on **platforms we don't control** (Google, Apple) rather than on our
 own infrastructure, which changes the leverage available to us.
 
+This document was written when the client shipped as an Android APK, and
+§§2–4 analyse the channels on that basis. The 1.0 scope is now Windows plus
+Linux desktop (ADR-0052 §8), so **what those channels actually carry, and what
+a recipient can check about it, is §8** below.
+
 ## 2. Current state (as of 2026-07, evidence-based)
 
 This is an active, fast-moving fight, not a stable baseline — re-check
@@ -167,3 +172,89 @@ the harder problem.
   reusing for a future update mechanism.
 - **#6 coordinator pool** — the closest existing analogue for "avoid a
   single point of failure in an infrastructure component we run" (§6 Q1).
+- **#34 / [ADR-0052](adr/0052-signed-release-channel.md)** — the future update
+  mechanism §5.3 anticipated, now decided. Because its manifest names SHA-256
+  hashes and never locations, every channel in §3 becomes usable for updates
+  without extending trust to any of them. It starts where §8 stops: it can only
+  protect a client that is already installed.
+- **#136 / [ADR-0054](adr/0054-windows-distribution-artifact.md)** — what the
+  Windows artifact contains and why, i.e. the payload §8 describes.
+
+## 8. What is actually delivered on Windows
+
+§§2–4 are about *channels*. This section is about the thing they carry on the
+platform 1.0 ships on. **How that thing is built, and why it has the shape it
+has, is [ADR-0054](adr/0054-windows-distribution-artifact.md)**; what follows
+is only the part that belongs to distribution — what travels, and what
+survives the trip.
+
+### 8.1 The artifact
+
+Two forms, per ADR-0054 §4:
+
+- **Primary: a portable zip** — `bacchus-fyne.exe`, `wintun.dll` with its
+  `LICENSE.txt`, and a config template, unpacked into a directory the user
+  chose. Nothing is registered, there is nothing to uninstall, it runs from
+  removable media, and its config lives in that same folder rather than on the
+  machine — so the whole install can travel on a stick and leave with it.
+- **Secondary: an installer** with the same payload, for users who expect a
+  Start-menu entry and an uninstaller.
+
+**For this document the zip is the form that matters**, and its primacy is a
+distribution property rather than a packaging preference: §3's most resilient
+rows are the ones hardest for a censor to enumerate — a Telegram handout, a
+copy passed between two people, a file on a stick — and every one of them
+carries a single self-contained file well and a multi-file installation badly.
+
+**The bundle is self-contained on purpose.** `wintun.dll` travels inside it
+rather than being fetched on first run, because a first-run fetch would put a
+foreign third-party host in the middle of first launch — a dependency that
+fails exactly where this document's whole problem lives (ADR-0054 §1).
+Everything needed to reach a working tunnel travels in the file that travels
+through the channels.
+
+### 8.2 What a recipient can verify
+
+**Neither artifact is signed.** Code signing is #38, deferred to the end of
+1.0, so first launch shows the SmartScreen "Windows protected your PC"
+interstitial, whose default button is *Don't run*.
+
+That has a consequence for this document worth stating rather than leaving to
+be inferred. **§5.1's Android property has no Windows equivalent.** On Android
+the package manager rejects an update whose signing certificate does not match
+the installed app's, automatically and with no user action — which is what
+makes a sideloaded APK from an untrusted mirror defensible at all. On Windows,
+today, **nothing in the operating system checks who produced this file.**
+
+So the SHA-256 published beside the link is not defence in depth here; **it is
+the whole of the defence**, and §5.2 is promoted from good practice to the only
+pre-install check that exists. That in turn makes §4's Telegram pattern — the
+checksum travelling in the same message as the link — load-bearing rather than
+convenient, because a checksum published only on a web page is guarded by
+exactly the channel a censor is best placed to block or rewrite.
+
+The check a recipient runs before launching anything, in PowerShell:
+
+```powershell
+Get-FileHash <downloaded-file> -Algorithm SHA256
+```
+
+or, equivalently, `certutil -hashfile <downloaded-file> SHA256`. The result is
+compared to the checksum published with the link. It is worth exactly as much
+as the channel that checksum arrived on and no more, which is why the checksum
+is published on the resilient channel rather than only on a site that can be
+blocked or altered.
+
+### 8.3 Where this stops and #34 begins
+
+The signed release channel (#34) verifies against a public key compiled into
+the binary ([ADR-0052](adr/0052-signed-release-channel.md) §1), so it can only
+protect a client that is **already installed**. It has nothing to say about the
+first copy — a tampered first binary would verify its updates against whatever
+anchor it was built with. **The hop this document covers is the one the
+signature chain cannot reach**: download to first run. The checksum is what
+covers it, and until #38 lands it is all that covers it.
+
+Linux acquisition is a different shape and not this section's subject: #18's
+installer script is the supported route there, and it is fetched over the same
+channels with the same checksum discipline.
