@@ -5,6 +5,8 @@
   "turnUser": "bacchus",
   "turnPass": "CHANGE_ME",
 
+  "country": "",
+
   "admissionPubKey": "",
   "admissionCrlPath": "",
 

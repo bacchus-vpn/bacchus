@@ -14,7 +14,7 @@ surface a security tool can have).
 >
 > The app tells you which one you are getting rather than making you read this:
 > the headline says **Protected** where the device is really routed and **Proxy
-> ready** where it is not. Still missing everywhere: a country picker (bacchus#16).
+> ready** where it is not.
 >
 > **This is the only desktop client.** `clients/windows` was retired in bacchus#138
 > once its three gates closed — enforcement folded behind one interface (bacchus#59),
@@ -25,36 +25,66 @@ surface a security tool can have).
 ## What it does
 A single window: a full-width color band showing one of four states —
 **Disconnected / Connecting… / Protected (or Proxy ready) / Blocked** — in plain
-language (Russian or English, following the OS locale; see i18n below), plus one
-button that's always "the one thing you can do right now" (Connect, wait, or
-Disconnect).
+language (Russian or English, following the OS locale; see i18n below), a **country
+picker** underneath it, and one button that's always "the one thing you can do
+right now" (Connect, wait, or Disconnect).
 
-**Connect** names nothing: not an exit, and not a country. Naming an exit is not a
-thing any client can do — country-only assignment (issue #146, ADR-0042) removed it
-from the wire, so a client asks for a *place* and the coordinator picks the exit
-inside it. The country, by contrast, is a choice this client *could* make and
-doesn't: it leaves `core.Config.Geo` unset, which makes `core` resolve the country
-list itself and take the first country the coordinator reports as **assignable** —
-not merely the first one listed, since a country whose exits are all busy or
-withheld is skipped, and "every country is busy" is a named error rather than a
-silent pick. `core` announces the choice on the detail line (`no country
-configured — using NL`). There is no picker yet; that is `bacchus-vpn/bacchus#16`
-`[E3]` in the current tracker.
+### The country picker (bacchus#16, ADR-0055)
+**You choose a country; the coordinator chooses the machine inside it.** Naming an
+exact exit is not a thing any client can do — country-only assignment (issue #146,
+ADR-0042) removed it from the wire — so the picker offers places, not nodes.
+
+Each row is a country and how full it is (`DE — 3 of 5 free`). A country with
+nothing assignable in it says **busy** and is greyed, and it is greyed rather than
+hidden or disabled on purpose: a country you are looking for should not vanish, and
+you keep the ability to insist on a jurisdiction and be told plainly why it did not
+work. The first row is **Automatic**, which is this client's behaviour from before
+it had a picker: `core` takes the coordinator's first assignable country.
+
+**A chosen country is used verbatim, and a busy one is refused rather than swapped.**
+`core` never substitutes a working country for the one you asked for — silently
+egressing you through a jurisdiction you did not choose is the worst failure
+available here — so the picker's whole job is to put "busy" in front of you
+*before* you press Connect. When your own choice is busy or has dropped off the
+list, it says so under the list; if you connect anyway, the refusal names the
+country in plain language and says whether to wait or to choose elsewhere.
+
+**No ping, in 1.0.** `core.CountryInfo` carries a `PingMs` field, nothing on either
+side feeds it, and there is no honest source a client could feed it from — the
+candidates are a file on disk recording which countries you have connected to, a
+number present for one row and blank for the rest, or probing every exit in the
+signed directory. ADR-0055 prices each one. The picker shows capacity instead,
+which is what you are actually choosing on.
+
+**No apparent IP**, which the card also asked for: learning it means asking a third
+party over the tunnel on every connect, which fingerprints the client, hands that
+party a fact about who is using which exit, and adds one address a censor can
+block — and it would only restate the country you already chose. Same reasoning as
+`core/geoip`'s "why local, never a lookup service".
+
+**The list comes from a throwaway engine.** `core.Engine.ListCountries` needs a
+started engine, so `appstate.FetchCountries` builds a client-role engine with no
+SOCKS listener and no serve roles, asks, and stops it — the same shape `cmd/node
+-list` uses. It runs at launch, on **Refresh**, and after a Settings save; never on
+a timer. A refresh that fails keeps the previous list on screen, because a
+coordinator going away does not make the countries it named a minute ago stop
+existing.
+
+The picker is **inert while you are connected**: `core` settles the country once per
+session so a reconnect can never move you between jurisdictions, so changing it
+means disconnecting first, and the picker says so rather than pretending otherwise.
 
 Everything below that (dialing the coordinator, the transport handshake, tearing a
 session down) is exactly `core.Engine`'s ordinary client-role lifecycle — `core.New`
-→ `Start` → `Connect` → `Stop`, with no list call of its own, because `Connect`
-resolves the country internally. (`core.Engine` does expose `ListCountries`, and a
-client with a picker would call it to populate one; this client has no reason to.)
-The lifecycle is driven by `internal/appstate.Controller` and rendered by
-`main.go`/`ui.go` — see `internal/appstate`'s package doc for the exact threading
-contract between the two.
+→ `Start` → `Connect` → `Stop`. The lifecycle is driven by
+`internal/appstate.Controller` and rendered by `main.go`/`ui.go`/`picker.go` — see
+`internal/appstate`'s package doc for the exact threading contract between the two.
 
 ### Connection states (issue #149)
 | State | Meaning | Driven by |
 |---|---|---|
 | Disconnected | No tunnel. Not protected. | Initial state; after Disconnect or a failed connect attempt |
-| Connecting… | Resolving a country and negotiating a session. | Set the moment Connect is pressed |
+| Connecting… | Asking for the chosen country (or resolving one, on Automatic) and negotiating a session. | Set the moment Connect is pressed |
 | Protected | **Windows and Linux.** A session is up and this device's traffic is routed through it: TUN device, routes, kill-switch. On Linux this additionally requires `bacchus-netd` to be installed and reachable. | `core.Engine.Connect` succeeded *and* `enforcement.Enforcer.Start` succeeded |
 | Proxy ready | **macOS.** A session is up and the SOCKS5 proxy is listening on `127.0.0.1:1080`. **Not** device-wide protection — see below. | `core.Engine.Connect` returned successfully, with no enforcement backend on this platform |
 | Blocked | The session was up and the live path just died. | A transport-level ICE disconnect/failed/closed while the session was up — the same signal the retired Windows tray client used for this state (see ADR-0039) |
@@ -131,13 +161,20 @@ OS locale is Russian (`lang`'s own locale detection; no in-app language switcher
 exists or is needed). Adding a language is adding one more
 `translations/<name>.<tag>.json` file; nothing else changes.
 
-The **secondary detail line is not translated**, and deliberately so for now: it is a
-passthrough for errors and progress messages originating in `core` (English, and
-frankly jargon — "direct failed → trying relay…", "path unstable (UDP) — waiting 5s
-before retry"). Translating it means either translating core's message strings or
-giving core typed events the UI can render itself; both are real work and neither
-belongs in a skeleton. The headline state — the part a user has to understand — is
-fully translated, and it never depends on the detail line.
+The **secondary detail line is mostly not translated**: it is a passthrough for
+errors and progress messages originating in `core` (English, and frankly jargon —
+"direct failed → trying relay…", "path unstable (UDP) — waiting 5s before retry").
+Translating those means translating core's message strings, which is not this
+client's to do; the headline state — the part a user has to understand — is fully
+translated and never depends on the detail line.
+
+The exception is the sentences a user reads when a **connect did not happen for a
+reason about their country**. bacchus#16 took the other route this paragraph named:
+`appstate.DetailFor` classifies the coordinator's two country refusals
+(`country-busy` / `no-such-country`, which the wire distinguishes precisely so a
+client can) into a typed `Detail`, and `main.go` renders each from a `lang.L`
+literal. So those two — plus the client's own refusal of an unreadable `country`
+value — are translated, and the rest is still relayed as it arrives.
 
 ## Config
 Nothing is compiled into the binary. Copy
@@ -180,6 +217,16 @@ user cannot write, so the first Save used to fail on permissions. An existing
 exe-adjacent config still keeps the save, because that is the file the client would go
 on reading.
 
+**`country`** is the picker's, and it is the one key neither hand-editing nor
+Settings is the normal way to set — choosing a row in the main window writes it
+back to this same file straight away. Empty means Automatic. A two-letter
+ISO-3166-1 code (`DE`, `NL`; case and surrounding spaces do not matter) pins the
+country and is sent verbatim: if that country is busy or unknown the connect is
+**refused and says so**, never redirected somewhere else. Anything that is not a
+country code — `Germany`, `UK`, `DEU` — is refused at Connect naming the value,
+rather than quietly read as "no preference", since that would connect you
+somewhere while this file still said otherwise.
+
 `admissionPubKey` / `admissionCrlPath` are optional and mirror `core.Config`'s
 fields of the same name. Both empty means the client verifies no
 exit credential and checks no revocation — fail-open, matching a coordinator with
@@ -195,7 +242,13 @@ operator scripting a deployment need not open a dialog.
 
 The `File` menu's `Settings…` opens one window over every field below, all persisted
 to the same config file `LoadConfig` read at startup (or, on a fresh install with no
-config file yet, to this OS's per-user config directory — see Config above):
+config file yet, to this OS's per-user config directory — see Config above).
+
+`country` is deliberately **not** in this window: the jurisdiction you exit in is the
+headline choice, not a preference to go looking for behind a menu, so it lives in the
+main window's picker. It writes to the same file, which is why this window re-reads
+the config when you press Save rather than saving the copy it opened with — otherwise
+a Settings window left open would revert a country chosen in the meantime.
 
 | Field | Config key | Live today? |
 |---|---|---|
@@ -457,7 +510,17 @@ runs in about a minute against `windows-fyne-client`'s eight, nearly all of whic
 cgo compiling `go-gl/glfw`. See `.github/workflows/ci.yml`.
 
 ## Known limits
-- No country picker (#150; `bacchus-vpn/bacchus#16` `[E3]` in the current tracker).
+- **The picker shows no latency and no apparent IP** — see the picker section above
+  and ADR-0055 for why each one has no honest source today. The wire field is kept;
+  a client-reporting path is what would feed it.
+- **On Automatic, the app does not name the country it landed in.** `core` chooses
+  it and exposes no accessor for the choice, so the picker says "Automatic"; `core`
+  announces the country it used on the detail line (`no country configured — using
+  NL`) as it always has. A chosen country needs no such lookup — it is used
+  verbatim or refused, so a connection that came up in DE is in DE.
+- **The country list is not refreshed automatically** while the window is open.
+  Press Refresh. A polled list would mean a fixed-interval request from every idle
+  client, which is a load and traffic-shape question this does not answer.
 - **Carries no device traffic on macOS.** No TUN, no route flip, no system proxy —
   only apps you point at SOCKS5 `127.0.0.1:1080` go through the tunnel, and it is the
   one thing to read before trusting the banner there. Windows routes the device
@@ -493,9 +556,9 @@ cgo compiling `go-gl/glfw`. See `.github/workflows/ci.yml`.
   kill-switch is holding the machine closed; the banner still does not say so,
   because the kill-switch is a setting you can turn off and the banner does not
   know which you chose.
-- Connect always takes the first country the coordinator reports as assignable, and
-  the coordinator picks the exit inside it. Nothing here chooses a jurisdiction, so
-  a user who needs a specific one cannot express that yet — see "What it does" above.
+- **Nothing here chooses an exit**, and nothing can: the coordinator picks the
+  machine inside the country you name (issue #146, ADR-0042). What you choose is the
+  jurisdiction, which is the picker's whole surface.
 - Exit admission (ADR-0026/#60) and CRL revocation (#69) are **off unless configured**
   — set `admissionPubKey` (and optionally `admissionCrlPath`) in Settings or the config
   file. Left

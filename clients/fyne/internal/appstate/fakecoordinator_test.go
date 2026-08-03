@@ -72,6 +72,24 @@ type fakeCoordinator struct {
 	exitAddr *net.UDPAddr
 	sessions map[string]*net.UDPAddr // session id -> the client's address
 	seq      int
+
+	// busy makes the one registered exit unassignable, which is the state issue
+	// #147 named on the wire and issue #16's picker renders. The real
+	// coordinator derives BOTH halves of it from one predicate (exitAssignable
+	// feeds countrySnapshot's Available and chooseExit's candidate set), so this
+	// flag drives both here too: the country reports Available 0 / Busy true AND
+	// a connect naming it is refused country-busy. Splitting them would let a
+	// test pass against a fake that says "busy" in the list and pairs anyway,
+	// which no coordinator does.
+	busy bool
+}
+
+// setBusy fills the country up (or empties it again) while the fake is running,
+// so one test can watch the picker's answer change under it.
+func (c *fakeCoordinator) setBusy(v bool) {
+	c.mu.Lock()
+	c.busy = v
+	c.mu.Unlock()
 }
 
 func newFakeCoordinator(t *testing.T) *fakeCoordinator {
@@ -111,13 +129,26 @@ func (c *fakeCoordinator) serve() {
 			c.mu.Lock()
 			var countries []fakeWireCountry
 			if c.exit != nil {
-				countries = []fakeWireCountry{{Country: c.exit.Country, Exits: 1, Available: 1}}
+				ci := fakeWireCountry{Country: c.exit.Country, Exits: 1, Available: 1}
+				if c.busy {
+					ci.Available, ci.Busy = 0, true
+				}
+				countries = []fakeWireCountry{ci}
 			}
 			c.mu.Unlock()
 			c.send(src, fakeWire{Type: "countries", Countries: countries})
 		case "connect":
 			c.mu.Lock()
-			exitAddr, exit := c.exitAddr, c.exit
+			exitAddr, exit, busy := c.exitAddr, c.exit, c.busy
+			// A country that exists but has nothing assignable in it is refused
+			// country-busy, NOT no-such-country: the two are distinct on the wire
+			// precisely so a client can tell "wait or choose elsewhere" from "your
+			// country code is wrong" (cmd/coordinator's assignRefusal).
+			if busy && exit != nil && strings.EqualFold(m.Country, exit.Country) {
+				c.mu.Unlock()
+				c.send(src, fakeWire{Type: "error", Reason: "country-busy"})
+				continue
+			}
 			// A connect names a country and the coordinator resolves it to an exit. A
 			// connect naming none is refused, exactly as the real coordinator refuses
 			// it (refuseNoCountry) — so this fake cannot quietly accept a request

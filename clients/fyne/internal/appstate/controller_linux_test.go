@@ -57,7 +57,7 @@ func TestEachHelperFailureKeepsItsOwnSentence(t *testing.T) {
 			c := newEnforcedController(Config{Coordinators: []string{"127.0.0.1:9"}}, enf)
 			var details []string
 			c.OnState = func(ConnState) {}
-			c.OnDetail = func(s string) { details = append(details, s) }
+			c.OnDetail = func(d Detail) { details = append(details, d.Text) }
 
 			_, err := c.startEnforcement(false)
 			if err == nil {

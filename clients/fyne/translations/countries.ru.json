@@ -1,0 +1,21 @@
+{
+    "Country: %s": "Страна: %s",
+    "Automatic": "Автоматически",
+    "Automatic — Bacchus chooses for you": "Автоматически — Bacchus выберет за вас",
+    "Refresh": "Обновить",
+    "busy": "занято",
+    "not on the list": "нет в списке",
+    "%d of %d free": "свободно %d из %d",
+    "Looking for countries…": "Ищем страны…",
+    "Bacchus has no address to ask for a country list yet — press Connect to see what is missing.": "Bacchus пока не знает, у кого спросить список стран — нажмите «Подключиться», чтобы увидеть, чего не хватает.",
+    "Could not reach Bacchus to get the country list. Check your internet connection, then press Refresh.": "Не удалось получить список стран. Проверьте подключение к интернету и нажмите «Обновить».",
+    "No countries are available right now. Press Refresh to try again.": "Сейчас нет доступных стран. Нажмите «Обновить», чтобы попробовать снова.",
+    "%s is busy right now, so connecting there will probably be refused. You can still try, or choose somewhere else.": "Страна %s сейчас занята, поэтому подключение к ней, скорее всего, будет отклонено. Можно всё равно попробовать или выбрать другую.",
+    "%s is not on the list right now, so connecting there will probably be refused. You can still try, or choose somewhere else.": "Страны %s сейчас нет в списке, поэтому подключение к ней, скорее всего, будет отклонено. Можно всё равно попробовать или выбрать другую.",
+    "Disconnect first, then choose where to connect.": "Сначала отключитесь, затем выберите, куда подключаться.",
+    "Your choice applies now, but it could not be saved:": "Выбор применён, но сохранить его не удалось:",
+    "Your choice applies now, but it could not be saved: the settings file could not be read.": "Выбор применён, но сохранить его не удалось: не удалось прочитать файл настроек.",
+    "%s is busy right now — everything there is full. Choose another country, or try again in a moment.": "Страна %s сейчас занята — там всё заполнено. Выберите другую страну или попробуйте чуть позже.",
+    "Bacchus has nothing in %s to connect you through. Choose another country from the list.": "В стране %s у Bacchus нет ничего, через что можно вас подключить. Выберите другую страну из списка.",
+    "Your settings file asks for \"%s\", which is not a country. Choose a country above, or put a two-letter code like DE in the \"country\" line of that file.": "В файле настроек указано «%s», а это не страна. Выберите страну выше или впишите двухбуквенный код, например DE, в строку «country» этого файла."
+}

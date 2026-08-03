@@ -1,6 +1,7 @@
 package appstate
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/bacchus-vpn/bacchus/core"
@@ -85,11 +86,13 @@ func TestStateFor(t *testing.T) {
 
 func TestDetailFor(t *testing.T) {
 	cases := []struct {
-		name     string
-		ev       core.Event
-		cur      ConnState
-		wantText string
-		wantShow bool
+		name        string
+		ev          core.Event
+		cur         ConnState
+		wantText    string
+		wantShow    bool
+		wantKind    DetailKind
+		wantCountry string
 	}{
 		{
 			name:     "error always shows, even while protected",
@@ -130,9 +133,84 @@ func TestDetailFor(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			text, show := DetailFor(tc.ev, tc.cur)
-			if show != tc.wantShow || (show && text != tc.wantText) {
-				t.Fatalf("DetailFor(%+v, %v) = (%q, %v), want (%q, %v)", tc.ev, tc.cur, text, show, tc.wantText, tc.wantShow)
+			d, show := DetailFor(tc.ev, tc.cur)
+			if show != tc.wantShow || (show && d.Text != tc.wantText) {
+				t.Fatalf("DetailFor(%+v, %v) = (%q, %v), want (%q, %v)", tc.ev, tc.cur, d.Text, show, tc.wantText, tc.wantShow)
+			}
+			if show && d.Kind != tc.wantKind {
+				t.Fatalf("DetailFor(%+v, %v) classified as kind %d, want %d — the kind is what decides whether the UI can say this in the user's own language", tc.ev, tc.cur, d.Kind, tc.wantKind)
+			}
+			if show && d.Country != tc.wantCountry {
+				t.Fatalf("DetailFor(%+v, %v) named country %q, want %q", tc.ev, tc.cur, d.Country, tc.wantCountry)
+			}
+		})
+	}
+}
+
+// TestDetailForCountryRefusals is the country half of DetailFor, kept separate
+// because its stake is different: these are the only two refusals the wire names
+// deliberately (cmd/coordinator's assignRefusal), and the reason it names them
+// is so a client can tell a user which of the two happened. Relaying core's own
+// sentence would put the words "exit" and "quota" in front of somebody whose
+// entire vocabulary for this product is "countries", and would do it in English.
+//
+// Mutation check: change either prefix match in countryRefusal and the matching
+// case falls through to DetailVerbatim, which this names.
+func TestDetailForCountryRefusals(t *testing.T) {
+	cases := []struct {
+		name        string
+		msg         string
+		wantKind    DetailKind
+		wantCountry string
+		wantSubstr  string
+	}{
+		{
+			name:        "country-busy is classified and names the country",
+			msg:         "coordinator refused to pair in NL: country-busy (every exit there is at capacity or out of quota — try again shortly, or choose another country)",
+			wantKind:    DetailCountryBusy,
+			wantCountry: "NL",
+			wantSubstr:  "NL",
+		},
+		{
+			name:        "no-such-country is classified distinctly",
+			msg:         "coordinator refused to pair in ZZ: no-such-country (this coordinator knows no exit in that country — check the country code)",
+			wantKind:    DetailNoSuchCountry,
+			wantCountry: "ZZ",
+			wantSubstr:  "ZZ",
+		},
+		{
+			name:     "a refusal reason this client does not know stays verbatim",
+			msg:      "coordinator refused to pair in DE: connect-needs-nonce (this coordinator requires a per-connect idempotency key…)",
+			wantKind: DetailVerbatim,
+			// Not flattened into one of the two above: telling a user to choose
+			// another country when the problem is a client bug sends them round a
+			// loop that cannot end.
+			wantSubstr: "connect-needs-nonce",
+		},
+		{
+			name:       "an unrelated error is untouched",
+			msg:        "listen tcp 127.0.0.1:1080: bind: address already in use",
+			wantKind:   DetailVerbatim,
+			wantSubstr: "address already in use",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d, show := DetailFor(core.Event{Kind: core.EventError, Message: tc.msg}, Connecting)
+			if !show {
+				t.Fatal("an error was suppressed: every error surfaces, protected or not")
+			}
+			if d.Kind != tc.wantKind {
+				t.Fatalf("kind = %d, want %d (text %q)", d.Kind, tc.wantKind, d.Text)
+			}
+			if d.Country != tc.wantCountry {
+				t.Fatalf("country = %q, want %q", d.Country, tc.wantCountry)
+			}
+			if !strings.Contains(d.Text, tc.wantSubstr) {
+				t.Fatalf("text %q does not contain %q", d.Text, tc.wantSubstr)
+			}
+			if tc.wantKind != DetailVerbatim && strings.Contains(d.Text, "exit") {
+				t.Errorf("text %q says \"exit\": issue #16 requires this client to speak in countries, and core's own refusal text is exactly what it must not relay", d.Text)
 			}
 		})
 	}
