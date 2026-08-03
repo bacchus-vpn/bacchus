@@ -130,6 +130,19 @@ func TestLoadConfigReturnsPath(t *testing.T) {
 // under test.
 func writeExeAdjacentConfig(t *testing.T, c Config) string {
 	t.Helper()
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	return writeExeAdjacentFile(t, b)
+}
+
+// writeExeAdjacentFile is writeExeAdjacentConfig over raw bytes, for a test
+// that needs the file's exact JSON rather than whatever marshalling a Config
+// produces - the release bundle's template is written by the packaging job and
+// not by this package, so a test about it has to state the bytes.
+func writeExeAdjacentFile(t *testing.T, b []byte) string {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Skipf("os.Executable: %v", err)
@@ -138,15 +151,65 @@ func writeExeAdjacentConfig(t *testing.T, c Config) string {
 	if _, err := os.Stat(path); err == nil {
 		t.Fatalf("%s already exists - refusing to overwrite it", path)
 	}
-	b, err := json.Marshal(c)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Skipf("cannot write beside the test binary: %v", err)
 	}
 	t.Cleanup(func() { os.Remove(path) })
 	return path
+}
+
+// TestBundleLayoutTemplateIsUsableAsIs is the CLIENT half of bacchus#136's
+// third ruling, and the finding is that there was nothing to build: the
+// release bundle is to place bacchus-fyne.config.json beside bacchus-fyne.exe
+// with the endpoint keys present and empty, and every rule that has to hold
+// for that to be the file the user edits AND the file Settings then saves to
+// was already in place. What was missing is a test, because the packaging job
+// lives in another repository directory and can catch no change to the
+// precedence rules here.
+//
+// Three things have to hold together, and only the first is obvious:
+//
+//   - LoadConfig READS it, which needs the exe-adjacent candidate to be ranked
+//     first. It is (configPaths), and a portable install is why.
+//   - Empty endpoint keys parse to an unconfigured Config rather than an
+//     error, so the app opens normally and the Connect refusal - not a startup
+//     error banner - is what tells the user what to do.
+//   - DefaultConfigPath returns THAT file, so a Settings save lands in the
+//     file the bundle shipped instead of creating a second one under
+//     %APPDATA% that the load order would then permanently shadow. This is the
+//     bacchus#118 constraint arriving from the other direction, and it is the
+//     one a "simplify the two path orders into one" change would break.
+func TestBundleLayoutTemplateIsUsableAsIs(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	// The shape ruled for the bundle: every endpoint key present, all empty.
+	// Same shape deploy/install.sh writes on Linux when the example template
+	// is not beside it.
+	template := []byte(`{
+  "coordinators": [],
+  "stun": "",
+  "turn": "",
+  "turnUser": "",
+  "turnPass": ""
+}
+`)
+	bundlePath := writeExeAdjacentFile(t, template)
+
+	cfg, path, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig on the bundle's own template: %v - the app would open with a config error banner instead of a usable window", err)
+	}
+	if path != bundlePath {
+		t.Fatalf("LoadConfig path = %q, want the bundle's %q", path, bundlePath)
+	}
+	if len(cfg.Coordinators) != 0 {
+		t.Errorf("Coordinators = %v, want none - the template is the unconfigured state", cfg.Coordinators)
+	}
+	if got := DefaultConfigPath(); got != bundlePath {
+		t.Fatalf("DefaultConfigPath = %q, want the bundle's %q - a Settings save would write a second file that the load order then shadows forever", got, bundlePath)
+	}
 }
 
 // TestLoadConfigPrefersExeAdjacent pins the LOAD half of issue #118's split:
