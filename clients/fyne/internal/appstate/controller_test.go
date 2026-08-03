@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -126,10 +127,79 @@ func TestHasCoordinator(t *testing.T) {
 		{[]string{"", ""}, false},
 		{[]string{"203.0.113.10:8080"}, true}, // TEST-NET-3 (RFC 5737)
 		{[]string{"", "203.0.113.10:8080"}, true},
+
+		// An untouched template is nothing configured. Both entries the
+		// example ships, with and without a port, and a half-edited pair
+		// where only the second was replaced.
+		{[]string{"COORDINATOR_HOST:8080"}, false},
+		{[]string{"COORDINATOR_HOST:8080", "COORDINATOR_HOST_2:8080"}, false},
+		{[]string{"COORDINATOR_HOST"}, false},
+		{[]string{" COORDINATOR_HOST:8080 "}, false},
+		{[]string{"COORDINATOR_HOST:8080", "203.0.113.10:8080"}, true},
+
+		// Matched in the HOST POSITION and EXACTLY, so a real deployment is
+		// never refused for a name that merely resembles a placeholder.
+		{[]string{"coordinator_host:8080"}, true},
+		{[]string{"COORDINATOR_HOST.example.net:8080"}, true},
+		{[]string{"my-COORDINATOR_HOST:8080"}, true},
+		{[]string{"203.0.113.10:COORDINATOR_HOST"}, true},
 	} {
 		if got := hasCoordinator(tc.in); got != tc.want {
 			t.Errorf("hasCoordinator(%q) = %v, want %v", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestTemplatePlaceholdersMatchTheExampleFile is what keeps the hard-coded set
+// in controller.go honest. hasCoordinator refuses the example's placeholder
+// hostnames by name, which is only safe while those names are what the example
+// actually ships — rename a placeholder there and the client silently goes
+// back to treating an untouched template as configured, which is bacchus#134
+// returning by the same route it arrived.
+//
+// So this reads the real file rather than a copy: every host in its
+// "coordinators" array must be in templatePlaceholderHosts, and every entry in
+// templatePlaceholderHosts must appear in the file. Neither direction is
+// optional — the first catches a rename, the second catches a stale leftover.
+func TestTemplatePlaceholdersMatchTheExampleFile(t *testing.T) {
+	const example = "../../bacchus-fyne.config.example.json"
+	b, err := os.ReadFile(example)
+	if err != nil {
+		t.Fatalf("read %s: %v", example, err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatalf("parse %s: %v", example, err)
+	}
+	if len(cfg.Coordinators) == 0 {
+		t.Fatalf("%s names no coordinators; this test cannot mean anything", example)
+	}
+
+	seen := map[string]bool{}
+	for _, a := range cfg.Coordinators {
+		host := a
+		if h, _, err := net.SplitHostPort(a); err == nil {
+			host = h
+		}
+		if !templatePlaceholderHosts[host] {
+			t.Errorf("%s ships coordinator host %q, which templatePlaceholderHosts does not list — "+
+				"an untouched template would be treated as configured (bacchus#134)", example, host)
+		}
+		seen[host] = true
+	}
+	for host := range templatePlaceholderHosts {
+		if !seen[host] {
+			t.Errorf("templatePlaceholderHosts lists %q, which %s no longer ships — "+
+				"a real host by that name would be refused", host, example)
+		}
+	}
+
+	// The whole point, end to end: the file as shipped must read as
+	// unconfigured.
+	if hasCoordinator(cfg.Coordinators) {
+		t.Errorf("hasCoordinator(%q) = true for the untouched example; "+
+			"a fresh user would get a DNS failure instead of the refusal that names the file",
+			cfg.Coordinators)
 	}
 }
 

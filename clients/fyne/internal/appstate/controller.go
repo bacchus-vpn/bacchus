@@ -3,6 +3,7 @@ package appstate
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -231,13 +232,55 @@ const SocksAddr = "127.0.0.1:1080"
 // past this check and come back from core as "at least one coordinator address
 // required": true, and naming neither the file to edit nor the key to put it
 // in, which is the whole of bacchus#134.
+//
+// An UNEDITED placeholder counts as nothing configured too, for the same
+// reason and a sharper one. Both seeded templates a user actually receives
+// carry COORDINATOR_HOST rather than an empty list — deploy/install.sh's
+// seed_client_config copies the example verbatim on Linux, and the Windows
+// bundle ships that same example beside the exe. Without this, the one
+// configuration mistake every fresh user makes produces a DNS failure against
+// a hostname that does not resolve, which names neither the file nor the key
+// and reads like a network problem rather than an unfinished setup. With it,
+// they get the refusal below, which names both.
 func hasCoordinator(addrs []string) bool {
 	for _, a := range addrs {
-		if strings.TrimSpace(a) != "" {
+		a = strings.TrimSpace(a)
+		if a != "" && !isTemplatePlaceholder(a) {
 			return true
 		}
 	}
 	return false
+}
+
+// templatePlaceholderHosts are the hostnames bacchus-fyne.config.example.json
+// uses to mean "put your own here". They are matched exactly and only in the
+// host position, so a real deployment that happens to run a host whose name
+// merely CONTAINS one of these is unaffected.
+//
+// Hard-coding the example's own tokens here is the one thing about this that
+// deserves an argument, because it teaches the client about a file it never
+// reads. The alternative — seeding an empty list instead and leaving the
+// client ignorant — was considered and declined: a placeholder tells someone
+// editing the file by hand what shape of value belongs there, which `""` does
+// not, and the same template serves both platforms (ADR-0054). Two templates
+// that can drift is the worse trade. The knowledge is one string set, it is
+// covered by a test that reads the example file itself, and that test fails if
+// the example ever renames its placeholders.
+var templatePlaceholderHosts = map[string]bool{
+	"COORDINATOR_HOST":   true,
+	"COORDINATOR_HOST_2": true,
+}
+
+// isTemplatePlaceholder reports whether addr is an untouched template entry
+// rather than an address. addr is host:port by the time it reaches here; a
+// value with no port is still checked, since a half-edited entry is exactly
+// the case this exists for.
+func isTemplatePlaceholder(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	return templatePlaceholderHosts[host]
 }
 
 // settingsMenuPath is how the Settings window is reached, spelled the way

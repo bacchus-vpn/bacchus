@@ -149,6 +149,15 @@ rotates across them (issue #6). This file is gitignored — never commit it. A m
 file isn't an error at startup; pressing Connect with nothing configured surfaces a
 plain-language explanation instead of hanging.
 
+**An unedited template counts as nothing configured.** The example's placeholder hosts
+(`COORDINATOR_HOST`, `COORDINATOR_HOST_2`) are treated as absent rather than as
+addresses, so a fresh install that has not been filled in gets that same explanation
+instead of a DNS failure against a name that resolves nowhere. This matters because
+both seeded templates a user actually receives carry those placeholders — the Windows
+bundle ships the example beside the exe, and `deploy/install.sh` copies it verbatim on
+Linux. The match is exact and only on the host, so a real deployment is never refused
+for a hostname that merely resembles one.
+
 **`coordinators`, `stun` and `turn` are the one group Settings cannot set** — there
 is no widget for any of them, deliberately (ADR-0039 separates operator config from
 user preference). So the Connect refusal names this file by its full path and says
