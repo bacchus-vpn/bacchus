@@ -415,6 +415,57 @@ carries no country and is offered to no client; the startup warning names that
 specifically, rather than reporting an unresolved address. Nothing changes without the
 flag: an exit with no `-advertise` keeps its observed country as before.
 
+### Correcting a country an admin knows is wrong (issue #113)
+
+A node's country is really **two** claims: where its address resolves, which is what
+every site it visits will conclude, and where the machine physically is, which only its
+operator knows. They disagree routinely — a large cloud provider's address block is
+commonly registered to that provider's home country whatever datacentre an instance runs
+in — so the coordinator now carries **both**: the derived country is what clients select
+on, and the node's own `-country` tag is kept beside it rather than discarded. The
+registration line shows both when they differ:
+
+```
+exit registered: <id> -> <host>:20000 country=NL (observed IP; node declares DE) release=0.1.0
+```
+
+When the **derived** value is wrong — the database has the address in the wrong country,
+and you can check what real sites conclude about it — stage a correction:
+
+```json
+{ "<node id>": "DE" }
+```
+
+```
+bacchus-coordinator -country-overrides /etc/bacchus/country-overrides.json ...
+```
+
+It is re-read every 30s, so an edit takes effect on the node's next register or
+heartbeat with no restart. A file with any unusable row is refused whole — fatal at
+startup, and on a reload the corrections already in effect are kept.
+
+**This corrects the DERIVATION, and is not a way to say where the machine sits.** If the
+box is in DE but its address resolves US, the right value is `US`: a user picks DE to be
+*treated as* German by every site they visit, and an address that resolves US is treated
+as US regardless of which building it is in. Overriding that misroutes exactly the user
+who cared enough to choose — the same misrouting `-geoip` exists to prevent, arriving
+from your side instead of the node's.
+
+Two consequences to know. An override **wins even under `-geoip-required`**, because
+that flag's promise is that no *node* self-report reaches a client's country choice and
+an operator assertion is not a node self-report. And an override is **terminal**: for an
+exit it also suppresses the signaling-vs-advertised-endpoint check above, and the
+contradiction label a chaining client refuses on. The coordinator logs a warning naming
+that when it happens.
+
+**What clients are told.** Without `-geoip-required`, the node's declaration travels in
+the signed directory beside the derived country, as a labelled claim nothing selects on.
+**Under `-geoip-required` it is withheld from the directory entirely** — the coordinator
+still derives it, stores it and shows it to you above, but a client sees neither a
+country nor a declaration for such a node. That artifact is where a relay-chaining
+client picks its terminating jurisdiction, with no live reply to check it against, and
+the flag's whole promise is that no node self-report reaches that choice.
+
 ### Keeping it fresh (issue #85)
 
 The database is deliberately not in the repository, which means **nothing in CI, no

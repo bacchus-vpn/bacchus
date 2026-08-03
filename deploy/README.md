@@ -139,6 +139,7 @@ being precise, because the flag names do not make it obvious:
 | neither (the default) | 100% the node's own `COUNTRY=` claim — nothing is derived |
 | `-geoip <dir>` | the observed signaling address, falling back to `COUNTRY=` when it does not resolve |
 | `-geoip` + `-geoip-required` | the observed signaling address, **corroborated by the exit's advertised endpoint**, or no country at all |
+| any of the above + `-country-overrides` | as above, except for nodes named in that file, where the country is the coordinator admin's own correction — see [docs/RUNNING.md](../docs/RUNNING.md) (issue #113) |
 
 Even at the strictest setting the guarantee is bounded. What is verified is the
 address the coordinator **observed the register arrive from**, checked against the
@@ -183,11 +184,16 @@ nothing about how it arrived at one:
 | `hint` | the observed address resolved to nothing, so this is the node's own `COUNTRY=` claim — the only source in a deployment with no `-geoip` staged |
 | `observed-signaling-only` | resolved, but the advertised endpoint is a **different** address: the tag says where the node signals from, not where it egresses |
 | `unverifiable-no-endpoint` | resolved, but nothing was advertised to corroborate it under `-geoip-required` (carries no country) |
+| `admin-override` | neither observed nor claimed: an admin of that coordinator asserted this country by hand in `-country-overrides`, replacing what was derived (issue #113) |
 
 A client assembling its own relay chain refuses `observed-signaling-only` as a
 terminating exit: it chose that country as a jurisdiction, and the coordinator has
 published that the tag describes a different machine. `hint` is still accepted — refusing
 it would break every deployment running without `-geoip`.
+`admin-override` is accepted too — it is a coordinator operator's assertion, not a
+discovered disagreement — and note that an overridden exit no longer reports
+`observed-signaling-only` even if its endpoint disagrees, because the correction replaces
+the whole derivation.
 
 Exits **may** share a country: a client picks a country and the coordinator picks
 the exit inside it by headroom (issue #146, ADR-0042), so two exits in the same
