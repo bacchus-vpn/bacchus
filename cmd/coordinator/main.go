@@ -20,7 +20,12 @@
 //
 // Each node's country is DERIVED from the source address this coordinator observes it
 // register from, never taken from its own claim (issue #136); its -country flag is a
-// fallback hint for an address that resolves to nothing.
+// fallback hint for an address that resolves to nothing. That claim is also KEPT beside
+// the derived tag rather than discarded (issue #113) — the two answer different
+// questions, "what will sites conclude about this address" and "which building is the
+// machine in", and they disagree routinely on cloud address space. Only the derived one
+// is ever selected on. An admin can correct that derivation, and only that one, through
+// -country-overrides.
 //
 // Plus registry (exits/relays, heartbeat TTL) and session-tagged signaling relay.
 // See ../research/05-network-pairing.md.
@@ -376,8 +381,15 @@ type relayNode struct {
 	// struct had no field for it and buildSnapshot never advertised it, so relay
 	// country was silently discarded. It is carried now: ADR-0038's hop selection
 	// wants to know where a relay is, and #136 covers relays explicitly.
-	country       string
-	countrySource string
+	//
+	// declaredCountry is the node's OWN -country tag, canonicalized, kept beside the
+	// derived one rather than discarded when it loses (issue #113). A bare self-report:
+	// it is never what country holds, is never read by assignment, and travels only so
+	// an operator-facing surface can say what the node claims. See countryClaims and
+	// coldstart.Entry.DeclaredCountry.
+	country         string
+	countrySource   string
+	declaredCountry string
 }
 type exitNode struct {
 	forwarderHealth
@@ -393,9 +405,34 @@ type exitNode struct {
 	// country / countrySource: coordinator-derived, as for relayNode (issue #136). An
 	// exit with no country is unreachable, because a country is the only thing a
 	// client can ask for (issue #146) — see exitAssignable.
-	country       string
-	countrySource string
+	// declaredCountry: the exit's own -country tag, carried beside the derived one
+	// (issue #113); see relayNode.
+	country         string
+	countrySource   string
+	declaredCountry string
 }
+
+// claims gathers a relay's stored country claims back into the value the derivation
+// works in. The registry keeps them as flat fields because assignment reads e.country
+// directly and that seam is deliberately untouched by issue #113.
+func (r *relayNode) claims() countryClaims {
+	return countryClaims{derived: r.country, source: r.countrySource, declared: r.declaredCountry}
+}
+
+// setClaims stores a fresh derivation on a relay. displaced is deliberately not kept: it
+// describes one act of overriding, and every heartbeat re-derives.
+func (r *relayNode) setClaims(c countryClaims) {
+	r.country, r.countrySource, r.declaredCountry = c.derived, c.source, c.declared
+}
+
+func (e *exitNode) claims() countryClaims {
+	return countryClaims{derived: e.country, source: e.countrySource, declared: e.declaredCountry}
+}
+
+func (e *exitNode) setClaims(c countryClaims) {
+	e.country, e.countrySource, e.declaredCountry = c.derived, c.source, c.declared
+}
+
 type session struct {
 	client, peer *net.UDPAddr // peer = relay (relay mode) or exit (direct mode)
 	// relayID names the peer relay actually carrying this session, set only on the
@@ -497,7 +534,8 @@ func main() {
 	deviceRevocations := flag.String("device-revocations", "secrets/device-revocations.json", "path to the revoked device-credential and issuer-cert serials file (hot-reloaded); a missing file means nothing is revoked. Separate from -admission-revocations because the two credentials come from different authorities and their serial namespaces are unrelated.")
 	operatorsPath := flag.String("operators", "secrets/operators.json", "path to the node->operator-tag assignment file (JSON object {\"nodeID\":\"operatorTag\"}), advertised in the signed directory for operator-diversity hop selection (issue #124, ADR-0038); a missing file means no operator tags")
 	geoipDir := flag.String("geoip", "", "path to an unzipped MaxMind GeoLite2-Country-CSV directory, used to derive each node's country from the source address this coordinator OBSERVES it register from (issue #136). Staged out of band and never committed; see docs/RUNNING.md. Empty DISABLES derivation and falls back to each node's self-reported -country tag.")
-	geoipRequired := flag.Bool("geoip-required", false, "refuse to fall back to a node's self-reported -country when its observed address does not resolve (issue #136). The hardened posture: no node self-report can reach a client's country choice. Off by default because every node in a local stack registers from loopback, which no database resolves. Requires -geoip.")
+	geoipRequired := flag.Bool("geoip-required", false, "refuse to fall back to a node's self-reported -country when its observed address does not resolve (issue #136). The hardened posture: no node self-report can reach a client's country choice. Off by default because every node in a local stack registers from loopback, which no database resolves. Requires -geoip. NOTE two things this deliberately does NOT do (issue #113). The node's -country claim is still RECORDED and published as a labelled DECLARATION beside the country, because carrying a claim is not choosing one — under this flag the country is empty precisely because the claim was refused, and nothing in this project selects, filters or groups on a declaration. And an admin correction staged in -country-overrides still wins over the derivation, because that is this coordinator's own operator speaking rather than a node self-report; see that flag.")
+	countryOverridesPath := flag.String("country-overrides", "secrets/country-overrides.json", "path to the admin's per-node country corrections (JSON object {\"nodeID\":\"CC\"}, two-letter ISO-3166-1 alpha-2 codes), hot-reloaded every 30s; a missing file means no corrections and an empty path disables it (issue #113, ADR-0042 §8). Coordinator-side truth, NOT a node self-report — the same standing -operators has. An entry REPLACES what this coordinator derived for that node, in the country list, in assignment and in the signed directory, and it wins even under -geoip-required. READ THIS BEFORE EDITING IT: an override is a correction to the DERIVED country — \"your GeoIP table is wrong, this address really does present as DE\", which is an assertion about the ADDRESS that you can check against what real sites conclude. It is NOT a way to state where the machine physically sits. If the box is in DE but its address resolves US, the correct value is US: a user picks DE to be TREATED AS German by every site they visit, and an address that resolves US is treated as US regardless of which building it is in, so \"correcting\" that misroutes exactly the user who cared enough to choose. The node's own claim about its location is already carried separately and is deliberately not selectable. One more consequence to know: an override is terminal, so for an exit it also suppresses the signaling-vs-advertised-endpoint comparison and the contradiction label a chaining client refuses on — the coordinator logs a warning naming that when it happens. A file with any unusable row is refused whole: fatal at startup, and on a reload the corrections already in effect are kept.")
 	asnTablePath := flag.String("asn-table", "", "path to a disjoint IP->ASN table (`prefix<TAB>asn` rows, see core/asn), used to resolve a capacity attester's autonomous system from the source address this coordinator OBSERVES its report arrive from (issue #23, ADR-0044). The AS is the unit of Sybil cost the ~4:1 attestation bound is denominated in (ADR-0041). Staged out of band and never committed. Empty falls back to masking the observed IP to a routing prefix (/24, /48), which is what this coordinator did before the table existed.")
 	minServingVersion := flag.String("min-serving-version", "0.0.0", "minimum node release (MAJOR.MINOR.PATCH) this coordinator will assign work to; nodes below it are fenced from matchmaking until they update (issue #36, ADR-0015). Raise it past the grace window after a release to pull stragglers up. 0.0.0 disables the fence — every node serves regardless of version.")
 	policyRootPubKey := flag.String("policy-root-pubkey", "", "offline ROOT public key (hex) the signed network policy chains to (issue #39, ADR-0043). When set, this coordinator fetches a signed policy bundle and enforces the floors, fences and reserves inside it — numbers it cannot author, because it does not hold the key that signs them. Empty DISABLES signed policy and leaves this coordinator enforcing only its own flags. NOTE the direction of failure flips here: unlike -admission-pubkey and -min-serving-version, which fail OPEN when unset, a coordinator WITH a policy root configured stops assigning new work once its policy goes stale. Coordinators are a pool with client rotation, so one failing closed sheds to its peers.")
@@ -597,6 +635,16 @@ func main() {
 	// database: an operator who asked for derived countries must not silently get
 	// self-reported ones.
 	if err := setupGeoIP(*geoipDir, *geoipRequired); err != nil {
+		log.Fatal(err)
+	}
+	// The admin's per-node country corrections (issue #113). After setupGeoIP because it
+	// corrects that derivation and the startup log reads better in that order, and before
+	// the packet loop because the register handler reads the map. Fatal on a
+	// present-but-unusable file, matching -operators and -geoip: an admin who staged a
+	// correction must not get a coordinator that came up looking configured while
+	// publishing the country they were correcting. Unlike those two the file is then
+	// re-read on a ticker — see setupCountryOverrides for why this one is not load-once.
+	if err := setupCountryOverrides(context.Background(), *countryOverridesPath); err != nil {
 		log.Fatal(err)
 	}
 	// Same discipline for the AS table (issue #23): loaded once here, before the packet
@@ -717,19 +765,28 @@ func handle(m wire, src *net.UDPAddr) {
 		// consulted only as a fallback when the observed address resolves to nothing —
 		// an unmapped range, or the loopback every node registers from in a local
 		// stack — and not at all under -geoip-required. See deriveCountry.
-		country, countrySrc := deriveCountry(src, m.Country)
+		// What the node CLAIMED is kept beside what was derived rather than dropped on
+		// the floor (issue #113): claims carries both, plus an admin's correction
+		// where one is staged. Only claims.derived is ever assigned or advertised.
+		claims := deriveCountry(m.ID, src, m.Country)
 		switch m.Role {
 		case "relay":
 			// prior is this node's health record from before this register, and nil
 			// exactly when the node is new to the registry. Both readers below need it
 			// BEFORE the assignment at the end of this branch replaces the entry.
+			// priorClaims is that same before-this-register snapshot for the COUNTRY, which
+			// noteCountryOverride needs to tell a change from the steady state (issue #113).
 			var prior *forwarderHealth
+			var priorClaims *countryClaims
 			if r, ok := relays[m.ID]; ok {
 				prior = &r.forwarderHealth
+				pc := r.claims()
+				priorClaims = &pc
 			}
 			if prior == nil {
-				log.Printf("relay registered: %s (%s) country=%s (%s) release=%s", m.ID, src, countryOrUnknown(country), countrySourceLabel(countrySrc), releaseOrUnknown(m.Release))
+				log.Printf("relay registered: %s (%s) country=%s (%s) release=%s", m.ID, src, countryOrUnknown(claims.derived), countryClaimLabel(claims), releaseOrUnknown(m.Release))
 			}
+			noteCountryOverride("relay", m.ID, priorClaims, claims)
 			noteRelease("relay", m.ID, prior, m.Release)
 			// ingressPort is the relay's onion-forward listener port (issue #124); the
 			// coordinator pairs it with the observed src IP in buildSnapshot to advertise a
@@ -743,28 +800,31 @@ func handle(m wire, src *net.UDPAddr) {
 				log.Printf("relay %s (%s) reported ingress port %d, outside 1..65535 — ignoring it; this relay advertises no forwarding ingress and is not relay-eligible (issue #11)", m.ID, src, port)
 				port = 0
 			}
-			relays[m.ID] = &relayNode{forwarderHealth: carryHealth(prior, m.Release), id: m.ID, addr: src, ingressPort: port, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
+			relays[m.ID] = &relayNode{forwarderHealth: carryHealth(prior, m.Release), id: m.ID, addr: src, ingressPort: port, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: claims.derived, countrySource: claims.source, declaredCountry: claims.declared}
 		case "exit":
 			// An exit, unlike a relay, advertises a data-plane endpoint of its own, so
 			// its country is derived against that too: signaling arriving from one
 			// country while traffic egresses from another is the jurisdiction
 			// misrouting country selection exists to prevent (issue #136, ADR-0042 §8).
-			country, countrySrc = deriveExitCountry(src, m.Country, m.Addr)
+			claims = deriveExitCountry(m.ID, src, m.Country, m.Addr)
 			// See the relay branch: prior is nil exactly for a node new to the
 			// registry, and is read before the assignment below replaces the entry.
 			var prior *forwarderHealth
+			var priorClaims *countryClaims
 			if e, ok := exits[m.ID]; ok {
 				prior = &e.forwarderHealth
+				pc := e.claims()
+				priorClaims = &pc
 			}
 			if prior == nil {
-				log.Printf("exit registered: %s -> %s country=%s (%s) release=%s", m.ID, m.Addr, countryOrUnknown(country), countrySourceLabel(countrySrc), releaseOrUnknown(m.Release))
-				if countrySrc == countrySplit {
+				log.Printf("exit registered: %s -> %s country=%s (%s) release=%s", m.ID, m.Addr, countryOrUnknown(claims.derived), countryClaimLabel(claims), releaseOrUnknown(m.Release))
+				if claims.source == countrySplit {
 					// Loud, because it is the one case where a client is shown a
 					// country this coordinator has NOT tied to the egress path.
 					log.Printf("WARNING: exit %s signals from %s but advertises %s — its country tag (%s) describes where it SIGNALS from, not necessarily where traffic egresses; run -geoip-required to refuse this shape (issue #136, ADR-0042 §8)",
-						m.ID, src.IP, m.Addr, country)
+						m.ID, src.IP, m.Addr, claims.derived)
 				}
-				if country == countryUnknown {
+				if claims.derived == countryUnknown {
 					// Loud, because it is silently disqualifying: with a country the
 					// only thing a client can ask for (issue #146), an exit without one
 					// is registered, healthy, and unreachable.
@@ -776,7 +836,7 @@ func handle(m wire, src *net.UDPAddr) {
 					// flag on an otherwise perfectly ordinary direct-mode exit — the
 					// last of which would be actively misdiagnosed by a message saying
 					// the address did not resolve, since it resolved fine (issue #2).
-					switch countrySrc {
+					switch claims.source {
 					case countryNoEndpoint:
 						log.Printf("WARNING: exit %s has NO country: its address resolved, but it advertises no data-plane endpoint and -geoip-required is set, so this coordinator cannot tie the resolution to where its traffic egresses. Set -advertise to the address it serves from. It will not be offered to any client (issues #2/#136/#146)", m.ID)
 					case countrySplit:
@@ -786,8 +846,9 @@ func handle(m wire, src *net.UDPAddr) {
 					}
 				}
 			}
+			noteCountryOverride("exit", m.ID, priorClaims, claims)
 			noteRelease("exit", m.ID, prior, m.Release)
-			exits[m.ID] = &exitNode{forwarderHealth: carryHealth(prior, m.Release), id: m.ID, tcpAddr: m.Addr, udp: src, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: country, countrySource: countrySrc}
+			exits[m.ID] = &exitNode{forwarderHealth: carryHealth(prior, m.Release), id: m.ID, tcpAddr: m.Addr, udp: src, speedCap: m.SpeedCap, declaredQuota: m.DeclaredQuotaBytes, exhausted: m.QuotaState == quotaExhausted, lastSeen: now, country: claims.derived, countrySource: claims.source, declaredCountry: claims.declared}
 		}
 	case "heartbeat":
 		// A heartbeat refreshes the observed address, so the derived country is
@@ -800,17 +861,27 @@ func handle(m wire, src *net.UDPAddr) {
 		// (heartbeats carry no country), so this cannot upgrade an observed tag into
 		// a hinted one.
 		if r, ok := relays[m.ID]; ok {
+			prior := r.claims()
 			r.lastSeen = now
 			r.addr = src
-			r.country, r.countrySource = rederiveCountry(src, r.country, r.countrySource)
+			c := rederiveCountry(m.ID, src, r.claims())
+			r.setClaims(c)
+			// A heartbeat can be the first re-derivation after an admin edits the override
+			// file, so it reports the change too and the register 10s later finds nothing
+			// left to say (issue #113). It is passed the fresh value rather than re-reading
+			// the entry, because what an override DISPLACED is not stored on the entry.
+			noteCountryOverride("relay", m.ID, &prior, c)
 		}
 		if e, ok := exits[m.ID]; ok {
+			prior := e.claims()
 			e.lastSeen = now
 			e.udp = src
 			// Re-checked against the STORED advertisement: a heartbeat carries none,
 			// and an exit whose signaling address moves must not keep an endpoint
 			// agreement that was established against the address it has left.
-			e.country, e.countrySource = rederiveExitCountry(src, e.tcpAddr, e.country, e.countrySource)
+			c := rederiveExitCountry(m.ID, src, e.tcpAddr, e.claims())
+			e.setClaims(c)
+			noteCountryOverride("exit", m.ID, &prior, c) // see the relay branch
 		}
 	case "list":
 		// Client admission (issue #42): only credentialed clients may enumerate
@@ -1818,7 +1889,7 @@ func buildSnapshot(advertise string) coldstart.Snapshot {
 		// terminating exit while still using it as a courier. Under -geoip-required the
 		// question does not arise — such an exit has no country at all (§8, issue #2)
 		// and ships as the country-less exit it is.
-		entries = append(entries, coldstart.Entry{Role: "exit", ID: e.id, Country: e.country, CountrySource: e.countrySource, Addr: e.tcpAddr, Operator: operators[e.id]})
+		entries = append(entries, coldstart.Entry{Role: "exit", ID: e.id, Country: e.country, CountrySource: e.countrySource, DeclaredCountry: publishedDeclaration(e.declaredCountry), Addr: e.tcpAddr, Operator: operators[e.id]})
 	}
 	for id, r := range relays {
 		if r.exhausted {
@@ -1851,7 +1922,7 @@ func buildSnapshot(advertise string) coldstart.Snapshot {
 		// hint whenever that address resolves to nothing — which is every node in a
 		// deployment with no database staged. A consumer that cannot see the difference
 		// is reading a self-report as a coordinator-established fact.
-		e := coldstart.Entry{Role: "relay", ID: id, Country: r.country, CountrySource: r.countrySource, Addr: r.addr.String(), Operator: operators[id]}
+		e := coldstart.Entry{Role: "relay", ID: id, Country: r.country, CountrySource: r.countrySource, DeclaredCountry: publishedDeclaration(r.declaredCountry), Addr: r.addr.String(), Operator: operators[id]}
 		if r.ingressPort != 0 {
 			e.Ingress = net.JoinHostPort(r.addr.IP.String(), strconv.Itoa(r.ingressPort))
 		}

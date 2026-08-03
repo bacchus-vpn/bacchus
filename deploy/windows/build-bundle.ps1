@@ -16,13 +16,18 @@
       bacchus-fyne-setup-<version>-windows-amd64.exe  the installer
       SHA256SUMS.txt                                  hashes over both
 
-    The zip contains exactly one directory holding exactly six files:
+    The zip contains exactly one directory holding exactly seven files:
 
       bacchus-fyne.exe  wintun.dll  LICENSE.txt  LICENSE.wintun.txt
-      bacchus-fyne.config.json  README.txt
+      bacchus-fyne.config.json  README.en.txt  README.ru.txt
 
     That layout is fixed. Do not change it without checking what else depends
     on it - see deploy/windows/README.md.
+
+    THE README SHIPS TWICE, ONCE PER LANGUAGE (issue #145), and the two are
+    kept in step by deploy/windows/i18n_test.go rather than by this script.
+    What this script owns is the encoding, which differs between them and
+    cannot: see Write-WindowsText below.
 
     The installer builds from the SAME staging directory and deliberately does
     NOT install bacchus-fyne.config.json beside the exe; bacchus.iss explains
@@ -115,31 +120,73 @@ $BundleFiles = @(
     'LICENSE.txt',
     'LICENSE.wintun.txt',
     'bacchus-fyne.config.json',
-    'README.txt'
+    'README.en.txt',
+    'README.ru.txt'
 )
 
 function Step { param([string] $Text) Write-Host "==> $Text" }
 function Note { param([string] $Text) Write-Host "    $Text" }
 
 function Write-WindowsText {
-    # Stage a text file the way Windows wants to read it: CRLF, UTF-8 with no
-    # BOM, ASCII only.
+    # Stage a text file the way Windows wants to read it: CRLF, and an encoding
+    # a first-run reader's Notepad gets right without being told.
     #
     # The repo normalises to LF (.gitattributes) and that is right for the
-    # sources; the conversion belongs here, at package time. ASCII is asserted
-    # rather than assumed because these are read on a user's machine by whatever
-    # they have, which for a first-run reader is Notepad: without a BOM a stray
-    # smart quote or em dash renders wrong somewhere, and with one the file
-    # starts with visible junk in editors that do not expect it. Staying inside
-    # ASCII is the only option that is right everywhere, so a file that leaves
-    # it fails the build instead of shipping unreadable.
-    param([string] $Text, [string] $Destination, [string] $What)
-    $nonAscii = [regex]::Matches($Text, '[^\x00-\x7F]')
-    if ($nonAscii.Count -gt 0) {
-        throw "$What contains $($nonAscii.Count) non-ASCII character(s), e.g. '$($nonAscii[0].Value)'. Keep it ASCII - see Write-WindowsText."
+    # sources; the conversion belongs here, at package time. The character set
+    # is asserted rather than assumed because these are read on a user's
+    # machine by whatever they have, and a wrong guess is not a crash, it is a
+    # page of question marks.
+    #
+    # TWO MODES, AND THE ASYMMETRY IS DELIBERATE (issue #145).
+    #
+    #   default        ASCII only, UTF-8 with NO BOM. The English README and
+    #                  LICENSE.txt. Without a BOM a stray smart quote or em
+    #                  dash renders wrong somewhere, and with one the file
+    #                  starts with visible junk in editors that do not expect
+    #                  it - so for a file that can stay inside ASCII, staying
+    #                  inside ASCII is the only option that is right
+    #                  everywhere, and leaving it fails the build.
+    #
+    #   -AllowCyrillic UTF-8 WITH a BOM, and the allowed set widens to
+    #                  Cyrillic plus the punctuation Russian actually uses.
+    #                  The Russian README cannot be ASCII, so the choice above
+    #                  is not available to it and the BOM's cost is paid for
+    #                  what it buys: Notepad before Windows 10 1903 does not
+    #                  detect BOM-less UTF-8 and renders the whole file as the
+    #                  ANSI codepage, which for Cyrillic is total. Against
+    #                  that, a leading marker in an editor that does not know
+    #                  what it is costs nothing - such an editor would have
+    #                  mangled every other line of the file anyway.
+    #
+    # The narrow allowlist is what survives of the ASCII rule in the second
+    # mode: it still catches the smart quote and the stray em dash, and it also
+    # catches text in a script neither language uses. It is not a spellcheck -
+    # the language of the FILE is i18n_test.go's business, and this is only its
+    # bytes.
+    param([string] $Text, [string] $Destination, [string] $What, [switch] $AllowCyrillic)
+    # Escapes rather than literals, so this script itself stays pure ASCII and
+    # needs no encoding rule of its own.
+    if ($AllowCyrillic) {
+        # ASCII + Cyrillic (U+0400-U+04FF) + guillemets + em dash. The same set
+        # i18n_test.go enforces; keep the two in step.
+        $pattern = '[^\x00-\x7F\u0400-\u04FF\u00AB\u00BB\u2014]'
+        $set = 'ASCII, Cyrillic, the guillemets and the em dash'
+    } else {
+        $pattern = '[^\x00-\x7F]'
+        $set = 'ASCII'
+    }
+    $outside = [regex]::Matches($Text, $pattern)
+    if ($outside.Count -gt 0) {
+        throw "$What contains $($outside.Count) character(s) outside $set, e.g. '$($outside[0].Value)'. See Write-WindowsText."
+    }
+    if ($AllowCyrillic -and -not ($Text -match '[\u0400-\u04FF]')) {
+        # A file staged as the Russian one with no Russian in it is the English
+        # one copied and renamed. It ships as a working artifact and reads as a
+        # translation nobody made.
+        throw "$What holds no Cyrillic at all, so it is not the Russian text it is being staged as."
     }
     $Text = ($Text -replace "`r`n", "`n") -replace "`n", "`r`n"
-    [System.IO.File]::WriteAllText($Destination, $Text, (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($Destination, $Text, (New-Object System.Text.UTF8Encoding($AllowCyrillic.IsPresent)))
 }
 
 function Invoke-Native {
@@ -353,7 +400,7 @@ Step 'staging LICENSE.txt'
 # itself.
 #
 # Named LICENSE.txt beside LICENSE.wintun.txt so a user opening the folder can
-# see at a glance which covers what, and README.txt says which is which. The
+# see at a glance which covers what, and both READMEs say which is which. The
 # repository's own file has no extension; the .txt is so Windows opens it in an
 # editor rather than asking what to open it with.
 $license = Join-Path $RepoRoot 'LICENSE'
@@ -368,15 +415,38 @@ Write-WindowsText -Text (Get-Content -Raw -Path $license) `
 # licence file - even only its line endings - is not this script's business.
 
 # --------------------------------------------------------------------------
-# 5. README.txt
+# 5. The READMEs, one per language
+#
+# Two files rather than one bilingual file (issue #145). The bundle is one flat
+# folder, so both are in front of the reader at once and the choice is made by
+# the name; a single file would have to put one language above the other, and
+# whichever went second would be the one a reader scrolls past to reach. Two
+# also keeps the English one inside ASCII, which is a guarantee this script can
+# make about it and cannot make about a file that has to carry Cyrillic.
+#
+# The substitution below applies to EVERY README, which is the part that breaks
+# quietly: a second file that nobody remembered to template ships the literal
+# text "{{VERSION}}" to a user. The leftover check after it is what makes that
+# loud, and it also catches a new placeholder nothing here substitutes.
 # --------------------------------------------------------------------------
 
-Step 'staging README.txt'
+Step 'staging the READMEs'
 
-$readme = Get-Content -Raw -Path (Join-Path $PSScriptRoot 'README.txt')
-$readme = $readme.Replace('{{VERSION}}', $Version).Replace('{{WINTUN_VERSION}}', $WintunVersion)
-Write-WindowsText -Text $readme -Destination (Join-Path $StageDir 'README.txt') `
-    -What 'deploy/windows/README.txt'
+$Readmes = @(
+    @{ Name = 'README.en.txt'; Cyrillic = $false }
+    @{ Name = 'README.ru.txt'; Cyrillic = $true }
+)
+foreach ($r in $Readmes) {
+    $text = Get-Content -Raw -Path (Join-Path $PSScriptRoot $r.Name)
+    $text = $text.Replace('{{VERSION}}', $Version).Replace('{{WINTUN_VERSION}}', $WintunVersion)
+    $left = [regex]::Match($text, '\{\{[A-Za-z0-9_]+\}\}')
+    if ($left.Success) {
+        throw "$($r.Name) still holds $($left.Value) after substitution - nothing here replaces it, so it would ship to a user verbatim. Add it above or remove it from the file."
+    }
+    Write-WindowsText -Text $text -Destination (Join-Path $StageDir $r.Name) `
+        -What "deploy/windows/$($r.Name)" -AllowCyrillic:$r.Cyrillic
+    Note "$($r.Name) staged"
+}
 
 # --------------------------------------------------------------------------
 # 6. Check the staged bundle, then zip it
@@ -497,7 +567,7 @@ Write-Host "    $sumPath"
 
 # Left for the caller: these artifacts are UNSIGNED. Issue #38 is deferred to
 # the end of 1.0 by ruling, so both of them raise SmartScreen on a user's
-# machine, and README.txt tells the user that in as many words. ADR-0052 also
+# machine, and both READMEs tell the user that in as many words. ADR-0052 also
 # requires that the update signing key never sits on a build machine, so
 # signing does not belong in this script even once #38 lands - it is a
 # deliberate act performed afterwards on the artifacts this produced.

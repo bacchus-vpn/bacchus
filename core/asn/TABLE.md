@@ -91,6 +91,18 @@ Then, in the same commit:
    fails CI on a table that is actually fresh.
 2. Update the retrieval date, both hashes and the row counts in the tables above.
 
+**Two bars read that date, not one** (issue #66). The 90 days above is the floor under
+*any* build, and it runs in `ci.yml`. A **release** has to clear a tighter one: 30 days,
+enforced by the `verify-table` job in `.github/workflows/release.yml`, which the Windows
+bundle job `needs:` so a refusal lands before anything is compiled. The reason the two
+differ is that 90 days is a budget on how wrong the table may be in the hands of somebody
+running it, and against the floor alone all of it can be spent before the artifact ships.
+Set `BACCHUS_ASN_RELEASE_TABLE=1` to check the release bar locally:
+
+```bash
+BACCHUS_ASN_RELEASE_TABLE=1 go test ./core/asn/
+```
+
 The date is a hand-maintained constant rather than something `asn-stage` stamps into
 the file, and that is deliberate: a tool that writes "today" into its output produces
 different bytes every run, which would destroy the determinism the whole

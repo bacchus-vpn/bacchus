@@ -246,6 +246,81 @@ one to build it on.
   every reason to be suspicious of a download that the operating system says it
   does not trust.
 
+> **Update (2026-08-03):** the distribution surface speaks Russian and English,
+> both first-class, and something fails when it stops doing so (#145).
+>
+> This record decided *what the artifact contains* and never asked what language
+> it contains it in. The answer it shipped with was English: `[Languages]` in
+> `bacchus.iss` held one entry, every wizard page and the uninstall prompt were
+> English, and so was the whole of `README.txt`. That is an inconsistency rather
+> than a policy — `clients/fyne/translations_test.go` **fails the build** when a
+> `lang.L` key has no Russian, and says why in its own header: an untranslated
+> label renders as English, compiles, vets, passes every other test, and ships,
+> and the only signal is a Russian-speaking user reading an English sentence,
+> *which is exactly the audience this client is for*. Everything that user read
+> **before** the app opened had no such discipline.
+>
+> **Ruled (owner, 2026-08-03): two languages from the start, Russian and
+> English, both first-class.** Not Russian with an English fallback and not the
+> reverse. A message present in one and missing in the other is the defect
+> whichever way round it is, so the check is symmetric.
+>
+> Three things follow, and the third is the one with teeth:
+>
+> - **The installer declares both.** Inno Setup ships `Russian.isl`, and
+>   `ShowLanguageDialog` stays at `yes`: `auto` picks by the machine's UI
+>   language and shows nothing, and there is no language switch anywhere else
+>   in the wizard, so the user it gets wrong has no way back.
+> - **§4's bundle layout changes for the first time.** It is now **seven**
+>   files, not six: `README.txt` becomes `README.en.txt` and `README.ru.txt`.
+>   Two files rather than one bilingual file, because the bundle is one flat
+>   folder — both are in front of a reader at once and the name is the chooser,
+>   where a single file would have to put one language above the other and
+>   whichever went second is the one a reader scrolls past. It also keeps the
+>   English copy inside ASCII, which is a guarantee the packaging script can
+>   make about it and cannot make about a file carrying Cyrillic.
+> - **The enforcement, which is the point.** `deploy/windows/i18n_test.go` is
+>   an ordinary Go test on the `manifest_test.go` model — it reads non-Go build
+>   artifacts on every platform and needs neither Inno Setup nor Windows. It
+>   fails, by name and in both directions, on a `{cm:}` key present for one
+>   language and absent for the other, an unprefixed `[CustomMessages]` entry
+>   (which silently applies to all languages), a `%1`–`%9` argument dropped in
+>   translation, a `russian.` message with no Cyrillic in it, a section present
+>   in one README and not the other, a `{{PLACEHOLDER}}` the build script does
+>   not substitute, and a README missing from either artifact's file list. Its
+>   granularity for prose is the section and not the sentence, which is the same
+>   line `translations_test.go` draws: presence is a mechanical fact and belongs
+>   in a test, quality is a review question.
+>
+>   **The compile is a real check and is a different one.** `release.yml`'s
+>   `windows-bundle` job builds both artifacts, `iscc` included, on every pull
+>   request touching `deploy/windows/**`. It catches a syntax error and an
+>   `.isl` that is not there. It catches none of the above: Inno compiles a
+>   `{cm:}` key defined for one language and missing for the other perfectly
+>   cleanly, which is the entire premise, and every other failure in the list
+>   produces a successful compile and a working installer that is wrong on
+>   somebody's screen.
+>
+> **§5 is untouched and so is the AGPL's place in this record.** The licences
+> are *not* translated — translated by their stewards or not at all — and
+> `LICENSE.txt` remains deliberately unwired from `LicenseFile=`, because that
+> page conditions the install on clicking "I accept" and the AGPL is not an
+> agreement acceptance is conditioned on. "Bacchus" stays untranslated as a
+> brand, as it is everywhere else including `clients/fyne/translations/`.
+>
+> **Built, not run.** `release.yml`'s `windows-bundle` job packaged both
+> artifacts from this change on a real Windows runner: `build-bundle.ps1`
+> executed, both READMEs staged (and their staged sizes confirm the asymmetric
+> encoding — the Russian one three bytes longer than CRLF conversion alone
+> accounts for, the English one exactly zero), the zip came back with seven
+> entries, and `iscc` compiled `bacchus.iss` with both languages into a 23 MB
+> installer with no error. Nothing *ran* that installer. What a person at a
+> Windows machine still owes: that the Select Language dialog appears and the
+> wizard renders Russian, that the uninstall prompt resolves its custom
+> messages in the language the *install* ran in, and that `README.ru.txt` opens
+> as Russian in Notepad out of the extracted zip. Listed with the other
+> hardware items in `deploy/windows/README.md`.
+
 ## Scope: what this record does not decide
 
 - **The artifacts themselves.** No zip is built, no installer is chosen, no

@@ -415,6 +415,57 @@ carries no country and is offered to no client; the startup warning names that
 specifically, rather than reporting an unresolved address. Nothing changes without the
 flag: an exit with no `-advertise` keeps its observed country as before.
 
+### Correcting a country an admin knows is wrong (issue #113)
+
+A node's country is really **two** claims: where its address resolves, which is what
+every site it visits will conclude, and where the machine physically is, which only its
+operator knows. They disagree routinely — a large cloud provider's address block is
+commonly registered to that provider's home country whatever datacentre an instance runs
+in — so the coordinator now carries **both**: the derived country is what clients select
+on, and the node's own `-country` tag is kept beside it rather than discarded. The
+registration line shows both when they differ:
+
+```
+exit registered: <id> -> <host>:20000 country=NL (observed IP; node declares DE) release=0.1.0
+```
+
+When the **derived** value is wrong — the database has the address in the wrong country,
+and you can check what real sites conclude about it — stage a correction:
+
+```json
+{ "<node id>": "DE" }
+```
+
+```
+bacchus-coordinator -country-overrides /etc/bacchus/country-overrides.json ...
+```
+
+It is re-read every 30s, so an edit takes effect on the node's next register or
+heartbeat with no restart. A file with any unusable row is refused whole — fatal at
+startup, and on a reload the corrections already in effect are kept.
+
+**This corrects the DERIVATION, and is not a way to say where the machine sits.** If the
+box is in DE but its address resolves US, the right value is `US`: a user picks DE to be
+*treated as* German by every site they visit, and an address that resolves US is treated
+as US regardless of which building it is in. Overriding that misroutes exactly the user
+who cared enough to choose — the same misrouting `-geoip` exists to prevent, arriving
+from your side instead of the node's.
+
+Two consequences to know. An override **wins even under `-geoip-required`**, because
+that flag's promise is that no *node* self-report reaches a client's country choice and
+an operator assertion is not a node self-report. And an override is **terminal**: for an
+exit it also suppresses the signaling-vs-advertised-endpoint check above, and the
+contradiction label a chaining client refuses on. The coordinator logs a warning naming
+that when it happens.
+
+**What clients are told.** Without `-geoip-required`, the node's declaration travels in
+the signed directory beside the derived country, as a labelled claim nothing selects on.
+**Under `-geoip-required` it is withheld from the directory entirely** — the coordinator
+still derives it, stores it and shows it to you above, but a client sees neither a
+country nor a declaration for such a node. That artifact is where a relay-chaining
+client picks its terminating jurisdiction, with no live reply to check it against, and
+the flag's whole promise is that no node self-report reaches that choice.
+
 ### Keeping it fresh (issue #85)
 
 The database is deliberately not in the repository, which means **nothing in CI, no
@@ -523,17 +574,41 @@ output — which is what lets a reviewer re-run it and compare against the commi
 file. The download is a separate manual step on purpose, so the transform itself
 stays hermetic.
 
-**Cadence is a security parameter, and CI enforces a floor under it.** The mapping
+**Cadence is a security parameter, and CI enforces two bars under it.** The mapping
 drifts ~1.3% per month and ~3.6% per quarter, so a client that has not been rebuilt in
 a year mis-scores roughly one AS verdict in nine. It degrades *safely* — a stale
 answer falls into the unknown-pooling rule, never into a false claim of diversity —
-but it degrades. `TestEmbeddedTableIsFresh` fails once the committed table is more
-than **90 days** old, matching both the GeoIP threshold above and the quarterly
-cadence ADR-0044 §6 costed.
+but it degrades.
 
-That check is a floor, not a schedule: it tells you the table has gone stale, it does
-not refresh anything. Wiring the refresh into the release process proper belongs with
-the signed release channel (#34) and is tracked separately.
+| bar | age | where it runs | what it stops |
+| --- | --- | --- | --- |
+| build floor | **90 days** | `TestEmbeddedTableIsFresh` in `ci.yml`, every push and pull request | work continuing on a table nobody has refreshed in a quarter |
+| release bar | **30 days** | the `verify-table` job in `.github/workflows/release.yml` | a **release** being cut on a table older than a month |
+
+The two are not second opinions about the same thing. 90 days is a budget on how wrong
+the table may be *in the hands of somebody running it*, and that budget is spent on both
+sides of a release — the age of the table when the artifact is built, plus however long
+the person who installed it keeps running that build. Against the floor alone a release
+cut on day 89 hands a user a table already at the limit on the day they install it.
+Shipping at most 30 days old leaves roughly 60 days of the budget on the user's side.
+
+`verify-table` is a job the Windows bundle job `needs:`, not a check beside it, and that
+is the load-bearing part: a refusal happens **before** anything is compiled and before
+any release object exists, not after a draft has been created. Recovering from one means
+refreshing the table, committing it, and moving the tag onto that commit — the same
+shape as the version gate refusing a tag that disagrees with `VERSION`.
+
+**What the release bar covers, and what it does not.** `release.yml` builds the Windows
+artifacts, so the bar covers everyone who installs Bacchus for Windows from a GitHub
+release. It does **not** cover a Linux install: [`deploy/install.sh`](../deploy/install.sh)
+builds `clients/fyne` from the checkout it is run in, at whatever revision that checkout
+happens to be at, and runs no tests. There is no Linux release artifact, so there is no
+Linux release to gate. A Linux user's table age is bounded by the 90-day floor on `main`
+plus however stale their clone is — and the second term is unbounded. Pull before you
+install.
+
+Both bars are floors rather than schedules: they refuse, they do not refresh anything.
+Performing the refresh is still the manual step above.
 
 ## Transport selection
 `-transport` picks the session transport (ADR-0008): `webrtc` (default; UDP/DTLS
