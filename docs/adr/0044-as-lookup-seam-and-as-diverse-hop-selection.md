@@ -845,6 +845,31 @@ change does not own, and it is a different bar — an install is not a release. 
 decision, with the reason refusing may be exactly wrong for the user this client is for,
 is #149.
 
+> **Update (2026-08-03):** #149 is ruled — **warn, never refuse.** `deploy/install.sh`
+> now runs `go test ./core/asn/` against the tree it is about to compile, before the
+> build, and a failure is printed rather than fatal.
+>
+> Refusing was the live alternative and it is the wrong one *for this user*. The person
+> this client exists for is on a censored network installing from the clone they managed
+> to obtain, and the degradation they would be refused over fails **toward** §3's unknown
+> pooling rather than toward a false claim of diversity. A refusal there trades a working
+> client for a quality margin, which is the trade backwards. The floor stays the bar CI
+> applies to the repository; the install reports it.
+>
+> The warning's text is part of the decision, not packaging. It names **what** degrades
+> (AS-diversity scoring for multi-hop chains, roughly one verdict in nine at a year, per
+> §6) and **what to do** (`git pull`), because a warning that names neither is one a user
+> learns to skip, and a warning everybody skips is worth exactly as much as no check.
+>
+> `--binaries DIR` remains genuinely uncoverable: it skips the toolchain, so there is no
+> tree to test and no assertion this script can make. It now says so as a note, naming
+> the check to run in the checkout the binaries were actually built from, rather than
+> leaving that as an unstated gap.
+>
+> What this does **not** change: the source install is still not a release, the two bars
+> stay different by design (§2), and a Linux user's table age is still their clone's age.
+> This makes that visible at the one moment they can act on it.
+
 ### 5. The scheduled refresh: options priced, not ruled
 
 #66 named a scheduled job that opens a refresh PR as worth considering and explicitly did
