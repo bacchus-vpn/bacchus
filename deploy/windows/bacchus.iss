@@ -1,4 +1,4 @@
-; Bacchus Windows installer (Inno Setup 6).
+﻿; Bacchus Windows installer (Inno Setup 6).
 ;
 ; Built by deploy/windows/build-bundle.ps1, which passes every value below that
 ; changes between releases. Compile it by hand with, e.g.:
@@ -16,10 +16,27 @@
 ;
 ; UNSIGNED. Issue #38 is deferred to the end of 1.0 by ruling, so this raises
 ; SmartScreen's "Windows protected your PC" on a user's machine. That is the
-; accepted state and is not to be worked around; README.txt tells the user
-; about it in as many words. It is also why winget is ruled out for now - it
-; needs a signed installer, and its manifest repository is Microsoft-hosted and
-; therefore pullable, which is the wrong property for this product.
+; accepted state and is not to be worked around; README.en.txt/README.ru.txt
+; tell the user about it in as many words. It is also why winget is ruled out
+; for now - it needs a signed installer, and its manifest repository is
+; Microsoft-hosted and therefore pullable, which is the wrong property for this
+; product.
+;
+; ENGLISH AND RUSSIAN, BOTH FIRST-CLASS (issue #145). Every wizard page a user
+; reads comes from the .isl of the language they chose; the one string this
+; script writes itself is in [CustomMessages] below, once per language. That
+; parity is not enforced by anything Inno does - a {cm:} key defined for one
+; language and not the other COMPILES, and fails on the user's machine - so it
+; is enforced by deploy/windows/i18n_test.go, which runs on every platform and
+; needs no Inno Setup. The compile is a real check and it is not this one.
+;
+; THIS FILE IS UTF-8 WITH A BOM, and must stay that way while it holds any
+; non-ASCII character. Inno Setup dropped the BOM requirement for non-ASCII
+; scripts in 6.3; on 6.0-6.2 a BOM-less UTF-8 script is read in the build
+; machine's ANSI codepage, which turns the Russian messages below into mojibake
+; in a shipped installer with no error anywhere. The BOM costs nothing on 6.3+
+; and is the only thing that makes this version-independent. i18n_test.go
+; asserts it.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0-dev"
@@ -90,9 +107,54 @@ PrivilegesRequired=admin
 ; admin-mode install. It is deliberate here and the [Files] comment below is the
 ; whole reason this installer exists in the shape it does.
 UsedUserAreasWarning=no
+; ASK, rather than detect. This is Inno's default, and it is set explicitly
+; because with two languages it stops being a default and becomes the decision
+; issue #145 turns on: neither language is the fallback for the other.
+;
+; The alternative, ShowLanguageDialog=auto, picks by the machine's UI language
+; and shows nothing. It gets the common case right silently - and there is no
+; language switch anywhere else in the wizard, so the user it gets wrong (a
+; Russian speaker on an English-locale Windows, which is an ordinary thing to
+; be) has no way back. One click is the whole cost of never being wrong.
+; /LANG=russian on the command line still suppresses it for a silent install.
+ShowLanguageDialog=yes
 
 [Languages]
+; Both first-class (issue #145). Russian.isl ships with Inno Setup - it is in
+; the compiler's own Languages directory, alongside Default.isl in the compiler
+; root - so this needs nothing fetched or vendored.
+;
+; The internal Name values are what /LANG= takes and what prefixes each entry
+; in [CustomMessages] below. release.yml's windows-bundle job compiles this
+; script on every pull request touching deploy/windows/**, so an .isl that is
+; not there fails on the PR - but one that IS there and is the wrong language
+; compiles perfectly, so i18n_test.go holds these two pairs as an allowlist as
+; well: adding a third language means adding it there deliberately.
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
+
+[CustomMessages]
+; The only strings this installer writes itself. Everything else the wizard
+; shows - page text, buttons, the task description below, the uninstall
+; confirmation - comes from the .isl of the chosen language.
+;
+; Every entry here is language-prefixed, and that is a rule rather than a
+; style. An unprefixed entry applies to ALL languages, which for a sentence is
+; exactly the asymmetry issue #145 is about: one language's text shown to the
+; other's reader, compiling cleanly. i18n_test.go refuses an unprefixed entry,
+; refuses a prefix that is not a declared language, and refuses a key that is
+; missing for any declared language, in either direction.
+;
+; The prefix is the INTERNAL NAME from [Languages] above - "english", not "en".
+; A prefix that matches no declared language is not English text under the
+; wrong label, it is a message nothing will ever read.
+;
+; Deliberately NOT translated: "Bacchus", which is a brand and is left alone
+; everywhere in this project, including in clients/fyne/translations.
+english.RemoveSettingsPrompt=Also remove your Bacchus settings?
+russian.RemoveSettingsPrompt=Удалить также ваши настройки Bacchus?
+english.RemoveSettingsDetail=This holds the endpoints and password you configured. Choose No to keep them for a later install.
+russian.RemoveSettingsDetail=В них хранятся адреса и пароль, которые вы указали. Нажмите «Нет», чтобы сохранить их для следующей установки.
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -115,7 +177,13 @@ Source: "{#StageDir}\bacchus-fyne.exe";     DestDir: "{app}"; Flags: ignoreversi
 Source: "{#StageDir}\wintun.dll";           DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE.txt";          DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\LICENSE.wintun.txt";   DestDir: "{app}"; Flags: ignoreversion
-Source: "{#StageDir}\README.txt";           DestDir: "{app}"; Flags: ignoreversion
+; BOTH READMEs, whichever language the wizard ran in. Installing only the
+; chosen one would be a smaller {app} and a worse artifact: the language of the
+; wizard is the installing user's choice at one moment, not a property of the
+; machine, and the second reader of a shared PC - or whoever the folder is
+; handed to - is exactly the person the other file is for.
+Source: "{#StageDir}\README.en.txt";        DestDir: "{app}"; Flags: ignoreversion
+Source: "{#StageDir}\README.ru.txt";        DestDir: "{app}"; Flags: ignoreversion
 
 ; The config goes to %APPDATA%, NOT next to the exe. This is the one constraint
 ; that separates this installer from the portable zip, and getting it backwards
@@ -173,15 +241,34 @@ begin
   // install.sh's --keep-config is the prompt here. SuppressibleMsgBox so a
   // silent uninstall takes the default (remove) instead of hanging on a dialog
   // nobody can see.
+  //
+  // This is the one string the wizard shows that does not come from an .isl,
+  // and it is the one with the highest stake in the whole flow: it asks
+  // whether to delete a file naming the coordinators this person used.
+  // Answering it in a language the reader does not have is answering it
+  // blind, so it is built from [CustomMessages] rather than from a literal.
+  //
+  // CustomMessage RAISES on a missing key rather than returning anything, and
+  // there is deliberately no try/except around it. A fallback here would show
+  // the other language and look like success, which is exactly the failure
+  // issue #145 is about; i18n_test.go is what guarantees both keys exist
+  // before either can reach a user.
+  //
+  // NOT VERIFIED HERE: that the uninstaller resolves these in the language
+  // the install ran in. Inno records the chosen language with the uninstall
+  // data and localises its own stock messages at uninstall time, so the same
+  // is expected of these two - but that is a claim about a compiled installer
+  // running on Windows, and neither exists in this development environment.
+  // It is on the hardware list in deploy/windows/README.md.
   if CurStep = usPostUninstall then
   begin
     Dir := ExpandConstant('{userappdata}\Bacchus');
     if DirExists(Dir) then
     begin
-      if SuppressibleMsgBox('Also remove your Bacchus settings?' + #13#10 + #13#10 +
+      if SuppressibleMsgBox(CustomMessage('RemoveSettingsPrompt') + #13#10 + #13#10 +
            Dir + #13#10 + #13#10 +
-           'This holds the endpoints and password you configured. Choose No to keep them '
-           + 'for a later install.', mbConfirmation, MB_YESNO, IDYES) = IDYES then
+           CustomMessage('RemoveSettingsDetail'),
+           mbConfirmation, MB_YESNO, IDYES) = IDYES then
         DelTree(Dir, True, True, True);
     end;
   end;
