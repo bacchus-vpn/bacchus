@@ -1513,13 +1513,19 @@ func versionCheck(release string) (reason string, ok bool) {
 // coordBuild renders this coordinator's build identity for its startup line (issue
 // #114): its release, plus the VCS revision the Go toolchain records in the binary.
 //
-// The revision is there because the release alone does not identify a build.
-// Nothing in this repository stamps core/version.current — deploy/install.sh and
-// docs/RUNNING.md both build with a plain `go build`, and the -ldflags -X hook
-// core/version documents is used by nobody — so every binary ever produced here
-// reports the same release, and two builds three weeks apart are indistinguishable
-// by it. The revision is the one thing that does differ, and it costs nothing: the
-// toolchain stamps it into any build made from a checkout.
+// The revision is there because the release alone does not identify a build. A
+// release ships many commits, so two builds from either end of one report the
+// same release and are not the same binary — which is the shape of skew this
+// issue was opened about. The revision is what differs, and it costs nothing:
+// the toolchain stamps it into any build made from a checkout.
+//
+// Until issue #128 the reason was blunter than that. Nothing in this repository
+// stamped core/version.current — deploy/install.sh and docs/RUNNING.md both built
+// with a plain `go build`, and the -ldflags -X hook core/version documents was
+// used by nobody — so every binary ever produced here reported the same release
+// and the release identified nothing at all. All three build paths stamp it from
+// the repository's VERSION file now, which is what makes these two halves
+// complementary rather than the revision carrying the line by itself.
 //
 // It is the coordinator's HALF of the comparison, not the comparison: a node's
 // revision is not on the register wire, so pairing this against a node still means
@@ -1599,11 +1605,19 @@ func releaseOrUnknown(release string) string {
 // is the fence for operators who want the strict posture, and its 0.0.0 default is
 // deliberate (ADR-0015).
 //
-// Caveat worth knowing before trusting this: it compares release strings, and
-// nothing in this repository stamps core/version.current at build time — install.sh
-// and docs/RUNNING.md both build with a plain `go build`. Until a build does stamp
-// it, every binary reports the same release and this warning cannot fire. That is
-// why reportUnansweredNodes exists rather than this being the whole answer to #114.
+// Caveat worth knowing before trusting this: it compares RELEASES, not builds.
+// Two binaries built from different commits of one release report the same string
+// and do not trip this line. That is why reportUnansweredNodes exists rather than
+// this being the whole answer to #114, and why the startup line carries a VCS
+// revision that the register wire does not.
+//
+// It could not fire at all until issue #128: nothing stamped core/version.current
+// at build time — install.sh and docs/RUNNING.md both built with a plain
+// `go build` — so every binary reported the same release. Every build path stamps
+// from the repository's VERSION file now. One consequence to expect: an unstamped
+// build reports 0.0.0 (core/version.Current), so a node someone built with a bare
+// `go build` trips this against any stamped coordinator — correctly, since that is
+// exactly a node whose build cannot be identified.
 func noteRelease(role, id string, prior *forwarderHealth, release string) {
 	if prior != nil {
 		if prior.release == release {

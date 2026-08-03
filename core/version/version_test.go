@@ -1,6 +1,14 @@
 package version
 
-import "testing"
+import (
+	"bytes"
+	"log"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+)
 
 func TestParseValid(t *testing.T) {
 	cases := map[string]Version{
@@ -72,11 +80,176 @@ func TestCompare(t *testing.T) {
 }
 
 func TestCurrentIsParseable(t *testing.T) {
-	// Current() must never panic for the value shipped in source; if someone
-	// edits `current` to a malformed string this catches it in CI.
+	// Current() must never panic, stamped or not. Stamped, it must round-trip
+	// exactly what it was stamped with; unstamped, it is the zero release.
 	got := Current()
-	if got.String() != current {
-		t.Fatalf("Current().String() = %q, want %q (the `current` source var)", got.String(), current)
+	switch {
+	case Stamped() && got.String() != current:
+		t.Fatalf("Current().String() = %q, want %q (the stamped `current`)", got.String(), current)
+	case !Stamped() && got != (Version{}):
+		t.Fatalf("Current() = %v on an unstamped build, want the zero version", got)
+	}
+}
+
+// requireStampEnv turns TestStampMatchesTheVersionFile's skip into a failure.
+// Same shape, and the same reason, as BACCHUS_NETD_REQUIRE_NS in CI: a check
+// that silently skips when its precondition is missing reports green over
+// nothing, and the precondition here is the very thing under test.
+const requireStampEnv = "BACCHUS_REQUIRE_STAMP"
+
+// TestStampMatchesTheVersionFile is the check that the -ldflags -X every build
+// path passes actually LANDS, and it is the reason CI runs this package twice.
+//
+// The failure it exists for is quiet in a way nothing else here would catch: a
+// -X whose symbol path does not resolve — a renamed var, a moved package, a
+// typo'd module path — is IGNORED BY THE LINKER WITHOUT ERROR. The build
+// succeeds, the installer reports success, and the binary reports 0.0.0 forever.
+// So the assertion cannot be "the flag was passed"; it has to be "the value
+// arrived", read back out of the linked binary and compared against the file it
+// came from (issue #128).
+func TestStampMatchesTheVersionFile(t *testing.T) {
+	want := versionFile(t)
+	if !Stamped() {
+		if os.Getenv(requireStampEnv) != "" {
+			t.Fatalf("%s is set but this test binary is unstamped: the -X did not reach %s.current — "+
+				"check the symbol path in the -ldflags that built it, because the linker does not report a bad one",
+				requireStampEnv, "github.com/bacchus-vpn/bacchus/core/version")
+		}
+		t.Skipf("this test binary is unstamped (a bare `go test`), so there is no stamp to check; "+
+			"CI runs this package again with the stamp and %s set", requireStampEnv)
+	}
+	if got := Current().String(); got != want {
+		t.Fatalf("Current() = %s but VERSION says %s — a stamped build must carry the file's number", got, want)
+	}
+}
+
+// TestVersionFileIsCanonical guards the source of truth itself. Every shipped
+// binary is stamped with this file's contents, and Current() PANICS on a
+// malformed stamp — so a stray "v", a pre-release suffix or an editor's second
+// line in VERSION is not a build-time error, it is every binary of that release
+// dying at startup. This is the cheapest place to catch it.
+func TestVersionFileIsCanonical(t *testing.T) {
+	raw, err := os.ReadFile("../../VERSION")
+	if err != nil {
+		t.Fatalf("reading the VERSION file: %v", err)
+	}
+	s := string(raw)
+	if !strings.HasSuffix(s, "\n") || strings.Count(s, "\n") != 1 {
+		t.Errorf("VERSION must be exactly one line ending in a newline, got %q", s)
+	}
+	trimmed := strings.TrimSuffix(s, "\n")
+	if trimmed != strings.TrimSpace(trimmed) {
+		t.Fatalf("VERSION has surrounding whitespace: %q — it is pasted into a -ldflags -X verbatim", trimmed)
+	}
+	v, err := Parse(trimmed)
+	if err != nil {
+		t.Fatalf("VERSION (%q) is not a bare MAJOR.MINOR.PATCH: %v", trimmed, err)
+	}
+	if v.String() != trimmed {
+		t.Fatalf("VERSION (%q) does not round-trip: parsed back as %s", trimmed, v)
+	}
+}
+
+// versionFile returns the release number the repository declares, for tests that
+// compare a build against it.
+func versionFile(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile("../../VERSION")
+	if err != nil {
+		t.Fatalf("reading the VERSION file: %v", err)
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+// A build stamped with something that is not a release fails at startup, and
+// does NOT degrade the way an unstamped build does. The asymmetry is the point
+// of this test: unstamped is what an ordinary `go build` produces and it has a
+// representable answer (0.0.0, no release), while a malformed stamp has none,
+// and the only alternative to failing is inventing a release for a fence that
+// must never be handed one.
+//
+// A release candidate leads the table because it is the case that will actually
+// be attempted: `v1.0.0-rc1` is an ordinary tag to want, and under the
+// v<VERSION> convention it would put 1.0.0-rc1 in VERSION and stamp it. Three
+// validators reject it before a build can carry it (install.sh's version_valid,
+// TestVersionFileIsCanonical, and CI's shape checks on VERSION and the tag) —
+// this pins what happens if all three are bypassed.
+func TestMalformedStampFailsAtStartup(t *testing.T) {
+	for _, bad := range []string{"1.0.0-rc1", "1.0.0+build.7", "v1.0.0", "1.0", "0.1.0\n"} {
+		t.Run(bad, func(t *testing.T) {
+			restore := current
+			defer func() {
+				current = restore
+				r := recover()
+				if r == nil {
+					t.Fatalf("a build stamped %q must not start; Current() returned instead", bad)
+				}
+				msg, ok := r.(string)
+				if !ok {
+					t.Fatalf("panicked with %T, want the string message a release engineer can act on", r)
+				}
+				// Quoted, which is how the message carries it: a stamp with a
+				// stray newline in it has to be readable in a panic, and the
+				// raw bytes would put a line break through the middle of one.
+				for _, want := range []string{strconv.Quote(bad), "MAJOR.MINOR.PATCH", "VERSION"} {
+					if !strings.Contains(msg, want) {
+						t.Errorf("the panic must name %s, got:\n%s", want, msg)
+					}
+				}
+			}()
+			current = bad
+			_ = Current()
+		})
+	}
+}
+
+// The panic text names the pre-release case in the words someone tagging would
+// use, because that is the mistake this message exists to answer.
+func TestMalformedStampMessageNamesPreRelease(t *testing.T) {
+	_, err := Parse("1.0.0-rc1")
+	if err == nil {
+		t.Fatal("Parse accepted a pre-release version")
+	}
+	msg := malformedStampMessage("1.0.0-rc1", err)
+	for _, want := range []string{"pre-release", "1.0.0-rc1", "leading v"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the panic message must mention %q, got:\n%s", want, msg)
+		}
+	}
+}
+
+// An unstamped build says so — once, loudly — and keeps running. Both halves
+// matter: the warning is the only thing that distinguishes it from a release
+// build (ADR-0015's fence compares numbers, and this one has none), and the
+// running is why it is a warning at all rather than a refusal.
+func TestUnstampedWarnsOnceAndKeepsRunning(t *testing.T) {
+	if Stamped() {
+		t.Skip("this test binary was stamped, so there is no unstamped path to exercise here")
+	}
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	// Any earlier test in this binary may already have spent the once.
+	warnUnstamped = sync.Once{}
+
+	if got := Current(); got != (Version{}) {
+		t.Fatalf("Current() = %v on an unstamped build, want 0.0.0", got)
+	}
+	first := buf.String()
+	if !strings.Contains(first, "WARNING") || !strings.Contains(first, "not stamped") {
+		t.Fatalf("an unstamped build must warn loudly, got %q", first)
+	}
+	if !strings.Contains(first, "VERSION") {
+		t.Errorf("the warning must name VERSION, the file that fixes it: %q", first)
+	}
+
+	if got := Current(); got != (Version{}) {
+		t.Fatalf("second Current() = %v, want 0.0.0", got)
+	}
+	if buf.String() != first {
+		t.Fatalf("the warning repeated; a node re-states its release on every register, so it must fire once:\n%s", buf.String())
 	}
 }
 

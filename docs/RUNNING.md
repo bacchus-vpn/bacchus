@@ -48,13 +48,88 @@ gate, and are reviewed together rather than separately.
 
 ## Build (dev machine)
 ```powershell
+# The release number these binaries will report. It is not optional — see below.
+$v = (Get-Content VERSION).Trim()
+$stamp = "-X github.com/bacchus-vpn/bacchus/core/version.current=$v"
+
 # Linux server binaries
 $env:GOOS="linux"; $env:GOARCH="amd64"; $env:CGO_ENABLED="0"
-go build -o bacchus-coordinator ./cmd/coordinator
-go build -o bacchus-node        ./cmd/node
+go build -ldflags $stamp -o bacchus-coordinator ./cmd/coordinator
+go build -ldflags $stamp -o bacchus-node        ./cmd/node
 $env:GOOS=""; $env:GOARCH=""; $env:CGO_ENABLED=""
-go build -o node.exe ./cmd/node
+go build -ldflags $stamp -o node.exe ./cmd/node
 ```
+
+The same from a POSIX shell:
+```sh
+stamp="-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)"
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$stamp" -o bacchus-coordinator ./cmd/coordinator
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$stamp" -o bacchus-node        ./cmd/node
+```
+
+### The release version comes from `VERSION` (issue #128)
+
+`VERSION` at the root of the repository is one line holding a bare
+`MAJOR.MINOR.PATCH`, and it is the **single source of truth** for the release
+every binary reports. Three build paths read it and they all have to agree:
+these commands, [`deploy/install.sh`](#installing-on-linux-issue-18) (which
+stamps whatever it builds on the box it installs onto), and CI. A fence that
+some builds participate in and others do not is worse than one that never fires,
+because it fences an arbitrary subset and reports success either way.
+
+A file rather than `git describe --tags`, deliberately: a file still works from
+a source tarball with no git history, it is deterministic (ADR-0052 §5 wants the
+fleet binaries byte-identical, and adds `-trimpath` with `CGO_ENABLED=0` on top
+of this for an actual release build), and it makes a version bump a reviewable
+one-line commit — which is what a release should be.
+
+**Bumping it.** Edit `VERSION`, commit it on its own, and tag that commit
+`v<VERSION>` — `0.2.0` in the file, `v0.2.0` as the tag. CI asserts on every tag
+push that the two match, so they cannot drift.
+
+**There are no release candidates, and this is the one rule to read before
+tagging.** `VERSION` and the tag are a bare `MAJOR.MINOR.PATCH` and nothing else:
+**`v1.0.0-rc1` is not a tag this project can build**, and neither is
+`v1.0.0+build.7`. The reason is not style. `core/version.Version` models three
+integers, deliberately (ADR-0015's serving fence and the client's force-major
+check both *order* on them, and there is no defined ordering for a suffix), so a
+pre-release string is not a version that can be compared — only one that can be
+stamped. A binary stamped with one **panics at startup**, on the machine it was
+installed on, having built and installed cleanly. Wanting release candidates is a
+change to that model and to the two policy predicates that turn on it, not a tag
+somebody can push.
+
+Three things refuse one before it can reach a binary, and they are independent on
+purpose: `deploy/install.sh` validates `VERSION` and will not build; CI checks the
+shape of both `VERSION` and the tag; and `core/version`'s own tests parse the file
+on every push. If all three are bypassed — a hand-typed `-ldflags` — the panic
+message names the rule and the file.
+
+All of that sits at the front of the pipeline because **nothing downstream would
+catch it**. No CI job runs a coordinator or node binary, and the two that launch
+the GUI smoke-test it without connecting — the client reads its release on
+*connect*, not at startup. A client stamped `1.0.0-rc1` would build, install,
+launch, sit there looking healthy, and crash the first time its user pressed
+Connect.
+
+**A binary nobody stamped still runs, and says so.** A bare `go build` — no
+`-ldflags` — produces a development build, which is correct and supported. It
+reports the release `0.0.0` (*no release*, not "zero point zero"), and it prints
+one loud line at startup saying it was not stamped. It is not refused: a
+development build must work. What it must not do is pass for a release build,
+which is what it silently did until #128 — every binary this project had ever
+produced reported `0.1.0`, into three mechanisms that do nothing but compare
+releases:
+
+| mechanism | where | with everything reporting one number |
+|---|---|---|
+| `-min-serving-version` node fence | coordinator (ADR-0015) | any floor above it fences the whole fleet, any floor at or below it fences nobody |
+| client force-major / skip-minor check | client (ADR-0015) | client and network are always equal, so it never triggers |
+| build-skew warning | coordinator (issue #114) | node and coordinator never differ, so it cannot fire |
+
+A `release=0.0.0` on a coordinator's registration line therefore means *that node
+was built by something that does not stamp*, and it is worth chasing: it is a
+node the fence cannot rank and the skew warning cannot compare.
 
 The **desktop client** is deliberately absent from that list, on either target:
 `clients/fyne` links a C toolchain and, per platform, an OpenGL/X11/Wayland or
@@ -802,7 +877,8 @@ Linux client stops being "download a binary and run it". Install per
 [deploy/README.md](../deploy/README.md#the-one-unit-that-is-not-a-server-unit-bacchus-netd-issue-37):
 
 ```sh
-go build -o bacchus-netd ./cmd/bacchus-netd
+go build -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" \
+  -o bacchus-netd ./cmd/bacchus-netd
 sudo install -D -m 0755 bacchus-netd /usr/local/lib/bacchus/bacchus-netd
 sudo systemd-sysusers deploy/bacchus-netd.sysusers.conf
 sudo usermod -aG bacchus "$USER"          # then log out and back in
@@ -904,6 +980,87 @@ adapter and its driver are not there. That is hardware verification, no Go test
 can assert it, and it has not been done. The same gap is still open for Windows
 as issue #88.
 
+## What the coordinator says about node builds (issue #114)
+
+A node running a binary built from a different commit than the coordinator
+**registers cleanly, heartbeats every 10s, is never pruned, is offered to
+clients, is assigned work — and can silently drop every session it is given.**
+Registration and heartbeat are stable across builds; session setup is not. That
+is the failure that opened #114: three exits on a binary three weeks older than
+the coordinator, no session establishing on any path, and every log involved
+reporting health. These four lines are what a coordinator now says about it.
+None of them refuse anything: refusing on a version difference by default would
+turn one silent failure into a fleet-wide outage on any staged rollout, and
+`-min-serving-version` (below) already exists for operators who want that.
+
+**1. A node's release, when it registers.**
+```
+exit registered: n7 -> <EXIT_HOST>:20000 country=NL (observed IP) release=0.4.1
+relay registered: n9 (<RELAY_ADDR>) country=DE (node hint, unresolved IP) release=0.4.1
+```
+Two values are worth reading twice. `release=unknown` is a node old enough to
+predate ADR-0015 and send no release at all; `release=0.0.0` is a build nobody
+stamped — a bare `go build` — which is a node the fence cannot rank (see
+[The release version comes from `VERSION`](#the-release-version-comes-from-version-issue-128)).
+
+**2. A release changing under a running coordinator.**
+```
+exit n7 changed release: 0.4.0 -> 0.4.1
+```
+This is the **only** line that shows a rebuild of a live fleet. The `registered`
+line above fires only for a node the coordinator does not already have: an
+update restarts a node in about a second, its registry entry survives 35s, so a
+staged rollout can replace every binary in the fleet without printing
+`registered` once.
+
+**3. A node built from a different commit than the coordinator.**
+```
+WARNING: exit n7 reports release 0.4.0 and this coordinator is 0.4.1 — a node and
+a coordinator built from different commits register and heartbeat normally and can
+still drop every session between them, because registration is stable across builds
+and session setup is not (issue #114). It is NOT refused: -min-serving-version is
+the fence for that, and it is unaffected by this line
+```
+Printed once per node per release — on a node's first register and again
+whenever its release changes, not on all 8,640 registers it sends in a day.
+**Until #128 this line could not fire at all**, because nothing stamped a
+release and every binary reported the same one; it is the same commit that
+stamped them which made this sentence stop being true. It still compares
+*releases*, so two builds of the same release from different commits do not
+trip it — which is why the coordinator's own startup line also prints the VCS
+revision the toolchain recorded, and why line 4 exists.
+
+**4. A node that is assigned work and answers none of it.**
+```
+WARNING: exit n7 was assigned 3 session(s) that a client tried to bring up and has
+answered NONE of them (the longest has been waiting 2m14s). It registers and
+heartbeats normally, so nothing else here reports it: check it is reachable and
+running a build compatible with this coordinator — it reports release 0.4.0, this
+coordinator is 0.4.1 (issue #114)
+```
+This is the one that generalises: it catches *any* cause of "the node never
+answered", not just version skew — a firewall, a half-dead process, a node that
+lost its egress. A session counts as unanswered when a client signalled it and
+nothing came back for 30s; the sweep runs every 10s. It is said once per
+episode, and re-arms as soon as that node answers anything, so a node that
+fails, recovers and fails again is reported both times. A single unanswered
+session is not a fault — a client can always walk away — which is why the line
+fires only when a node has answered **none**.
+
+**The fence, for when a warning is not enough.** `-min-serving-version` drops
+nodes below a release from matchmaking entirely:
+```
+bacchus-coordinator -min-serving-version 0.4.0 …
+```
+It defaults to `0.0.0`, which disables it — every node serves regardless of
+version. The intended use is to raise it behind a release once the grace window
+has passed, which pulls stragglers up. Two things to know before setting it: a
+node exactly at the floor keeps serving (the floor is the oldest *acceptable*
+release), and an unstamped node reports `0.0.0`, so any floor above zero fences
+every unstamped binary in the fleet. That is the correct posture — a build whose
+release cannot be established cannot be shown to meet a floor — but it is worth
+knowing before turning the flag on with hand-built binaries in the field.
+
 ## Verify
 On the client device:
 ```
@@ -918,3 +1075,15 @@ exit's journal (`journalctl -u bacchus-exit`) shows the forwarded connections.
 - Relay needs no inbound/port-forward (dials out + hole-punches).
 - TCP-only via SOCKS; point apps at `127.0.0.1:1080` (or set the system proxy).
 - Stop a systemd binary before replacing it (`text file busy` otherwise).
+- **Rebuild and redeploy the whole deployment from one commit, together.** A node
+  on an older build registers, heartbeats and is assigned work exactly as a
+  current one does, and then drops every session it is given — the coordinator
+  logs a healthy fleet throughout (issue #114). If sessions stop establishing
+  after a partial update, that is the first thing to rule out; the four lines
+  under [What the coordinator says about node
+  builds](#what-the-coordinator-says-about-node-builds-issue-114) are where it
+  shows.
+- Binaries built with a bare `go build` report release `0.0.0` and warn at every
+  start. That is fine for development and wrong for anything deployed — stamp
+  them from `VERSION`, or install with `deploy/install.sh`, which does it for
+  you.

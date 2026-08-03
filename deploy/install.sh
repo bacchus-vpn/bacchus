@@ -384,6 +384,78 @@ has_placeholders() { grep -qE 'CHANGE_ME|YOUR_[A-Z_]+' "$1"; }
 build_dir=''
 binaries_dir=''
 
+# release_version is the number every binary built here is stamped with, read
+# from the repository's VERSION file — the single source of truth for it
+# (issue #128). Empty until read_release_version runs, which prepare_build_dir
+# does before the first build and --binaries skips along with the toolchain.
+#
+# Until #128 nothing stamped anything, so every binary this project had ever
+# produced reported the same release into three mechanisms that compare one:
+# a coordinator's -min-serving-version fence, the client's force-update check,
+# and the coordinator's "this node is on a different build from me" warning.
+# This script is one of THREE build paths that had to start agreeing on the
+# number — the others are the manual builds in docs/RUNNING.md and CI — and the
+# agreement is the whole point. A fence that some builds participate in and
+# others do not is worse than one that never fires, because it fences an
+# arbitrary subset and reports success either way.
+release_version=''
+
+# version_symbol is the linker symbol the number lands on, spelled out in full
+# and in exactly one place because of HOW A WRONG ONE FAILS: `-X` naming a
+# symbol that does not resolve is ignored by the linker, silently, with no
+# warning and a zero exit. A typo here builds clean, installs clean, starts
+# clean, and reports 0.0.0 for the life of the deployment. CI links this same
+# string and reads the value back out of the linked binary
+# (core/version.TestStampMatchesTheVersionFile), which is what keeps a rename on
+# the Go side from quietly disabling this one.
+version_symbol='github.com/bacchus-vpn/bacchus/core/version.current'
+
+# version_valid accepts exactly what core/version.Parse accepts: three
+# non-negative decimal components and nothing else. Deliberately not lenient.
+# core/version.Current PANICS on a malformed stamp, so a "v0.2.0", a trailing
+# "-rc1" or an editor's stray second line waved through here is not a build
+# error to be fixed later — it is every binary from this install dying at
+# startup on the machine it was installed on.
+#
+# The pre-release case is the one to expect, because it is the one somebody will
+# reasonably try: "1.0.0-rc1" is an ordinary thing to want to call a release, and
+# this project has no such version at any layer. core/version.Version is three
+# integers and the fence/force policy (ADR-0015) orders on them, so a suffix is
+# not a version that compares — only one that crashes. This refuses it here, by
+# name, rather than letting it become a panic on a machine three weeks later.
+version_valid() {
+	case $1 in
+	*[!0-9.]* | .* | *. | *..* | *.*.*.*) return 1 ;;
+	*.*.*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+read_release_version() {
+	version_file="$repo_root/VERSION"
+	[ -f "$version_file" ] || refuse "no VERSION file at $version_file." \
+		"One line at the root of the repository, holding the release number every" \
+		"build is stamped with. This script will not build binaries that cannot say" \
+		"which release they are, because a coordinator's version fence and its" \
+		"build-skew warning both believe what a node reports." \
+		"" \
+		"Run from a complete checkout, or pass --binaries DIR with binaries built" \
+		"elsewhere."
+	# tr rather than `read`: a lone CR from a checkout that ignored .gitattributes
+	# would otherwise ride into the -ldflags, and a stamp that core/version.Parse
+	# rejects is a panic at startup rather than a failure here.
+	release_version=$(tr -d ' \t\r\n' <"$version_file")
+	version_valid "$release_version" || refuse "VERSION does not hold a release number." \
+		"$version_file contains: $release_version" \
+		"" \
+		"It must be a bare MAJOR.MINOR.PATCH — 0.2.0. Not v0.2.0 (the TAG carries the" \
+		"v, the file does not), not 0.2, and NOT a pre-release or build-metadata" \
+		"suffix: 1.0.0-rc1 and 1.0.0+build.7 are not releases this project has. The" \
+		"version model is three integers and the serving fence orders on them," \
+		"so a suffix cannot be compared — only stamped, and then panicked on at" \
+		"startup by every binary carrying it. This refuses it here instead."
+}
+
 # prepare_build_dir makes the scratch directory in the CALLING shell, which is
 # not a stylistic preference: resolve_binary is used as `x=$(resolve_binary …)`,
 # and a variable assigned inside a command substitution is assigned in a
@@ -398,6 +470,7 @@ prepare_build_dir() {
 		"not look like one (no go.mod). Either run it from a clone, or pass" \
 		"--binaries DIR pointing at binaries you built elsewhere."
 	need_cmd go 'Install Go, or build elsewhere and pass --binaries DIR.'
+	read_release_version
 	build_dir=$(mktemp -d)
 }
 
@@ -413,8 +486,8 @@ resolve_binary() {
 		return 0
 	fi
 	if [ ! -f "$build_dir/$name" ]; then
-		log "building $name from source (this can take a minute)" >&2
-		( cd "$repo_root" && go build -o "$build_dir/$name" "$pkg" ) || build_failed "$name"
+		log "building $name $release_version from source (this can take a minute)" >&2
+		( cd "$repo_root" && go build -ldflags "-X $version_symbol=$release_version" -o "$build_dir/$name" "$pkg" ) || build_failed "$name"
 	fi
 	printf '%s' "$build_dir/$name"
 }
@@ -592,6 +665,21 @@ EOF
 		warn "could not chown $cfg_dir to $desktop_user — check it by hand"
 }
 
+# client_next_steps is the last thing a fresh user reads, so step 2 has to send
+# them somewhere that can actually do the job.
+#
+# It used to end "…or use the app's Settings window", and the Settings window
+# CANNOT set any of the five network keys: coordinators, stun, turn, turnUser and
+# turnPass are file-only by design (clients/fyne/settings.go binds enforcement,
+# transport, admission and volunteering — not these). So the one instruction a
+# user cannot skip pointed at a dialog with no field for it. That is issue #134's
+# defect, which everyone believed was Windows-only; it has been in this script the
+# whole time. A Linux user installed the documented way does not hit #134's
+# refusal — seed_client_config gives them a file — they hit its placeholder
+# COORDINATOR_HOST instead and go looking in Settings for somewhere to change it.
+#
+# The path is printed resolved rather than as \$HOME, because it is the file they
+# have to open and this script is the one process that knows whose home it is in.
 client_next_steps() {
 	cat <<EOF
 
@@ -603,11 +691,18 @@ $progname:      at login, so $desktop_user is not yet effectively in the bacchus
 $progname:      group in any shell or desktop session that is already running.
 $progname:      Until then the client will report the helper as unreachable.
 
-$progname:   2. Fill in a coordinator. The seeded config is the example
-$progname:      template and points at placeholder hosts:
-$progname:        \$HOME/.config/Bacchus/fyne-client.json
-$progname:      Set "coordinators", "stun", "turn" and "turnPass" to your
-$progname:      network's, or use the app's Settings window.
+$progname:   2. Fill in a coordinator, BY EDITING THE CONFIG FILE:
+$progname:        $cfg
+$progname:      It is the example template, so it points at a placeholder host
+$progname:      (COORDINATOR_HOST) that resolves nowhere — connecting before you
+$progname:      change it fails to dial. Set "coordinators", "stun", "turn" and
+$progname:      "turnPass" to your network's ("turnUser" already has the usual
+$progname:      value). Editing it needs no root: the file is yours.
+$progname:
+$progname:      These five keys are NOT in the app's Settings window and cannot
+$progname:      be set from it — Settings covers the kill switch, split tunnel,
+$progname:      DNS, transports, admission and volunteering. Do not go looking
+$progname:      there for a coordinator field; there is not one (issue #134).
 
 $progname: Then launch Bacchus from your application menu, or run
 $progname: $bin_dir/bacchus-fyne.
@@ -1049,8 +1144,17 @@ if [ "$mode" != 'uninstall' ]; then
 	repo_root=$(CDPATH='' cd -- "$deploy_dir/.." && pwd)
 fi
 
-if [ -n "$binaries_dir" ] && [ ! -d "$binaries_dir" ]; then
-	refuse "--binaries $binaries_dir is not a directory"
+if [ -n "$binaries_dir" ]; then
+	if [ ! -d "$binaries_dir" ]; then
+		refuse "--binaries $binaries_dir is not a directory"
+	fi
+	# Prebuilt binaries carry whatever release they were stamped with when they
+	# were linked. This script never links them, so it can neither stamp them nor
+	# read what they say — say so once rather than let the difference surface
+	# three weeks later as a version fence with nothing to compare (issue #128).
+	log "using prebuilt binaries from $binaries_dir: their release is whatever stamped them."
+	log "  Cross-build them the way docs/RUNNING.md documents; a bare \`go build\` leaves"
+	log "  a binary that reports 0.0.0 and warns at every start."
 fi
 
 cleanup() { [ -z "$build_dir" ] || rm -rf "$build_dir"; }

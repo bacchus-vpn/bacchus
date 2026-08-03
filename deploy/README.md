@@ -243,8 +243,11 @@ can actually write it back. The manual sequence:
 
 ```bash
 # 1. Build and install the helper (it is not in /usr/local/bin: it is a helper
-#    the user never runs by hand, not a command).
-go build -o bacchus-netd ./cmd/bacchus-netd
+#    the user never runs by hand, not a command). The -ldflags stamps the release
+#    from the VERSION file, which install.sh does for you and a bare `go build`
+#    does not — an unstamped binary reports 0.0.0 and warns at every start.
+go build -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" \
+  -o bacchus-netd ./cmd/bacchus-netd
 sudo install -D -m 0755 bacchus-netd /usr/local/lib/bacchus/bacchus-netd
 
 # 2. Create the group and put yourself in it.

@@ -3,9 +3,109 @@ name: ci
 on:
   push:
     branches: [main]
+    # Tags are here for the release-stamp job below, which is the half of
+    # issue #128 that can only run on a tag: it asserts the tag and the VERSION
+    # file agree. Running the rest of CI on a tag as well is a deliberate
+    # side effect and not an accident — a tag is the one commit where a red
+    # build is most expensive to discover later.
+    tags: ['v*']
   pull_request:
 
 jobs:
+  # The release version, and the machinery that puts it into a binary
+  # (issue #128). Small and separate: it is the only job that has anything to
+  # say on a tag push, and folding it into `server` would bury a failure whose
+  # cause has nothing to do with the code under it.
+  release-stamp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      # The shape of VERSION, checked here in shell as well as by
+      # core/version.TestVersionFileIsCanonical below, because this is the one
+      # value in the repository whose malformation is not a build error:
+      # core/version.Current PANICS on a stamp it cannot parse, so a bad VERSION
+      # is not caught at build time, it is every binary of that release dying at
+      # startup on somebody else's machine.
+      #
+      # A PRE-RELEASE SUFFIX IS THE CASE THIS EXISTS FOR. `v1.0.0-rc1` is an
+      # entirely ordinary tag to want, and under the v<VERSION> convention it
+      # would put 1.0.0-rc1 in this file and stamp it into every binary. This
+      # project has no such release at any layer: core/version.Version models
+      # three integers and the whole fence/force policy (ADR-0015) orders on
+      # them, so a suffix is not a version that can be compared, only one that
+      # can crash. Wanting release candidates is a change to that model, not a
+      # tag someone can push.
+      - name: VERSION is a bare MAJOR.MINOR.PATCH
+        run: |
+          v=$(cat VERSION)
+          if ! printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION is '$v', which is not a release this project can carry."
+            echo "::error::It must be a bare MAJOR.MINOR.PATCH: 1.0.0, never v1.0.0, never"
+            echo "::error::1.0, and NEVER a pre-release or build-metadata suffix such as"
+            echo "::error::1.0.0-rc1 or 1.0.0+build.7 — core/version.Current() panics on one,"
+            echo "::error::so a binary stamped with it crashes at startup rather than failing"
+            echo "::error::here. Release candidates are unsupported by the version model."
+            exit 1
+          fi
+          echo "VERSION is $v"
+      # The check that the -ldflags -X every build path passes actually LANDS,
+      # and the reason it cannot be a plain assertion that the flag was passed:
+      # a -X naming a symbol that does not resolve is IGNORED BY THE LINKER,
+      # silently, with a zero exit. A renamed var, a moved package or a typo'd
+      # module path therefore produces a green build, a successful install, and
+      # a binary reporting 0.0.0 for the life of the deployment.
+      #
+      # So this links the real symbol and reads the value back out of the linked
+      # binary. BACCHUS_REQUIRE_STAMP is what makes the check load-bearing:
+      # without it the test SKIPS when the stamp is absent, which is exactly the
+      # failure being tested and would report green over nothing. Same shape,
+      # and the same reason, as BACCHUS_NETD_REQUIRE_NS in the server job.
+      - name: the release stamp reaches the binary
+        env:
+          BACCHUS_REQUIRE_STAMP: "1"
+        run: |
+          go test -count=1 \
+            -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" \
+            -run 'TestStampMatchesTheVersionFile|TestCurrentIsParseable|TestVersionFileIsCanonical|TestMalformedStamp' \
+            ./core/version/
+      # What only a tag can check is that the tag and the file agree — and they
+      # have to, because the file is what goes into the binary while the tag is
+      # what everything else names the release by. A v0.3.0 tag on a tree whose
+      # VERSION still says 0.2.0 ships binaries that report the wrong release to
+      # a fence built to believe them.
+      #
+      # The tag's own SHAPE is checked before the comparison, and separately from
+      # it, for one reason: on a v1.0.0-rc1 tag of a tree whose VERSION also said
+      # 1.0.0-rc1 the two would agree perfectly, and agreeing on an unusable
+      # value is not the answer anyone needs. The step above would already have
+      # failed on the file — this makes the message the tagger gets name the tag
+      # they typed rather than the file they did not.
+      - name: a tagged build's tag matches VERSION
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          if ! printf '%s' "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag $tag is not a release tag this project can build."
+            echo "::error::Tags are v<MAJOR.MINOR.PATCH> and nothing else: v1.0.0. A pre-release"
+            echo "::error::tag (v1.0.0-rc1) or build metadata (v1.0.0+build.7) has no release"
+            echo "::error::version behind it — core/version models three integers, ADR-0015's"
+            echo "::error::fence orders on them, and a binary stamped with a suffix panics at"
+            echo "::error::startup. Release candidates need a model change, not a tag."
+            exit 1
+          fi
+          want="v$(cat VERSION)"
+          if [ "$tag" != "$want" ]; then
+            echo "::error::tag $tag does not match VERSION ($(cat VERSION))."
+            echo "::error::The convention is v<VERSION> — tag v$(cat VERSION), or bump VERSION"
+            echo "::error::in a commit of its own and tag that. They are the same release or"
+            echo "::error::neither of them means anything."
+            exit 1
+          fi
+          echo "tag $tag matches VERSION"
+
   server:
     runs-on: ubuntu-latest
     steps:
@@ -24,8 +124,14 @@ jobs:
       # Its Windows-tagged half is covered by the windows-enforcement job below.
       - name: vet
         run: go vet ./core/... ./bind/... ./cmd/... ./clients/internal/...
+      # Stamped, like every other build path that produces a binary anyone could
+      # run (issue #128): deploy/install.sh, the manual builds in
+      # docs/RUNNING.md, and here. A fence some builds participate in and others
+      # do not is worse than one that never fires, because it fences an
+      # arbitrary subset and reports success — so "CI does not ship artifacts"
+      # is not a reason for CI to build something other than what ships.
       - name: build
-        run: go build ./cmd/...
+        run: go build -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" ./cmd/...
       # Deliberately no -short: a few real-transport integration tests are
       # gated behind testing.Short() specifically so they still run here
       # while a local `go test -short ./...` skips them for a fast inner
@@ -219,8 +325,17 @@ jobs:
       # shipping binary (no console window behind the GUI). It sets one PE
       # header field and changes no compilation - but building something other
       # than what ships is how a green job stops describing the artifact.
+      #
+      # Which is also why the release stamp is here (issue #128): this job's
+      # artifact is the binary #115's hardware runs are driven from, and an
+      # unstamped one warns at every start and reports 0.0.0 to a coordinator.
+      # bash rather than this runner's default pwsh, for one line that reads the
+      # same as the other two build steps; VERSION is checked out with LF
+      # endings (.gitattributes pins it), so $(cat VERSION) carries no CR into
+      # the linker.
       - name: build
-        run: go build -ldflags "-H=windowsgui" -o bacchus-fyne.exe ./clients/fyne
+        shell: bash
+        run: go build -ldflags "-H=windowsgui -X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" -o bacchus-fyne.exe ./clients/fyne
       - name: confirm the build produced a real Windows binary
         shell: pwsh
         run: |
@@ -299,8 +414,12 @@ jobs:
         run: test -z "$(gofmt -l clients/fyne)"
       - name: vet
         run: go vet ./clients/fyne/...
+      # Stamped for the reason the other two build steps are (issue #128): the
+      # binary this job launches under Xvfb should be the binary an install
+      # produces, and deploy/install.sh builds this same package with the same
+      # -X on the machine it installs onto.
       - name: build
-        run: go build -o /tmp/bacchus-fyne ./clients/fyne
+        run: go build -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" -o /tmp/bacchus-fyne ./clients/fyne
       # internal/appstate is deliberately Fyne-free (ADR-0039) and needs no
       # display; the outer package (main.go/settings.go/ui.go) has no test
       # files of its own, so this compiles it under the real cgo/GL
