@@ -199,11 +199,12 @@ for a hostname that merely resembles one.
 is no widget for any of them, deliberately (ADR-0039 separates operator config from
 user preference). So the Connect refusal names this file by its full path and says
 that outright, rather than sending you to a window with no such field (bacchus#134).
-It names the file to *edit* when one is already there — `deploy/install.sh` seeds
-one on Linux and the Windows release bundle is to place one beside the exe
-(bacchus#136) — and the file to *create* when there is not. An entry that is blank
-(`"coordinators": [""]`) counts as no coordinator and gets the same message, rather
-than reaching the dialer as an address.
+It names the file to *edit* when one is already there — `deploy/install.sh` seeds one
+on Linux, and on Windows both release artifacts seed one, the portable zip beside the
+exe and the installer in the per-user directory (bacchus#136) — and the file to
+*create* when there is not. An entry that is blank (`"coordinators": [""]`) counts as
+no coordinator and gets the same message, rather than reaching the dialer as an
+address.
 
 **Which of the two the client reads, and which it writes, are different questions**
 (issue #118). It **reads** the exe-adjacent file first and the per-user one second, so
@@ -491,8 +492,9 @@ any release bundle, ship `wintun.dll` **and its `LICENSE.txt`** alongside the ex
 
 CI does not do this: `windows-fyne-client` builds and smoke-launches the binary but
 never brings a tunnel up, so the artifact it uploads is an exe with no DLL beside it.
-That is what bacchus#136 is about — there is no Windows install path that places
-either one.
+The release artifacts do: the portable zip and the installer both place `wintun.dll`
+and its licence next to the exe (bacchus#136, ADR-0054). So the hand-placement above
+is for a CI artifact or a local build — take a release and it is already there.
 
 Both the native Linux build and the mingw-cross-compiled Windows build were run (not
 just compiled) as part of proving this seam — see ADR-0039. Both are now proven on
@@ -590,11 +592,14 @@ cgo compiling `go-gl/glfw`. See `.github/workflows/ci.yml`.
   Set-NetFirewallProfile -All -DefaultOutboundAction Allow
   Remove-NetFirewallRule -Group BacchusKillSwitch
   ```
-- **On Windows there is no installer.** `deploy/install.sh` covers Linux only;
-  bacchus#136 is the card for the release bundle that replaces it, and the bundle is
-  not built yet. The client's own half of it is: the exe asks Windows for elevation
-  itself, it prefers a config placed beside it over the per-user one, and both
-  first-run failures name what is wrong and where (bacchus#134, bacchus#135). A
-  **bare exe with nothing beside it still cannot connect** — it needs `wintun.dll`
-  and a config file, and until the bundle ships both are placed by hand.
+- **A bare exe with nothing beside it still cannot connect** — it needs `wintun.dll`
+  and a config file. On Windows the two release artifacts are what place them
+  (bacchus#136, ADR-0054): the **portable zip** puts both next to the exe, and the
+  **installer** puts the DLL next to the exe but seeds the config at
+  `%AppData%\Bacchus\fyne-client.json` — beside the exe would be under Program
+  Files, where the client would find it, report it as the save target, and fail
+  every Settings save on permissions (issue #118 from the other side). CI's
+  `windows-fyne-client` artifact is neither of those: it is the bare exe, so a
+  download from a CI run, like a local build, still has both files to place.
+  `deploy/install.sh` covers Linux only.
 - Requires a C toolchain to build (see Build above).
