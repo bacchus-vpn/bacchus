@@ -2,6 +2,8 @@ package asn
 
 import (
 	"net/netip"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -112,6 +114,40 @@ func TestEmbeddedTableReturnsUnknownForUnroutableSpace(t *testing.T) {
 // exactly the case where somebody should be told.
 const tableMaxAge = 90 * 24 * time.Hour
 
+// tableReleaseMaxAge is the tighter bar a RELEASE has to clear, and it exists because
+// tableMaxAge measures the wrong end of the table's life (issue #66).
+//
+// 90 days is a budget on how wrong the table may be *in the hands of somebody running
+// it*. That budget is spent on both sides of a release: the age of the table when the
+// artifact is built, plus however long the person who installed it keeps running that
+// build. Against tableMaxAge alone the whole of it can be spent before the artifact
+// leaves the building — a release cut on day 89 hands a user a table that is already at
+// the limit on the day they install it, and every day after that is over.
+//
+// So the release bar is where that split gets chosen, and 30 days is the choice: ship a
+// table at most a month old and roughly 60 days of the budget are still on the user's
+// side when they install. It is not a round number picked for looking careful — it is
+// the unit ADR-0044 §6's own churn table is written in, whose one-month row is the
+// 1.30% figure the whole cadence argument rests on.
+//
+// The cost of a tighter bar, named rather than waved past: every refresh commits a
+// wholly new ~3.14 MB blob that git cannot delta (ADR-0044's second amendment §7). At 30
+// days a hotfix cut within a month of a feature release inherits no refresh at all; at a
+// week, every one of them would, and the repository would grow by a table per patch.
+const tableReleaseMaxAge = 30 * 24 * time.Hour
+
+// releaseTableEnv is what makes the release bar above load-bearing. Exactly one thing
+// sets it: the verify-table job in .github/workflows/release.yml.
+//
+// Same shape and the same reason as core/version's BACCHUS_REQUIRE_STAMP and the CI
+// server job's BACCHUS_NETD_REQUIRE_NS — an assertion that is inert by default and made
+// mandatory by the one job that needs it. The release bar cannot simply apply
+// everywhere: at 30 days it would block every unrelated pull request one month after a
+// refresh instead of one quarter, and tableMaxAge's generosity is half of why that
+// pressure is affordable. It also cannot be a warning, for the reason
+// TestEmbeddedTableIsFresh gives about failing rather than logging.
+const releaseTableEnv = "BACCHUS_ASN_RELEASE_TABLE"
+
 // TestEmbeddedTableIsFresh is the forcing function behind "refreshed per release".
 //
 // Before this existed the refresh was written down in two places and enforced by
@@ -125,6 +161,14 @@ const tableMaxAge = 90 * 24 * time.Hour
 // somebody refreshes it. That is the intended pressure — the threshold is generous
 // enough that hitting it means the table genuinely is out of the range ADR-0044
 // costed, and the message says exactly what to run.
+//
+// It carries BOTH bars rather than living beside a second test, and that is deliberate
+// (issue #66). They are two thresholds on one quantity — the age of the committed
+// table — so computing that age twice, in two tests, would be two places to keep in
+// step for no gain. It also removes a whole class of quiet failure: a release job
+// pointing `go test -run` at a second test that had been renamed or deleted would exit
+// 0 and report a gate over nothing, which is the same silent no-op the release stamp
+// was bitten by. There is one assertion here and deleting it is a loud act.
 func TestEmbeddedTableIsFresh(t *testing.T) {
 	retrieved, err := time.Parse(time.DateOnly, TableRetrieved)
 	if err != nil {
@@ -133,7 +177,15 @@ func TestEmbeddedTableIsFresh(t *testing.T) {
 	if retrieved.After(time.Now()) {
 		t.Fatalf("TableRetrieved = %s is in the future; was it typed rather than taken from the refresh?", TableRetrieved)
 	}
-	if age := time.Since(retrieved); age > tableMaxAge {
+	age := time.Since(retrieved)
+	// Logged unconditionally so a release run is answerable from its own output: the
+	// verify-table job runs this package with -v for exactly this line, and a run that
+	// passes should still say what it passed on.
+	t.Logf("the committed IP→AS table was retrieved %s, %d days ago; build floor %d days, release bar %d days",
+		TableRetrieved, int(age.Hours()/24),
+		int(tableMaxAge.Hours()/24), int(tableReleaseMaxAge.Hours()/24))
+
+	if age > tableMaxAge {
 		t.Errorf(`the committed IP→AS table was retrieved %s, %d days ago (limit %d).
 
 At ~1.3%% drift per month it is now roughly %.1f%% wrong, which is outside the range
@@ -147,6 +199,167 @@ counts in core/asn/TABLE.md.`,
 			TableRetrieved, int(age.Hours()/24), int(tableMaxAge.Hours()/24),
 			1.3*age.Hours()/24/30)
 	}
+
+	// The release bar, checked after the floor rather than instead of it: they are two
+	// thresholds on one quantity and a release run that trips both should say so.
+	if os.Getenv(releaseTableEnv) == "" {
+		return
+	}
+	if age > tableReleaseMaxAge {
+		t.Errorf(`this is a release run (%s is set) and the committed IP→AS table was
+retrieved %s, %d days ago. A release may ship one at most %d days old.
+
+The table is still inside the %d-day floor that applies to any build, so nothing is
+wrong with the tree — what is wrong is shipping it. ADR-0044 embedded this table in the
+client binary, which means these bytes are what every user of this release resolves
+relay hops against until they install another one, and cutting now would spend %d days
+of a 90-day accuracy budget before the artifact reaches anybody. Refresh it:
+
+    curl -O https://iptoasn.com/data/ip2asn-combined.tsv.gz
+    go run ./cmd/asn-stage -in ip2asn-combined.tsv.gz -out core/asn/table.tsv.gz -gzip
+
+then set TableRetrieved in core/asn/embedded.go to today, update the hashes and row
+counts in core/asn/TABLE.md, and tag the commit that carries all of it.`,
+			releaseTableEnv, TableRetrieved, int(age.Hours()/24),
+			int(tableReleaseMaxAge.Hours()/24), int(tableMaxAge.Hours()/24),
+			int(age.Hours()/24))
+	}
+}
+
+// TestReleaseWorkflowGatesTheTable asserts that the release workflow actually carries
+// the bar above, and carries it as a PRECONDITION rather than as a bystander beside the
+// build.
+//
+// That distinction is the whole of issue #66 and it is not hypothetical. Between #55
+// and #66 TestEmbeddedTableIsFresh ran only in ci.yml, and on a tag push GitHub starts
+// ci.yml and release.yml from the same event with nothing ordering them — `needs:` is
+// intra-workflow and `workflow_run` is a different tool for a different problem. A
+// check that cannot stop the thing it is checking gates nothing, so the freshness test
+// could go red beside a bundle that had already been built and a draft release that
+// already existed.
+//
+// Two edits would quietly undo the fix and neither is a compile error:
+//
+//   - the workflow stops setting BACCHUS_ASN_RELEASE_TABLE, and every release run
+//     silently applies the 90-day floor in place of the 30-day bar;
+//   - the gate job stays in the file but windows-bundle stops needing it, at which
+//     point it is a parallel check beside a build again — the original defect,
+//     restored, and green.
+//
+// So the assertion lives here, in the package that owns the table, where ci.yml runs it
+// on every ordinary pull request. The workflow that does gate merges is what guards the
+// workflow that gates releases.
+func TestReleaseWorkflowGatesTheTable(t *testing.T) {
+	const path = "../../.github/workflows/release.yml"
+	b, err := os.ReadFile(path)
+	if err != nil {
+		// Not a skip. A gate that opens when its input disappears is not a gate, which
+		// is release.yml's own stated rule about a missing VERSION file.
+		t.Fatalf("cannot read %s: %v\n\nThis test asserts the release workflow gates the shipped IP→AS table; without the file there is nothing to assert and reporting green would be reporting over nothing.", path, err)
+	}
+	src := string(b)
+
+	gate := workflowJob(t, src, "verify-table")
+	if !workflowSetsEnv(gate, releaseTableEnv) {
+		t.Errorf(`the verify-table job in %s no longer sets %s.
+
+Without it the release run applies tableMaxAge (%d days) instead of tableReleaseMaxAge
+(%d days), so a release can ship a table up to two months older than intended and every
+job in the workflow still reports green.`,
+			path, releaseTableEnv, int(tableMaxAge.Hours()/24), int(tableReleaseMaxAge.Hours()/24))
+	}
+
+	bundle := workflowJob(t, src, "windows-bundle")
+	needs, ok := workflowNeeds(bundle)
+	switch {
+	case !ok:
+		t.Errorf(`the windows-bundle job in %s has no needs:.
+
+It must name verify-table, or the gate runs in parallel with the build it is supposed to
+prevent — which is the defect issue #66 was filed on, restored.`, path)
+	case !strings.Contains(needs, "verify-table"):
+		t.Errorf(`the windows-bundle job in %s needs %q, which does not include verify-table.
+
+A job that does not gate the build gates nothing: the bundle would be compiled, the
+artifact uploaded and on a tag push the draft release created, all while the table check
+was still running beside it.`, path, needs)
+	}
+}
+
+// workflowJob returns the lines of one top-level job from a workflow file.
+//
+// Textual rather than parsed: a YAML library is a dependency this module does not carry
+// and would not otherwise want, and the two properties being asserted are both single
+// lines. A job header is the only thing in these files at exactly two spaces of
+// indentation, so the scan is "from this job's header to the next one".
+func workflowJob(t *testing.T, src, name string) string {
+	t.Helper()
+	lines := strings.Split(src, "\n")
+	start := -1
+	for i, ln := range lines {
+		if ln == "  "+name+":" {
+			start = i + 1
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatalf("no %q job in .github/workflows/release.yml.\n\nIf it was renamed, rename it here too — this test is the thing that notices when the release stops being gated on the shipped IP→AS table.", name)
+	}
+	for i := start; i < len(lines); i++ {
+		if isJobHeader(lines[i]) {
+			return strings.Join(lines[start:i], "\n")
+		}
+	}
+	return strings.Join(lines[start:], "\n")
+}
+
+// isJobHeader reports whether a line is a top-level job key: two spaces, a name, a
+// colon, nothing else.
+func isJobHeader(ln string) bool {
+	if !strings.HasPrefix(ln, "  ") || strings.HasPrefix(ln, "   ") {
+		return false
+	}
+	name, ok := strings.CutSuffix(strings.TrimPrefix(ln, "  "), ":")
+	if !ok || name == "" {
+		return false
+	}
+	for _, r := range name {
+		if !(r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// workflowSetsEnv reports whether a job actually SETS an environment variable, as
+// opposed to merely mentioning it.
+//
+// The distinction is not pedantry: this job's steps carry a long comment naming the
+// variable and explaining what it does, and a plain substring search over the job was
+// satisfied by that comment — so deleting the `env:` entry left the check green while
+// every release run silently fell back to the 90-day floor. Comment lines are dropped
+// and the name has to appear as a key.
+func workflowSetsEnv(job, name string) bool {
+	for _, ln := range strings.Split(job, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "#") {
+			continue
+		}
+		if strings.HasPrefix(ln, name+":") {
+			return true
+		}
+	}
+	return false
+}
+
+// workflowNeeds returns the value of a job's needs: key, if it has one.
+func workflowNeeds(job string) (string, bool) {
+	for _, ln := range strings.Split(job, "\n") {
+		if v, ok := strings.CutPrefix(ln, "    needs:"); ok {
+			return strings.TrimSpace(v), true
+		}
+	}
+	return "", false
 }
 
 // TestEmbeddedIsParsedOnce pins the sync.OnceValues contract, which is load-bearing

@@ -523,17 +523,41 @@ output — which is what lets a reviewer re-run it and compare against the commi
 file. The download is a separate manual step on purpose, so the transform itself
 stays hermetic.
 
-**Cadence is a security parameter, and CI enforces a floor under it.** The mapping
+**Cadence is a security parameter, and CI enforces two bars under it.** The mapping
 drifts ~1.3% per month and ~3.6% per quarter, so a client that has not been rebuilt in
 a year mis-scores roughly one AS verdict in nine. It degrades *safely* — a stale
 answer falls into the unknown-pooling rule, never into a false claim of diversity —
-but it degrades. `TestEmbeddedTableIsFresh` fails once the committed table is more
-than **90 days** old, matching both the GeoIP threshold above and the quarterly
-cadence ADR-0044 §6 costed.
+but it degrades.
 
-That check is a floor, not a schedule: it tells you the table has gone stale, it does
-not refresh anything. Wiring the refresh into the release process proper belongs with
-the signed release channel (#34) and is tracked separately.
+| bar | age | where it runs | what it stops |
+| --- | --- | --- | --- |
+| build floor | **90 days** | `TestEmbeddedTableIsFresh` in `ci.yml`, every push and pull request | work continuing on a table nobody has refreshed in a quarter |
+| release bar | **30 days** | the `verify-table` job in `.github/workflows/release.yml` | a **release** being cut on a table older than a month |
+
+The two are not second opinions about the same thing. 90 days is a budget on how wrong
+the table may be *in the hands of somebody running it*, and that budget is spent on both
+sides of a release — the age of the table when the artifact is built, plus however long
+the person who installed it keeps running that build. Against the floor alone a release
+cut on day 89 hands a user a table already at the limit on the day they install it.
+Shipping at most 30 days old leaves roughly 60 days of the budget on the user's side.
+
+`verify-table` is a job the Windows bundle job `needs:`, not a check beside it, and that
+is the load-bearing part: a refusal happens **before** anything is compiled and before
+any release object exists, not after a draft has been created. Recovering from one means
+refreshing the table, committing it, and moving the tag onto that commit — the same
+shape as the version gate refusing a tag that disagrees with `VERSION`.
+
+**What the release bar covers, and what it does not.** `release.yml` builds the Windows
+artifacts, so the bar covers everyone who installs Bacchus for Windows from a GitHub
+release. It does **not** cover a Linux install: [`deploy/install.sh`](../deploy/install.sh)
+builds `clients/fyne` from the checkout it is run in, at whatever revision that checkout
+happens to be at, and runs no tests. There is no Linux release artifact, so there is no
+Linux release to gate. A Linux user's table age is bounded by the 90-day floor on `main`
+plus however stale their clone is — and the second term is unbounded. Pull before you
+install.
+
+Both bars are floors rather than schedules: they refuse, they do not refresh anything.
+Performing the refresh is still the manual step above.
 
 ## Transport selection
 `-transport` picks the session transport (ADR-0008): `webrtc` (default; UDP/DTLS

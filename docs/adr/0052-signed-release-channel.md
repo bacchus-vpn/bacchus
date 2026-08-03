@@ -518,6 +518,15 @@ with ADR-0050, and the ordering above is what it will need.
 - **A health signal for "started but cannot serve"** — #114.
 - **The IP→AS table's per-release refresh** (`#66`), which hangs off this channel
   existing and is not built by it.
+
+  > **Update (2026-08-03):** built, and this scope line still holds as written. What
+  > `#66` attached itself to is not this channel but `#34`'s **build** half — the
+  > release workflow shipped in `#142` — where it is a gate job the Windows bundle
+  > `needs:`, refusing a release whose committed table is more than 30 days old. The
+  > signed channel this record designs is untouched by it: no manifest, no delegation,
+  > no delivery path. See ADR-0044's fourth amendment. What that gate does **not**
+  > cover is a table correction between releases, which is still ADR-0044 §6's option
+  > C/E and still wants this channel.
 - **Any Go.** This is the design half of #34; the issue stays open for its build.
 
 ## Amendment (2026-08-02, #34) — §6's two gates are ruled: the existing root, and a provisional custody call
