@@ -25,17 +25,20 @@ package enforcement
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 
+	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wireguard/tun"
 )
 
 const tunAdapterName = "Bacchus"
 
-// createNoWindow is the CREATE_NO_WINDOW process-creation flag. bacchus.exe is
+// createNoWindow is the CREATE_NO_WINDOW process-creation flag. The client is
 // built -H=windowsgui and has no console of its own, so without this flag every
 // child powershell.exe allocates and flashes its own console window. runPS
 // fires constantly — route installs, gateway refreshes, kill-switch and
@@ -229,16 +232,132 @@ func (o *winOS) removeRoutes(prefixes []string) {
 	}
 }
 
-// createTUN brings up the wintun adapter. The error text names elevation
-// because that is overwhelmingly the reason this fails in the field, and
-// parity item 7 turns on it: a client that cannot create the device must say
-// so, not degrade silently to unprotected.
+// createTUN brings up the wintun adapter. Parity item 7 turns on this failing
+// loudly: a client that cannot create the device must say so, not degrade
+// silently to an unprotected proxy. That makes this error text the entire
+// diagnosis a user gets, and bacchus#135 found both halves of it wrong —
+// it named `bacchus.exe`, the tray client retired in bacchus#138, and it named
+// elevation as the cause when a missing wintun.dll produces the identical
+// failure (confirmed on hardware, bacchus#115). Both halves are answered by
+// createTUNAdvice.
 func (o *winOS) createTUN() (tun.Device, error) {
 	dev, err := tun.CreateTUN(tunAdapterName, 0)
 	if err != nil {
-		return nil, fmt.Errorf("create wintun adapter (run bacchus.exe as Administrator?): %w", err)
+		return nil, fmt.Errorf("create wintun adapter — %s: %w", createTUNAdvice(err, runningExeName()), err)
 	}
 	return dev, nil
+}
+
+// defaultExeName is what the advice below calls this program when the OS will
+// not say what it is actually called. It is the name the release bundle ships
+// (bacchus#136), so it is right for every user who did not rename it.
+const defaultExeName = "bacchus-fyne.exe"
+
+// runningExeName is the file name of the running binary, for advice a user has
+// to act on by finding that file and right-clicking it.
+//
+// Read from the process rather than hardcoded, which is the durable half of
+// bacchus#135's second finding. The string this replaces named `bacchus.exe`,
+// correctly, for as long as clients/windows was the only caller; bacchus#59
+// made the text shared and bacchus#138 deleted the binary it named, and at no
+// point did anything fail — the advice simply started pointing at a file that
+// is not on any user's disk. A name taken from os.Executable cannot go stale
+// that way, and it is also literally the file the user launched, which is what
+// they have to find again.
+func runningExeName() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return defaultExeName
+	}
+	base := filepath.Base(exe)
+	// filepath.Base never returns "", but it does return "." for an empty
+	// input and a separator for a path that is all separators. Neither is a
+	// file name a user could act on.
+	if base == "." || base == string(filepath.Separator) {
+		return defaultExeName
+	}
+	return base
+}
+
+// createTUNAdvice turns a tun.CreateTUN failure into the one sentence a user
+// can act on, naming which of the two causes actually happened where the error
+// says so and both where it does not.
+//
+// The two are distinguishable because golang.zx2c4.com/wintun wraps its whole
+// chain with %w and they enter that chain at different points:
+//
+//   - No usable wintun.dll. CreateAdapter calls procWintunCreateAdapter.Find()
+//     BEFORE any syscall, and Find() calls LoadLibraryEx with
+//     LOAD_LIBRARY_SEARCH_APPLICATION_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32 — so
+//     "next to the exe" and System32 are the only two places it ever looks,
+//     and nothing else on the machine can satisfy it.
+//   - No elevation. The DLL loads, the syscall runs, and the driver
+//     installation it performs is what fails.
+//
+// The DLL half is identified POSITIVELY, and the codes in isDLLLoadFailure are
+// chosen so that it is: every one of them can only be produced by loading a
+// module or resolving an export, so none of them can also be something the
+// loaded wintun did. That is why ERROR_FILE_NOT_FOUND is deliberately not
+// among them even though "the file is not there" sounds like exactly this
+// case — LoadLibraryEx reports a module it cannot find on the search path as
+// ERROR_MOD_NOT_FOUND, so a bare 2 here would be coming from somewhere else,
+// and claiming a missing DLL over a driver-install failure would send the user
+// to re-download a file they already have.
+//
+// The elevation half is NOT positively identified: ERROR_ACCESS_DENIED is what
+// an unelevated run has been observed to produce, but wintun's refusal path is
+// not contractual and nothing here should pretend otherwise. So anything
+// unrecognised falls through to naming BOTH causes rather than guessing. That
+// default is the state bacchus#135 describes — and it is still an improvement
+// on it, because the old text named exactly one of the two and was silently
+// wrong half the time.
+func createTUNAdvice(err error, exe string) string {
+	switch {
+	case isDLLLoadFailure(err):
+		return "wintun.dll is missing or could not be loaded. Put the wintun.dll for this machine's architecture next to " + exe
+	case isAccessDenied(err):
+		return "run " + exe + " as Administrator"
+	default:
+		return "check that wintun.dll is next to " + exe + " and that " + exe + " is running as Administrator"
+	}
+}
+
+// isDLLLoadFailure reports whether err is wintun.dll failing to load or to
+// yield its entry points, as opposed to anything the loaded DLL then did.
+// Every code here is exclusive to the loader; see createTUNAdvice for why that
+// exclusivity is the whole point and which plausible-looking code is left out
+// because it does not have it.
+func isDLLLoadFailure(err error) bool {
+	return errorIsAny(err,
+		// The DLL is on neither of the two paths LoadLibraryEx searches.
+		windows.ERROR_MOD_NOT_FOUND,
+		// A wintun.dll of the wrong architecture — the easiest mistake to
+		// make, because the wintun.net zip carries one directory per arch and
+		// every one of them holds a file of this same name.
+		windows.ERROR_BAD_EXE_FORMAT,
+		// It loaded but has no such export: some other wintun.dll, or a
+		// version predating the entry point.
+		windows.ERROR_PROC_NOT_FOUND,
+		// It loaded and its DllMain refused.
+		windows.ERROR_DLL_INIT_FAILED,
+	)
+}
+
+// isAccessDenied reports whether err is the process being told it may not do
+// this, which for this call means it is not elevated.
+func isAccessDenied(err error) bool {
+	return errorIsAny(err, windows.ERROR_ACCESS_DENIED, windows.ERROR_PRIVILEGE_NOT_HELD)
+}
+
+// errorIsAny is errors.Is against a set. syscall.Errno is comparable, so
+// errors.Is matches it by value at every level of the %w chain above.
+func errorIsAny(err error, targets ...syscall.Errno) bool {
+	for _, t := range targets {
+		if errors.Is(err, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // configureTunInterface assigns addr/prefixLen to the tunnel adapter.

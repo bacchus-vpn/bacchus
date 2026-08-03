@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Windows application manifest for bacchus-fyne.exe (bacchus#136).
+
+  It asks Windows for one thing and nothing else: run this process elevated.
+  Device-wide routing on Windows needs it - creating the wintun adapter,
+  New-NetRoute, New-NetIPAddress and the NetSecurity kill-switch are all
+  administrator operations - and without this manifest nothing ever asked.
+  A downloaded binary therefore launched unelevated, every connect failed at
+  the first of those calls, and the only clue was one error string at the far
+  end of the chain (bacchus#135).
+
+  requireAdministrator rather than highestAvailable: a Bacchus that came up
+  unelevated could not route this device at all, so every connect would refuse.
+  An app that cannot do its one job is worse than a UAC prompt at launch, and
+  the prompt is the accepted cost. It is not a silent one - unsigned, it says
+  "Publisher: Unknown", which is bacchus#38's territory and deferred with it.
+
+  Deliberately NOT here:
+
+    - Common Controls v6. The retired tray client's bacchus.exe.manifest
+      declared a dependency on Microsoft.Windows.Common-Controls 6.0.0.0
+      because lxn/walk draws with comctl32 and renders as Windows 95 without
+      it (docs/design/client-connection-ui.md). Fyne draws every widget itself
+      through OpenGL and links no comctl32, so the declaration would be inert.
+      That file was correctly deleted with its client in bacchus#138; this is
+      a new file for a different purpose, not a restored one.
+    - dpiAware/dpiAwareness. Fyne's GLFW driver sets DPI awareness through the
+      API at startup; declaring it here too would be a second authority on the
+      same setting, and the manifest wins over the API call.
+    - supportedOS compatibility GUIDs. They change what GetVersionEx and a few
+      behaviour shims report; nothing in this client asks.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+      type="win32"
+      name="io.github.bacchus-vpn.bacchus"
+      version="1.0.0.0"
+      processorArchitecture="*"/>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>

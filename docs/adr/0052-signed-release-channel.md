@@ -355,6 +355,16 @@ the first binary carrying an anchor is published, not discovered afterwards. Thi
 record states the gate; it does not make the call, and the call is not an
 engineering one.
 
+> **Update (2026-08-02):** both gates in this section are now ruled — see the
+> amendment at the end of this record (#34). The anchor is **the existing root**
+> from bacchus-payment#43, decided and irreversible. The update-key custody call is
+> made but **provisional**, and its commitment point is the minting of the `update`
+> delegation rather than the shipping of a release. One sentence above is also
+> corrected there: replacing the anchor requires the channel that root authorizes
+> only for the **automatic** channel, so root loss or rotation costs a manual
+> reinstall by every user rather than a permanently unreachable fleet, and the
+> decision was made against that number.
+
 ### 7. Rollback and failure behaviour
 
 Three distinct failures, and they do not share an answer.
@@ -500,9 +510,139 @@ with ADR-0050, and the ordering above is what it will need.
 - **Which root public key is compiled into the first shipped client.** §6 states
   that the choice is a gate before the build half and that it is not reversible
   afterwards. The choice itself is the owner's.
+
+  > **Update (2026-08-02):** made — the existing root from bacchus-payment#43. See
+  > the amendment below.
 - **The grace window X**, which ADR-0029 deliberately made operational rather than
   a timer, and which nothing here changes.
 - **A health signal for "started but cannot serve"** — #114.
 - **The IP→AS table's per-release refresh** (`#66`), which hangs off this channel
   existing and is not built by it.
 - **Any Go.** This is the design half of #34; the issue stays open for its build.
+
+## Amendment (2026-08-02, #34) — §6's two gates are ruled: the existing root, and a provisional custody call
+
+§6 named two things it deliberately did not decide — which root public key is
+compiled into the first shipped client, and how the update signing key is actually
+kept — and said the calls were the owner's. Both were made on 2026-08-02. One is a
+one-way door and has been walked through; the other is explicitly provisional, and
+is written down here so that it is not lost in conversation.
+
+### Gate 1 — the anchor is the EXISTING root. Decided, and irreversible.
+
+**The client anchors to the root generated in bacchus-payment#43**: a 2026-07-29
+genesis with real randomness, a 2-of-3 Shamir split, shares in three physical
+locations, one holder. It is the same root the production coordinator already runs
+against. **One trust root for policy, admission and updates**, rather than a second
+root minted for releases.
+
+The cost is accepted knowingly rather than absorbed quietly: **the root's custody
+posture is now permanent.** 2-of-3 with a single holder is what every shipped
+client will trust for as long as those clients exist. If this project later gains
+people and wants a different threshold or a different holder set, that is not a
+change this mechanism can deliver — a different root is a different anchor, and a
+different anchor is a different binary.
+
+### The correction to §6's own phrasing, because it changes the size of that cost
+
+§6 says that replacing the anchor *"requires shipping a new binary, and shipping a
+new binary requires the channel that root authorizes."* **That is true of the
+automatic channel only.** A fresh binary can always be distributed the way the
+first one was: a download, an installer, the channel union in
+`docs/distribution.md`. Nothing about a compiled-in anchor stops a person from
+acquiring a new build through the same route that put the first one on their
+machine.
+
+So the real cost of root loss or rotation is **"every user reinstalls by hand"**,
+not "the fleet is permanently unreachable". For a population behind a censorship
+wall that is expensive — it means running acquisition again, for everyone, at
+once, through channels that are hostile by design and were never sized for a
+simultaneous re-onboarding of the whole user base. It is not fatal. **The decision
+above was made against that number**, not against the larger one §6's sentence
+implies, and a gate is not meaningfully ruled unless the cost it is weighed
+against is the right one.
+
+The Consequences bullet reading *"the compiled-in root anchor becomes irrevocable
+at first ship"* stands, read precisely: irrevocable **through this channel**. It
+was never a claim that the software becomes unreplaceable.
+
+### Gate 2 — update-key custody. Ruled, and explicitly PROVISIONAL.
+
+Three decisions, all inside the shape §6 already fixed — manifests only, offline,
+never on a coordinator, never on a build machine, never in CI:
+
+- **A single key, not split.** The root is 2-of-3 because losing it is severe;
+  losing the update key means minting a new delegation, which is annoying rather
+  than severe. That asymmetry is the entire return on the two-tier design, and
+  spending it on a threshold scheme would be spending it for nothing. A split that
+  must be reconstructed for every release is also a split that gets routed around,
+  and a procedure people route around is worse than a simpler one they follow.
+- **Its own offline medium, separate from the root shares.** The root shares' security
+  property is that they are geographically separated and *rarely handled*. Keeping
+  a frequently-used update key beside them means touching root-share media on every
+  release, which erodes exactly the property that separation exists to create. Two
+  media, two handling frequencies, two blast radii.
+- **A five-step release procedure**, written down before it is needed rather than
+  improvised under pressure:
+  1. CI produces the artifacts. It signs nothing and holds nothing.
+  2. The pure-Go fleet binaries are **independently rebuilt** and confirmed
+     byte-identical to CI's, per §5's measurement (`-trimpath`, `CGO_ENABLED=0`, a
+     pinned toolchain). The GUI cannot be, which §5 records rather than defers, so
+     its hash is taken from a single designated build.
+  3. The manifest is authored **offline**: hashes, version, sequence number. No
+     URLs — §1's "names hashes and never locations" is the decision the rest falls
+     out of.
+  4. It is signed on the air-gapped machine under the `update` delegation.
+  5. The signed manifest is published, and the coordinator announces the release.
+
+  The key never touches a network-connected machine, and **signing is never
+  triggered by CI**: it is a deliberate act performed on artifacts CI produced,
+  which is the distinction §6 draws and the reason a build machine that can sign
+  is the highest-value target in the system.
+
+**This is provisional. The owner asked to be re-asked before it is committed to**,
+and it is editable until then. It is a placeholder that has been seen and accepted
+as one, not a settled answer.
+
+**The commitment point is when the `update` delegation is MINTED, not when a
+release ships, and those are different dates.** The delegation binds one specific
+public key. Changing the key after the delegation exists means revoking a serial
+and minting a new delegation — affordable by design, and the whole point of the
+two-tier structure, but it is **a second air-gapped ceremony rather than an edit**.
+Everything else about the shape — which medium, where it lives, who performs the
+signing, the five steps — stays editable indefinitely, before and after release.
+
+So the ordering that keeps the question free is: **re-ask the owner, then run the
+ceremony that mints the `update` delegation, then let the build half produce its
+first signed release.** Minting before re-asking breaks nothing; it converts an
+edit into a ceremony. Nothing in the code depends on which way the question goes,
+so there is no reason to pay that.
+
+### A prerequisite with lead time that nothing is currently holding
+
+**bacchus-payment#43 records minting a `policy`-role delegation, and no record of
+an `update`-role one is visible from here.** The ceremony tool signs all three leaf
+roles and `core/delegation` has declared `RoleUpdate` for some time — but the
+mechanism existing is not the same as the cert existing.
+
+**Stated as what it is: this is unverifiable from this repository.** The
+authoritative record of what the root has signed is owner-side notes, not the
+tracker, so the honest form of the claim is *no record visible from here*, not
+*it was never minted*. If an `update` delegation exists and was simply not written
+down publicly, saying so closes this paragraph and nothing follows from it.
+
+If it does not exist, then **#34's build half needs a second signing ceremony
+before it can produce a single signed release**: two shares reconstructed, an
+`update`-role delegation cert minted, and that cert independently verified against
+the root before any use. That is owner-side, air-gapped, has real lead time, and
+**is blocked by no code** — nothing in the build half can substitute for it and
+nothing in the build half has to wait to start. It should therefore be scheduled
+in parallel with the build rather than discovered at the end of it.
+
+### What this amendment does not change
+
+- **The build half.** #34 stays open; this record is still the design half only.
+- **Any key material**, which appears nowhere in this repository, in any fixture or
+  in any transcript, and does not start appearing now.
+- **§5's reproducibility split, §7's failure behaviour, or anything about the
+  manifest**, none of which either gate touched.

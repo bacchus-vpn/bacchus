@@ -65,14 +65,24 @@ talks to the network over the wire and shares no code with this one.
 ## Build
 
 ```sh
+# the release these binaries report, from the VERSION file (see below)
+stamp="-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)"
+
 # server binaries (Linux)
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bacchus-coordinator ./cmd/coordinator
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bacchus-node        ./cmd/node
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$stamp" -o bacchus-coordinator ./cmd/coordinator
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "$stamp" -o bacchus-node        ./cmd/node
 
 # Windows client (needs a mingw-w64 gcc, and wintun.dll at runtime — see clients/fyne/README.md)
 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 \
-  go build -ldflags "-H=windowsgui" -o bacchus-fyne.exe ./clients/fyne
+  go build -ldflags "-H=windowsgui $stamp" -o bacchus-fyne.exe ./clients/fyne
 ```
+
+`VERSION` at the repository root is the single source of truth for the release
+number, and every build path stamps from it. A binary built without the `-ldflags`
+above still runs — a development build must — but it reports the release `0.0.0`
+and warns at startup, because a build that cannot state its release is one the
+coordinator's version fence cannot rank. See
+[docs/RUNNING.md](docs/RUNNING.md#the-release-version-comes-from-version-issue-128).
 
 See [docs/RUNNING.md](docs/RUNNING.md) to run the stack and
 [deploy/README.md](deploy/README.md) to deploy the services.
