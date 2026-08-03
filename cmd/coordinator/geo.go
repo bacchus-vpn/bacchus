@@ -596,6 +596,34 @@ func countrySourceLabel(source string) string {
 	}
 }
 
+// publishedDeclaration returns the node's declared country for the SIGNED DIRECTORY, or
+// "" under -geoip-required (owner ruling, 2026-08-03).
+//
+// The declaration is derived, stored, logged and overridable exactly as before under
+// either setting. This gates one thing: whether it is handed to a client inside the
+// signed artifact.
+//
+// ADR-0042 §9 made that artifact THE exit-discovery path for relay chaining — a chaining
+// client picks its terminating jurisdiction out of it with no live reply to check it
+// against. -geoip-required's promise is that no node self-report reaches a client's
+// country choice, and putting a labelled self-claim into the one artifact a client
+// chooses a jurisdiction from is not that promise kept, whatever the label says. The
+// argument that nothing reads the field today is a fact about today, in a file designed
+// to be durable; the next implementer sees a country inside a signed document. The
+// cheapest way to keep a promise is not to hand out the thing you promised not to hand
+// out.
+//
+// It is scoped to the FLAG and not to the per-node outcome — an overridden node under
+// the flag publishes no declaration either, even though its country was established.
+// A rule that depended on how each node's derivation happened to land would be a rule
+// the next reader has to reconstruct before they can trust it.
+func publishedDeclaration(declared string) string {
+	if requireGeoIP {
+		return ""
+	}
+	return declared
+}
+
 // countryClaimLabel renders the whole of what this coordinator knows about a node's
 // country for one registration line: where the published tag came from, and — only when
 // they disagree — what the node itself declared.

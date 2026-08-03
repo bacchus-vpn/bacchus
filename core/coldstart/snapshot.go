@@ -68,11 +68,21 @@ type Entry struct {
 	// claims, and so the coordinator stops throwing away the one thing the operator
 	// actually knows.
 	//
-	// Carried even under -geoip-required, where it is precisely NOT the country: that
-	// flag's promise is that no node self-report reaches a client's country CHOICE, and
-	// a labelled claim that is never Country is not that choice. Such an entry ships
-	// with Country empty and this field set, which is the honest shape of "the node says
-	// DE and this coordinator will not confirm it".
+	// **A coordinator running -geoip-required omits it entirely** (owner ruling,
+	// 2026-08-03). It still derives, stores, logs and allows an admin to override the
+	// declaration under that flag; it simply does not publish it here. ADR-0042 §9 made
+	// this artifact THE exit-discovery path for relay chaining — a chaining client picks
+	// its terminating jurisdiction out of it with no live reply to check it against —
+	// and that flag's promise is that no node self-report reaches a client's country
+	// choice. Putting a labelled self-claim into the one artifact a client chooses a
+	// jurisdiction from is not that promise kept, however carefully it is labelled and
+	// however true it is that nothing reads this field today. "Nothing reads it today"
+	// is a fact about today, in a file designed to be durable, and what the next
+	// implementer sees is a country inside a signed document. The cheapest way to keep a
+	// promise is not to hand out the thing you promised not to hand out.
+	//
+	// So under that flag an entry whose address did not resolve carries NEITHER Country
+	// nor this field, and CountrySource alone says why. Without the flag both travel.
 	//
 	// It is NOT elided when it agrees with Country. Collapsing "made no claim" into
 	// "made a claim that checks out" is the exact bug class ADR-0042's own #2 amendment

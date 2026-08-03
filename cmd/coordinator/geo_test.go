@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -807,9 +808,11 @@ func TestDeclarationSurvivesAHeartbeat(t *testing.T) {
 
 // TestGeoIPRequiredRecordsTheDeclarationWithoutUsingIt: with both values carried,
 // "refuse" and "fall back" became two distinct options, and the strict posture must stay
-// the first. The declaration is RECORDED and published as a labelled declaration —
-// carrying a claim is not choosing one — while the country stays empty and the exit
-// stays unreachable.
+// the first. The declaration is RECORDED — for the operator log, and so an admin can
+// act on it — while the country stays empty and the exit stays unreachable.
+//
+// What it must NOT do is reach the signed directory; see
+// TestGeoIPRequiredPublishesNoDeclaration.
 func TestGeoIPRequiredRecordsTheDeclarationWithoutUsingIt(t *testing.T) {
 	resetRegistry(t)
 	setPC(t)
@@ -830,13 +833,107 @@ func TestGeoIPRequiredRecordsTheDeclarationWithoutUsingIt(t *testing.T) {
 	if _, found := countryIn(wire{Countries: countrySnapshot(time.Now(), tierLimits{})}, "DE"); found {
 		t.Error("the declared country appeared in the country map — a client would be offered a country nothing verified")
 	}
-	// On the wire it ships as what it is: no country, and a labelled claim beside it.
-	e := findEntry(t, buildSnapshot("198.51.100.1:8080"), "claims-de")
-	if e.Country != "" || e.DeclaredCountry != "DE" {
-		t.Errorf("snapshot entry = {Country:%q DeclaredCountry:%q}; want no country and the declaration carried", e.Country, e.DeclaredCountry)
+	// The operator can still see it, which is the point of recording it: the surface
+	// that exists today shows both.
+	if got := countryClaimLabel(c); got != "unresolved; node declares DE" {
+		t.Errorf("registration label = %q; the operator must still be told what the node claimed", got)
 	}
-	if e.DeclaredCountryDiffers() {
-		t.Error("an entry with no published country reported a disagreement — there is nothing to disagree with")
+}
+
+// TestGeoIPRequiredPublishesNoDeclaration is the owner ruling of 2026-08-03, and the
+// reason it is not the obvious call.
+//
+// A labelled self-claim that is never Country looked harmless — the flag's promise is
+// about the country CHOICE. It is not harmless in THIS artifact: §9 made the signed
+// snapshot the exit-discovery path for relay chaining, so a chaining client picks its
+// terminating jurisdiction out of exactly this file with no live reply to check it
+// against. "Nothing reads the field today" is a fact about today in a document designed
+// to be durable, and what the next implementer sees is a country inside a signed file.
+//
+// So under the flag the entry carries NEITHER key, and the assertion is against the
+// marshalled bytes rather than the struct: an empty string and an absent field are the
+// same value in Go and are exactly the distinction that matters on the wire.
+func TestGeoIPRequiredPublishesNoDeclaration(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, true)
+
+	registerExitFrom("claims-de", "DE", from(ipUnmapped))                                             // unresolved: no country
+	registerNoAdvertiseExit("silent", "DE", from(ipInNL))                                             // resolved, nothing to corroborate it
+	registerExitFrom("resolved", "RU", from(ipInNL))                                                  // resolves NL, declares RU
+	handle(wire{Type: "register", Role: "relay", ID: "r-claims-de", Country: "DE"}, from(ipUnmapped)) // relays too
+
+	// The declaration is still on the registry entry — the flag gates publication, not
+	// derivation, so an admin prompted about this node still has something to be
+	// prompted with.
+	if c := exitClaims(t, "claims-de"); c.declared != "DE" {
+		t.Fatalf("setup: the declaration was dropped from the registry entry too: %+v", c)
+	}
+
+	body, err := json.Marshal(buildSnapshot("198.51.100.1:8080"))
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if bytes.Contains(body, []byte("declaredCountry")) {
+		t.Errorf("under -geoip-required the signed directory carries a declaredCountry key: %s", body)
+	}
+	var back coldstart.Snapshot
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	for _, id := range []string{"claims-de", "r-claims-de", "silent"} {
+		e := findEntry(t, back, id)
+		if e.Country != "" || e.DeclaredCountry != "" {
+			t.Errorf("%s shipped {Country:%q DeclaredCountry:%q}; under the flag it must carry neither", id, e.Country, e.DeclaredCountry)
+		}
+	}
+	// Where this coordinator HAS a reason, the reason still travels once the claim is
+	// withheld — it is all a consumer is left with. And the case that has none is worth
+	// stating rather than discovering: an address that resolved to nothing has produced
+	// the EMPTY provenance since #3, which #113 does not change, so such an entry now
+	// carries no country, no declaration and no reason. It can never be selected as a
+	// jurisdiction, having none, and it is still a usable mesh-walk courier, which needs
+	// no country at all.
+	if e := findEntry(t, back, "silent"); e.CountrySource != coldstart.CountryNoEndpoint {
+		t.Errorf("silent shipped CountrySource=%q; want %q — an operator must still be able to tell which refusal this was", e.CountrySource, coldstart.CountryNoEndpoint)
+	}
+	if e := findEntry(t, back, "claims-de"); e.CountrySource != "" {
+		t.Errorf("claims-de shipped CountrySource=%q; an unresolved address has carried no provenance since #3, and #113 does not change that", e.CountrySource)
+	}
+	// The rule is scoped to the FLAG, not to how a node's derivation landed: an exit
+	// whose country WAS established withholds its declaration under the flag too.
+	if e := findEntry(t, back, "resolved"); e.Country != "NL" || e.DeclaredCountry != "" {
+		t.Errorf("resolved exit shipped {Country:%q DeclaredCountry:%q}; want NL and no declaration", e.Country, e.DeclaredCountry)
+	}
+}
+
+// TestWithoutGeoIPRequiredTheDeclarationIsPublished is the other side of the ruling, and
+// it is what keeps the test above from passing because the field stopped working
+// altogether. Without the strict posture the coordinator makes no such promise, and
+// carrying both claims is the whole of issue #113.
+func TestWithoutGeoIPRequiredTheDeclarationIsPublished(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, false)
+
+	registerExitFrom("cloudy", "DE", from(ipInNL))
+	handle(wire{Type: "register", Role: "relay", ID: "r-cloudy", Country: "DE"}, from(ipInNL))
+
+	body, err := json.Marshal(buildSnapshot("198.51.100.1:8080"))
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	if !bytes.Contains(body, []byte(`"declaredCountry":"DE"`)) {
+		t.Errorf("without -geoip-required the declaration did not reach the signed directory: %s", body)
+	}
+	var back coldstart.Snapshot
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	for _, id := range []string{"cloudy", "r-cloudy"} {
+		if e := findEntry(t, back, id); e.Country != "NL" || e.DeclaredCountry != "DE" {
+			t.Errorf("%s shipped {Country:%q DeclaredCountry:%q}; want NL / DE", id, e.Country, e.DeclaredCountry)
+		}
 	}
 }
 

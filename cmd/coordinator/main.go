@@ -1889,7 +1889,7 @@ func buildSnapshot(advertise string) coldstart.Snapshot {
 		// terminating exit while still using it as a courier. Under -geoip-required the
 		// question does not arise — such an exit has no country at all (§8, issue #2)
 		// and ships as the country-less exit it is.
-		entries = append(entries, coldstart.Entry{Role: "exit", ID: e.id, Country: e.country, CountrySource: e.countrySource, DeclaredCountry: e.declaredCountry, Addr: e.tcpAddr, Operator: operators[e.id]})
+		entries = append(entries, coldstart.Entry{Role: "exit", ID: e.id, Country: e.country, CountrySource: e.countrySource, DeclaredCountry: publishedDeclaration(e.declaredCountry), Addr: e.tcpAddr, Operator: operators[e.id]})
 	}
 	for id, r := range relays {
 		if r.exhausted {
@@ -1922,7 +1922,7 @@ func buildSnapshot(advertise string) coldstart.Snapshot {
 		// hint whenever that address resolves to nothing — which is every node in a
 		// deployment with no database staged. A consumer that cannot see the difference
 		// is reading a self-report as a coordinator-established fact.
-		e := coldstart.Entry{Role: "relay", ID: id, Country: r.country, CountrySource: r.countrySource, DeclaredCountry: r.declaredCountry, Addr: r.addr.String(), Operator: operators[id]}
+		e := coldstart.Entry{Role: "relay", ID: id, Country: r.country, CountrySource: r.countrySource, DeclaredCountry: publishedDeclaration(r.declaredCountry), Addr: r.addr.String(), Operator: operators[id]}
 		if r.ingressPort != 0 {
 			e.Ingress = net.JoinHostPort(r.addr.IP.String(), strconv.Itoa(r.ingressPort))
 		}

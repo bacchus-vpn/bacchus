@@ -440,12 +440,27 @@ same words.
 > should: a user who picks DE picks it to **be treated as** German by every site, and an
 > address that resolves US is treated as US regardless of which building it sits in.
 >
-> It is carried under `-geoip-required` too, where it is precisely *not* the country.
-> That flag's promise is that no node self-report reaches a client's country CHOICE, and
-> a labelled claim that is never `Country` is not that choice — such an entry ships with
-> `Country` empty and the declaration beside it, which is the honest shape of "the node
-> says DE and this coordinator will not confirm it". It is also **not elided when it
-> agrees**: collapsing *made no claim* into *made a claim that checks out* is the exact
+> **Under `-geoip-required` it is not published at all** (ruled by the owner,
+> 2026-08-03). The coordinator still derives it, still stores it, still shows it to the
+> operator on the registration line and still lets an admin override the country; it
+> simply does not put the declaration into the signed directory under that flag, so such
+> an entry carries neither `Country` nor `declaredCountry` and `countrySource` alone says
+> why. The first cut did carry it, on the argument that the flag's promise is about the
+> country CHOICE and a labelled claim that is never `Country` is not that choice. That
+> argument is wrong in this artifact specifically: §9 below made the signed snapshot THE
+> exit-discovery path for relay chaining, so a chaining client picks its terminating
+> jurisdiction out of exactly this file with no live reply to check it against. Putting a
+> node's self-claim into the one artifact a client chooses a jurisdiction from is not the
+> promise kept, however carefully it is labelled — and "nothing reads the field today" is
+> a fact about today, in a document designed to be durable, where what the next
+> implementer sees is a country inside a signed file. The cheapest way to keep a promise
+> is not to hand out the thing you promised not to hand out. The omission is scoped to
+> the FLAG rather than to how each node's derivation happened to land, so an overridden
+> node under the flag publishes no declaration either; a rule keyed on the per-node
+> outcome would be one the next reader has to reconstruct before they could trust it.
+>
+> It is **not elided when it agrees** with the published country, which is a separate
+> question and lands the other way: collapsing *made no claim* into *made a claim that checks out* is the exact
 > bug the #2 amendment below closed for the advertised endpoint, and this field has the
 > same shape.
 >
