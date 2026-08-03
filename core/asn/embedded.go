@@ -57,7 +57,7 @@ var embeddedGz []byte
 //
 // So the check runs where the person who CAN act will see it: in CI, before a release
 // carries a stale table.
-const TableRetrieved = "2026-06-15"
+const TableRetrieved = "2026-07-29"
 
 // embeddedOnce parses the embedded table at most once per process.
 //
