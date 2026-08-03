@@ -26,9 +26,9 @@
 ; reads comes from the .isl of the language they chose; the one string this
 ; script writes itself is in [CustomMessages] below, once per language. That
 ; parity is not enforced by anything Inno does - a {cm:} key defined for one
-; language and not the other compiles, and fails on the user's machine - so it
+; language and not the other COMPILES, and fails on the user's machine - so it
 ; is enforced by deploy/windows/i18n_test.go, which runs on every platform and
-; needs no Inno Setup to run.
+; needs no Inno Setup. The compile is a real check and it is not this one.
 ;
 ; THIS FILE IS UTF-8 WITH A BOM, and must stay that way while it holds any
 ; non-ASCII character. Inno Setup dropped the BOM requirement for non-ASCII
@@ -125,11 +125,11 @@ ShowLanguageDialog=yes
 ; root - so this needs nothing fetched or vendored.
 ;
 ; The internal Name values are what /LANG= takes and what prefixes each entry
-; in [CustomMessages] below. Nobody working on this repository can compile this
-; script (there is no Inno Setup and no Windows machine in the development
-; environment), so a mistyped MessagesFile would not fail here - it would fail
-; during a release. i18n_test.go therefore holds these two pairs as an
-; allowlist: adding a third language means adding it there deliberately.
+; in [CustomMessages] below. release.yml's windows-bundle job compiles this
+; script on every pull request touching deploy/windows/**, so an .isl that is
+; not there fails on the PR - but one that IS there and is the wrong language
+; compiles perfectly, so i18n_test.go holds these two pairs as an allowlist as
+; well: adding a third language means adding it there deliberately.
 Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 

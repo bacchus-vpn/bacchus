@@ -292,6 +292,15 @@ one to build it on.
 >   line `translations_test.go` draws: presence is a mechanical fact and belongs
 >   in a test, quality is a review question.
 >
+>   **The compile is a real check and is a different one.** `release.yml`'s
+>   `windows-bundle` job builds both artifacts, `iscc` included, on every pull
+>   request touching `deploy/windows/**`. It catches a syntax error and an
+>   `.isl` that is not there. It catches none of the above: Inno compiles a
+>   `{cm:}` key defined for one language and missing for the other perfectly
+>   cleanly, which is the entire premise, and every other failure in the list
+>   produces a successful compile and a working installer that is wrong on
+>   somebody's screen.
+>
 > **§5 is untouched and so is the AGPL's place in this record.** The licences
 > are *not* translated — translated by their stewards or not at all — and
 > `LICENSE.txt` remains deliberately unwired from `LicenseFile=`, because that
@@ -299,14 +308,18 @@ one to build it on.
 > agreement acceptance is conditioned on. "Bacchus" stays untranslated as a
 > brand, as it is everywhere else including `clients/fyne/translations/`.
 >
-> **Not verified on hardware, and it cannot be here.** There is no Inno Setup
-> compiler, no PowerShell and no Windows machine in this development
-> environment, so neither `bacchus.iss` nor `build-bundle.ps1` has been
-> executed. The static check is a check on their text. What a real machine still
-> owes: that the wizard renders Russian, that the uninstall prompt resolves its
-> custom messages in the language the *install* ran in, and that
-> `README.ru.txt` opens as Russian in Notepad out of the extracted zip. Listed
-> with the other hardware items in `deploy/windows/README.md`.
+> **Built, not run.** `release.yml`'s `windows-bundle` job packaged both
+> artifacts from this change on a real Windows runner: `build-bundle.ps1`
+> executed, both READMEs staged (and their staged sizes confirm the asymmetric
+> encoding — the Russian one three bytes longer than CRLF conversion alone
+> accounts for, the English one exactly zero), the zip came back with seven
+> entries, and `iscc` compiled `bacchus.iss` with both languages into a 23 MB
+> installer with no error. Nothing *ran* that installer. What a person at a
+> Windows machine still owes: that the Select Language dialog appears and the
+> wizard renders Russian, that the uninstall prompt resolves its custom
+> messages in the language the *install* ran in, and that `README.ru.txt` opens
+> as Russian in Notepad out of the extracted zip. Listed with the other
+> hardware items in `deploy/windows/README.md`.
 
 ## Scope: what this record does not decide
 

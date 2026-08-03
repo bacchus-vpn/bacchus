@@ -13,12 +13,22 @@
 // round it is, and each failure names which side is missing what.
 //
 // Deliberately NOT a Windows-only test, and deliberately not a step inside
-// build-bundle.ps1. Both artifacts are Windows-only *cargo* but they are
-// committed text, and the one machine that can compile them is the one that
-// cuts a release — a check that runs only there gets its first execution
-// during a real release, which is the exact failure build-bundle.ps1's own
-// header calls out. This walks the committed files with the standard library
-// on any platform, needs no Inno Setup, and takes milliseconds. It is the
+// build-bundle.ps1.
+//
+// The compiler is not the check here, and could not be. release.yml's
+// windows-bundle job does compile this installer on every pull request that
+// touches deploy/windows/**, which catches a syntax error and an .isl that is
+// not there — and catches NONE of what this file is about. Inno compiles a
+// {cm:} key defined for one language and missing for the other perfectly
+// cleanly; that is the entire premise. An unprefixed entry, a %1 dropped in
+// translation, a russian. message holding English, a README section that only
+// exists in one language: all of them produce a successful compile and a
+// working installer that is wrong on somebody's screen.
+//
+// So this walks the committed files with the standard library, on any
+// platform, in milliseconds, and it also covers the two cases the Windows job
+// structurally cannot: a push straight to main (release.yml has no push
+// trigger for a branch) and a contributor with no Windows at all. It is the
 // manifest_test.go shape: a Go test that reads a non-Go build artifact.
 //
 // What it does NOT check is translation quality — the same line
@@ -50,20 +60,23 @@ const (
 	langRuFile = "russian"
 )
 
-// vouchedLanguages is an allowlist, not a mirror of what Inno Setup ships, and
-// that is the point of it.
+// vouchedLanguages is an allowlist, not a mirror of what Inno Setup ships.
 //
-// Nobody working on this repository can compile bacchus.iss: there is no Inno
-// Setup compiler and no Windows machine in the development environment (see
-// deploy/windows/README.md). So a MessagesFile naming an .isl that does not
-// exist does not fail here — it fails during a release, on the one machine
-// that runs iscc, at the worst possible moment. Holding the exact pairs this
-// project has checked means adding a third language is a deliberate edit here
-// with the same checking behind it, rather than a line somebody guessed.
+// A MessagesFile naming an .isl that is not there does fail the compile, and
+// release.yml's windows-bundle job runs that compile on every pull request
+// touching this directory. What it does NOT fail on is an .isl that exists and
+// is the wrong one — Ukrainian.isl typed where Russian.isl was meant compiles
+// perfectly and ships a wizard in the wrong language — and it does not run at
+// all on a push straight to main, or on the machine of anyone without Windows.
+//
+// So this is a second, cheaper, differently-shaped guard rather than the only
+// one: adding a language is a deliberate edit here as well as in the script,
+// which is the point at which somebody has to have checked the file exists.
 //
 // Both of these are stock: Default.isl sits in the compiler's own directory
 // and Russian.isl in its Languages subdirectory, so neither is fetched,
-// vendored or shipped by us.
+// vendored or shipped by us. Confirmed compiling: the windows-bundle job on
+// this branch's own pull request built the installer from these two entries.
 var vouchedLanguages = map[string]string{
 	langEnFile: `compiler:Default.isl`,
 	langRuFile: `compiler:Languages\Russian.isl`,
@@ -226,12 +239,12 @@ func loadISS(t *testing.T) *issScript {
 
 // TestInstallerDeclaresBothLanguages is bacchus#145 at the [Languages] line: the
 // installer has to offer Russian and English, and the .isl behind each has to
-// be one this project has actually checked exists.
+// be one this project has actually checked.
 //
-// Mutation check: delete the russian line and this names it. Typo the
-// MessagesFile path — Russan.isl, or compiler:Russian.isl without the
-// Languages directory — and this names that instead of a release failing on
-// the one machine that runs iscc.
+// Mutation check: delete the russian line and this names it — which the
+// compile does not, because an installer offering one language is a valid
+// installer. Typo the MessagesFile path and this names that too, in
+// milliseconds on any platform rather than eight minutes into a Windows job.
 func TestInstallerDeclaresBothLanguages(t *testing.T) {
 	s := loadISS(t)
 
@@ -243,7 +256,7 @@ func TestInstallerDeclaresBothLanguages(t *testing.T) {
 		seen[name] = true
 		want, ok := vouchedLanguages[name]
 		if !ok {
-			t.Errorf("%s declares the language %q, which is not in vouchedLanguages. Nothing here can compile this script, so an unchecked .isl name fails during a release and not in CI: confirm the file ships with Inno Setup, then add it to vouchedLanguages deliberately", issFile, name)
+			t.Errorf("%s declares the language %q, which is not in vouchedLanguages. The compile catches an .isl that is absent but not one that is present and wrong: confirm the file ships with Inno Setup and is the language meant, then add it to vouchedLanguages deliberately", issFile, name)
 			continue
 		}
 		if got := s.MessagesFile[name]; got != want {
@@ -582,7 +595,7 @@ func TestBundleREADMEsExistInBothLanguages(t *testing.T) {
 	}
 	for _, name := range sortedSet(staged) {
 		if strings.HasPrefix(name, "README.") && !onDisk[name] {
-			t.Errorf("$BundleFiles in %s lists %s, which is not in this directory. build-bundle.ps1 would fail at staging, during a release", buildFile, name)
+			t.Errorf("$BundleFiles in %s lists %s, which is not in this directory. build-bundle.ps1 would fail at staging", buildFile, name)
 		}
 	}
 	// Each copy names the other. In a flat folder the alternative to a
@@ -654,8 +667,8 @@ func TestBundleREADMEsAreStructurallyParallel(t *testing.T) {
 	}
 
 	// The encodings build-bundle.ps1 will stage them under, asserted here so a
-	// stray character fails on every push instead of during a release on the
-	// one machine that packages.
+	// stray character fails on every push and on every platform, rather than
+	// only on the Windows job that runs the packaging script.
 	if i := strings.IndexFunc(en.Body, func(r rune) bool { return r > unicode.MaxASCII }); i >= 0 {
 		t.Errorf("%s is not pure ASCII (first offender at byte %d: %q). It is staged as UTF-8 with NO BOM precisely because it can stay inside ASCII; a non-ASCII character there renders wrong in a first-run reader's Notepad", readmeEN, i, string([]rune(en.Body[i:])[0]))
 	}

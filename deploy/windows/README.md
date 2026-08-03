@@ -203,9 +203,20 @@ version is not something this repository pins.
 
 An ordinary Go test in this directory, on the `clients/fyne/manifest_test.go`
 model: it reads non-Go build artifacts, on every platform, and needs neither
-Inno Setup nor Windows. That matters more here than usual — **nothing in this
-development environment can compile `bacchus.iss` or run `build-bundle.ps1`**,
-so the alternative to a static check is no check until a release.
+Inno Setup nor Windows.
+
+**The compile is not this check, and could not be.** `release.yml`'s
+`windows-bundle` job does build both artifacts — `iscc` included — on every
+pull request that touches `deploy/windows/**`, which is a real check and
+catches a syntax error or an `.isl` that is not there. It catches none of what
+this test is about: Inno compiles a `{cm:}` key defined for one language and
+missing for the other perfectly cleanly, which is the entire premise. An
+unprefixed entry, a `%1` dropped in translation, a `russian.` message holding
+English, a README section that exists in one language only — every one of those
+produces a successful compile and a working installer that is wrong on
+somebody's screen. The Go test also covers two cases the Windows job
+structurally cannot: a push straight to `main` (`release.yml` has no branch
+push trigger) and a contributor with no Windows at all.
 
 It fails, symmetrically and by name, when:
 
@@ -354,11 +365,14 @@ the version stamp — exist in exactly one place.
   `i18n_test.go`. Everything but the translation itself is checked. The point of
   that last one is that nobody here can compile the installer, so an `.isl` name
   taken on trust fails during a release rather than in CI.
-* **A compiled installer, or any evidence about one.** There is no Inno Setup
-  compiler, no PowerShell and no Windows machine in this development
-  environment, so neither `bacchus.iss` nor `build-bundle.ps1` has ever been
-  executed here. `i18n_test.go` is a static check on their text and is not a
-  substitute for either. What still needs a real machine: that the wizard
-  renders in the chosen language; that the uninstall prompt resolves
-  `CustomMessage` in the language the install ran in; that
-  `README.ru.txt` opens as Russian in Notepad from the extracted zip.
+* **A wizard anybody has looked at.** `release.yml`'s `windows-bundle` job
+  *builds* both artifacts on every pull request touching this directory, so
+  `build-bundle.ps1` runs for real and `iscc` compiles `bacchus.iss` for real —
+  but nothing runs the installer. What still needs a person at a Windows
+  machine: that the Select Language dialog appears and the wizard renders in
+  Russian; that the uninstall prompt resolves its custom messages in the
+  language the *install* ran in (Inno records the chosen language with the
+  uninstall data, and a missing key raises rather than falling back, so this
+  fails loudly if it fails); and that `README.ru.txt` opens as Russian in
+  Notepad out of the extracted zip. These sit alongside the `%APPDATA%`
+  question above.
