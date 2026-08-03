@@ -4,16 +4,19 @@ What ships to a Windows user, and how it is built. The Linux equivalent is
 [`deploy/install.sh`](../install.sh); this is deliberately not that script's
 Windows port, because Windows does not want one — see "Two artifacts" below.
 
-> `README.txt` in this directory is not documentation *about* the bundle. It is
-> the file that **ships inside** the bundle and is the first thing a user reads.
-> `build-bundle.ps1` substitutes `{{VERSION}}`/`{{WINTUN_VERSION}}` into it,
-> converts it to CRLF, and refuses to ship it if it is not pure ASCII.
+> `README.en.txt` and `README.ru.txt` in this directory are not documentation
+> *about* the bundle. They are the files that **ship inside** it and are the
+> first thing a user reads. `build-bundle.ps1` substitutes
+> `{{VERSION}}`/`{{WINTUN_VERSION}}` into both, converts both to CRLF, and
+> refuses to ship either if its characters are outside the set its language
+> uses.
 
 | File | What it is |
 |---|---|
 | `build-bundle.ps1` | Builds both artifacts. The whole packaging step. |
 | `bacchus.iss` | Inno Setup 6 script for the installer. |
-| `README.txt` | Ships inside both artifacts. |
+| `README.en.txt`, `README.ru.txt` | Ship inside both artifacts. |
+| `i18n_test.go` | Fails when the two languages disagree — see "Two languages" below. |
 | `.github/workflows/release.yml` | When the above runs, and what happens to the result. |
 
 ## Two artifacts, and the zip is the primary one
@@ -39,11 +42,12 @@ bacchus-fyne-<version>-windows-amd64/
     LICENSE.txt             this program's, AGPL-3.0
     LICENSE.wintun.txt      wintun's, which is a different licence
     bacchus-fyne.config.json
-    README.txt
+    README.en.txt
+    README.ru.txt
 ```
 
-Six files, flat, one directory. `build-bundle.ps1` asserts the set twice — once
-on the staging directory and again by reading the finished zip back — so
+Seven files, flat, one directory. `build-bundle.ps1` asserts the set twice —
+once on the staging directory and again by reading the finished zip back — so
 changing it fails the build rather than silently changing what other work
 depends on. The installer places the same set in `{app}`, minus the config,
 which goes elsewhere for the reason below.
@@ -54,7 +58,11 @@ the work; a link is a pointer, not that copy. It is deliberately not wired to
 Inno's `LicenseFile=`, which would make the user click "I accept" — the AGPL is
 not an agreement acceptance is conditioned on, and gating on it would
 misrepresent it. wintun's licence is copied out of its archive byte for byte;
-this one is converted to CRLF like `README.txt`, because it is ours.
+this one is converted to CRLF like the READMEs, because it is ours.
+
+Neither licence is translated, and that is not an omission. A licence is
+translated by whoever stewards it or not at all; a translation made here would
+be a text nobody has agreed to. Both READMEs say so in their last paragraph.
 
 ### They seed the config in opposite places, on purpose
 
@@ -144,6 +152,104 @@ That is the trade to weigh if the hardware run shows the per-user path is worse
 than it looks. Do not implement both — two config files is the state
 `configPaths` permanently shadows one of, which is worse than either.
 
+## Two languages, and the check that keeps them in step
+
+Russian and English, both first-class, from the installer's first screen
+onward. Not Russian with an English fallback and not the reverse: a message
+present in one language and missing in the other is the defect, whichever way
+round it is.
+
+This is an inconsistency being closed rather than a new policy.
+`clients/fyne/translations_test.go` already **fails the build** when a `lang.L`
+key has no Russian, and gives the reason: an untranslated label renders as
+English, compiles, vets, passes every other test, and ships, and the only
+signal is a Russian-speaking user reading an English sentence — which is
+exactly the audience this client is for. Everything the same user read *before*
+the app opened was English with nothing checking it.
+
+**The wizard.** `bacchus.iss` declares both languages, and Inno shows a
+language dialog before the first page. `ShowLanguageDialog=yes` is set
+explicitly even though it is the default, because with two languages it stops
+being a default: `auto` would pick by the machine's UI language and show
+nothing, and there is no language switch anywhere else in the wizard, so the
+user it gets wrong — a Russian speaker on an English-locale Windows — would
+have no way back. `/LANG=russian` still suppresses it for a silent install.
+
+**The README ships twice, once per language, rather than once bilingually.**
+The bundle is one flat folder, so both files are in front of a reader at the
+same moment and the name is the chooser. A single file would have to put one
+language above the other, and whichever went second is the one a reader scrolls
+past. Two files also keep `README.en.txt` inside ASCII — `README.ru.txt` cannot
+be, so the guarantee is available for one of them and is worth keeping there.
+Each names the other, so a reader who opened the wrong one is one line away.
+
+**Encoding differs between them, and has to.** `README.en.txt` is staged as
+UTF-8 with **no** BOM, because a file that can stay inside ASCII should:
+without a BOM a stray smart quote renders wrong somewhere, and with one the
+file opens with visible junk in an editor that does not expect it.
+`README.ru.txt` is staged as UTF-8 **with** a BOM, because Notepad before
+Windows 10 1903 does not detect BOM-less UTF-8 and renders the whole file in
+the ANSI codepage — for Cyrillic that is total, and against it a leading marker
+costs nothing.
+
+**`bacchus.iss` itself is UTF-8 with a BOM**, and must stay that way while it
+holds any non-ASCII character. Inno Setup only stopped requiring one in 6.3;
+on 6.0–6.2 a BOM-less script is read in the *build machine's* ANSI codepage, so
+the Russian messages ship as mojibake with no error at any stage.
+`build-bundle.ps1` accepts any "Inno Setup 6" it locates, so the compiler
+version is not something this repository pins.
+
+### `i18n_test.go`
+
+An ordinary Go test in this directory, on the `clients/fyne/manifest_test.go`
+model: it reads non-Go build artifacts, on every platform, and needs neither
+Inno Setup nor Windows. That matters more here than usual — **nothing in this
+development environment can compile `bacchus.iss` or run `build-bundle.ps1`**,
+so the alternative to a static check is no check until a release.
+
+It fails, symmetrically and by name, when:
+
+* `[Languages]` loses either language, or names an `.isl` outside the allowlist
+  of pairs this project has actually confirmed ship with Inno Setup;
+* a `[CustomMessages]` key exists for one language and not the other, **in
+  either direction**, or carries no language prefix at all (an unprefixed entry
+  applies to every language, which is one language's sentence shown to the
+  other's reader);
+* the two languages' versions of a message use different `%1`–`%9` arguments —
+  the translation that drops one silently loses the value it was written
+  around;
+* a `{cm:}` reference resolves to neither a local key nor a stock `.isl`
+  message, or a translated pair is referenced by nothing;
+* a `russian.` message holds no Cyrillic, or an `english.` one holds some;
+* the two READMEs have different numbered sections, or a Russian section holds
+  no Cyrillic (the English one copied across);
+* a README uses a `{{PLACEHOLDER}}` that `build-bundle.ps1` does not
+  substitute, or one language uses a placeholder the other does not;
+* a README exists here but is missing from `$BundleFiles` or from the
+  installer's `[Files]`;
+* `bacchus.iss` holds non-ASCII without a BOM, or any file holds a character
+  outside ASCII, Cyrillic, the guillemets and the em dash.
+
+Its limit is worth stating: **the section is the smallest unit it can key
+prose by.** No mechanical check can tell that a paragraph inside a translated
+section was left untranslated, any more than `translations_test.go` can tell
+that a Russian string says the right thing. Presence is a mechanical fact and
+belongs in a test; quality is a review question.
+
+The READMEs are written in the shape that makes this possible: sections are
+numbered, upper-case headings at column zero, and cross-references say "see
+section 3" rather than naming a heading that does not survive translation. A
+line that looks like a heading but is not upper-case is **refused** rather than
+ignored, because ignoring it would be a section the parity check cannot see.
+
+### What is not translated
+
+The AGPL, wintun's licence, and the name "Bacchus". Licences are translated by
+their stewards or not at all. The brand is treated as a brand everywhere else
+in this project, including in the existing Russian strings under
+`clients/fyne/translations/`, which are also the register and vocabulary the
+Russian README is written to match.
+
 ## wintun
 
 The bundle **carries** `wintun.dll` and its licence. It is never fetched at
@@ -174,7 +280,7 @@ build instead of shipping.
 **From the git tag, and from nothing else.** `release.yml` derives two values:
 
 * the **display** version (`1.0.0`, `1.0.0-rc1`) — file names, the
-  Programs-and-Features entry, the shipped `README.txt`;
+  Programs-and-Features entry, both shipped READMEs;
 * the bare **`MAJOR.MINOR.PATCH`**, stamped into the binary through
   `-ldflags -X …core/version.current` (ADR-0052 §5).
 
@@ -232,17 +338,27 @@ the version stamp — exist in exactly one place.
 
 * **Signing.** `bacchus-vpn/bacchus#38` is deferred to the end of 1.0 by ruling.
   Both artifacts are unsigned and both raise SmartScreen's "Windows protected
-  your PC"; `README.txt` tells the user so in as many words. ADR-0052 §6 also
+  your PC"; both READMEs tell the user so in as many words. ADR-0052 §6 also
   requires that the update signing key never sit on a build machine, so signing
   will not become a step in this pipeline even once `#38` lands — it is a
   deliberate act performed afterwards on the artifacts CI produced.
 * **winget**, ruled out for now as a consequence: it needs a signed installer,
   and its manifest repository is Microsoft-hosted and therefore pullable, which
   is the wrong property for this product's distribution model.
-* **A localised installer and `README.txt`.** Both are English only, in a
-  product whose UI is Russian-first. Inno Setup ships a Russian message file, so
-  the wizard is cheap; the user-facing text is a translation decision rather than
-  a packaging one.
 * **Anything but `amd64`.** No 32-bit and no ARM64 build: CI builds neither, and
   the bundle carries only the amd64 DLL. `bacchus.iss` refuses to install on
   anything else rather than placing a DLL the loader cannot use.
+* **Any third language.** Adding one means an entry in `[Languages]`, a matching
+  `[CustomMessages]` pair, a third README, an entry in `$BundleFiles`, an
+  `[Files]` line, and a deliberate addition to `vouchedLanguages` in
+  `i18n_test.go`. Everything but the translation itself is checked. The point of
+  that last one is that nobody here can compile the installer, so an `.isl` name
+  taken on trust fails during a release rather than in CI.
+* **A compiled installer, or any evidence about one.** There is no Inno Setup
+  compiler, no PowerShell and no Windows machine in this development
+  environment, so neither `bacchus.iss` nor `build-bundle.ps1` has ever been
+  executed here. `i18n_test.go` is a static check on their text and is not a
+  substitute for either. What still needs a real machine: that the wizard
+  renders in the chosen language; that the uninstall prompt resolves
+  `CustomMessage` in the language the install ran in; that
+  `README.ru.txt` opens as Russian in Notepad from the extracted zip.

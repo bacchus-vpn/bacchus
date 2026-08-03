@@ -246,6 +246,68 @@ one to build it on.
   every reason to be suspicious of a download that the operating system says it
   does not trust.
 
+> **Update (2026-08-03):** the distribution surface speaks Russian and English,
+> both first-class, and something fails when it stops doing so (#145).
+>
+> This record decided *what the artifact contains* and never asked what language
+> it contains it in. The answer it shipped with was English: `[Languages]` in
+> `bacchus.iss` held one entry, every wizard page and the uninstall prompt were
+> English, and so was the whole of `README.txt`. That is an inconsistency rather
+> than a policy — `clients/fyne/translations_test.go` **fails the build** when a
+> `lang.L` key has no Russian, and says why in its own header: an untranslated
+> label renders as English, compiles, vets, passes every other test, and ships,
+> and the only signal is a Russian-speaking user reading an English sentence,
+> *which is exactly the audience this client is for*. Everything that user read
+> **before** the app opened had no such discipline.
+>
+> **Ruled (owner, 2026-08-03): two languages from the start, Russian and
+> English, both first-class.** Not Russian with an English fallback and not the
+> reverse. A message present in one and missing in the other is the defect
+> whichever way round it is, so the check is symmetric.
+>
+> Three things follow, and the third is the one with teeth:
+>
+> - **The installer declares both.** Inno Setup ships `Russian.isl`, and
+>   `ShowLanguageDialog` stays at `yes`: `auto` picks by the machine's UI
+>   language and shows nothing, and there is no language switch anywhere else
+>   in the wizard, so the user it gets wrong has no way back.
+> - **§4's bundle layout changes for the first time.** It is now **seven**
+>   files, not six: `README.txt` becomes `README.en.txt` and `README.ru.txt`.
+>   Two files rather than one bilingual file, because the bundle is one flat
+>   folder — both are in front of a reader at once and the name is the chooser,
+>   where a single file would have to put one language above the other and
+>   whichever went second is the one a reader scrolls past. It also keeps the
+>   English copy inside ASCII, which is a guarantee the packaging script can
+>   make about it and cannot make about a file carrying Cyrillic.
+> - **The enforcement, which is the point.** `deploy/windows/i18n_test.go` is
+>   an ordinary Go test on the `manifest_test.go` model — it reads non-Go build
+>   artifacts on every platform and needs neither Inno Setup nor Windows. It
+>   fails, by name and in both directions, on a `{cm:}` key present for one
+>   language and absent for the other, an unprefixed `[CustomMessages]` entry
+>   (which silently applies to all languages), a `%1`–`%9` argument dropped in
+>   translation, a `russian.` message with no Cyrillic in it, a section present
+>   in one README and not the other, a `{{PLACEHOLDER}}` the build script does
+>   not substitute, and a README missing from either artifact's file list. Its
+>   granularity for prose is the section and not the sentence, which is the same
+>   line `translations_test.go` draws: presence is a mechanical fact and belongs
+>   in a test, quality is a review question.
+>
+> **§5 is untouched and so is the AGPL's place in this record.** The licences
+> are *not* translated — translated by their stewards or not at all — and
+> `LICENSE.txt` remains deliberately unwired from `LicenseFile=`, because that
+> page conditions the install on clicking "I accept" and the AGPL is not an
+> agreement acceptance is conditioned on. "Bacchus" stays untranslated as a
+> brand, as it is everywhere else including `clients/fyne/translations/`.
+>
+> **Not verified on hardware, and it cannot be here.** There is no Inno Setup
+> compiler, no PowerShell and no Windows machine in this development
+> environment, so neither `bacchus.iss` nor `build-bundle.ps1` has been
+> executed. The static check is a check on their text. What a real machine still
+> owes: that the wizard renders Russian, that the uninstall prompt resolves its
+> custom messages in the language the *install* ran in, and that
+> `README.ru.txt` opens as Russian in Notepad out of the extracted zip. Listed
+> with the other hardware items in `deploy/windows/README.md`.
+
 ## Scope: what this record does not decide
 
 - **The artifacts themselves.** No zip is built, no installer is chosen, no
