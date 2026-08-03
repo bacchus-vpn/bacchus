@@ -738,6 +738,13 @@ assertion, arrived at from a different direction, and it has the same fix: a fir
 **inside** `release.yml` that the bundle job `needs:`. The shape was already proven in
 this repository, in both directions, before this card reused it.
 
+> **Update (2026-08-03):** the tag-spelling half of this section is closed. `ci.yml` now
+> triggers on `release.yml`'s own list — `['v[0-9]*', '[0-9]*']` — so a tag pushed as
+> `1.0.0` starts the test suite as well as the release, and the two lists are documented
+> as having to agree (#156). The ordering point is untouched and is the reason the gate
+> stayed inside `release.yml`: CI still runs *beside* a release rather than before it,
+> which is #151.
+
 ### 2. Two bars on one quantity, and why the release one is tighter
 
 `tableMaxAge` is 90 days and is the floor under *any* build. It is not wrong; it is

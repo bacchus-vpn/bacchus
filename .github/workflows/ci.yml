@@ -8,7 +8,15 @@ on:
     # file agree. Running the rest of CI on a tag as well is a deliberate
     # side effect and not an accident — a tag is the one commit where a red
     # build is most expensive to discover later.
-    tags: ['v*']
+    #
+    # BOTH SPELLINGS, AND THIS LIST IS release.yml's LIST (issue #156). That
+    # workflow accepts a tag with or without a leading v and derives the version
+    # from whichever arrives, rather than legislating one. This one used to
+    # accept only 'v*', so a tag pushed as 1.0.0 started the release and started
+    # no CI at all — not in parallel, not at all — and the draft release was
+    # built and published from a tree whose test suite had run at no point in
+    # that push. The two lists have to agree; change one, change the other.
+    tags: ['v[0-9]*', '[0-9]*']
   pull_request:
 
 jobs:
