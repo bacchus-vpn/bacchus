@@ -1,0 +1,409 @@
+name: release
+
+# The Windows release artifacts (bacchus-vpn/bacchus#136): a portable zip and
+# an installer, built from one staging directory by
+# deploy/windows/build-bundle.ps1. That script owns the packaging; this file
+# owns when it runs, what version it is told to build, and what happens to the
+# result. Keeping the packaging in a script is deliberate - see its header.
+#
+# READ THIS BEFORE TRUSTING A GREEN RUN OF THIS FILE.
+#
+# A tag-triggered workflow cannot be exercised by any run on a branch. Nothing
+# on a pull request can prove that the publish half works, because the publish
+# half only ever runs on a tag push, and its first execution will therefore be
+# during a real release. Two things are done about that here:
+#
+#   - the build half runs on pull requests that touch it, and on manual
+#     dispatch, so the part with all the moving pieces (toolchain, the wintun
+#     download and its hash, the Inno Setup compile, the layout assertions) is
+#     rehearsed for real before any tag exists;
+#   - the publish half is small, sits in its own job, and creates the release
+#     as a DRAFT, so the first real execution of the untested path is
+#     recoverable rather than public.
+#
+# Removing --draft is a one-line change to make once a release has gone
+# through this end to end. Do not remove it before that.
+#
+# The order of the three jobs is the load-bearing part of the file:
+#
+#   verify-version  ->  windows-bundle  ->  publish
+#
+# so a refusal at the first one happens BEFORE the build. Nothing is compiled,
+# no artifact is uploaded, and no release object is created, not even a draft.
+# That is the difference between "the draft was created and then a check went
+# red" and "nothing was created", and it is why the version gate is a job here
+# rather than a step somewhere later.
+
+on:
+  push:
+    tags:
+      # Both spellings: the tag may or may not carry a leading v, and this
+      # workflow derives the version from whichever form arrives rather than
+      # legislating one here.
+      - 'v[0-9]*'
+      - '[0-9]*'
+  # A dry run from any branch: builds and uploads both artifacts as workflow
+  # artifacts and publishes nothing. This is the only way to exercise the
+  # packaging without cutting a tag.
+  workflow_dispatch:
+  # Same dry run, automatically, for changes to the release path itself. Path
+  # filtered: every other pull request is ci.yml's business and this costs it
+  # nothing.
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'deploy/windows/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Never cancel: one of these runs can be an actual release.
+  cancel-in-progress: false
+
+jobs:
+  # The gate. Nothing else in this file runs until this passes.
+  #
+  # ci.yml asserts the same thing on a tag push, and that assertion is a
+  # BYSTANDER: two workflows triggered by one push start in parallel, and there
+  # is no native way to order them (needs: is intra-workflow, workflow_run is a
+  # different tool for a different problem). So its check can go red beside a
+  # bundle that has already been built and a release that has already been
+  # created. A check that cannot stop the thing it is checking gates nothing.
+  #
+  # Here it is a precondition instead, because windows-bundle needs: it and
+  # publish needs: windows-bundle. A refusal means nothing is built, no artifact
+  # exists, and no release object is created - not even a draft.
+  #
+  # This is NOT the same check as the version rule in windows-bundle below, and
+  # neither covers the other. That one validates the tag's SHAPE - that
+  # MAJOR.MINOR.PATCH can be read out of it at all, which is what
+  # core/version.current needs. This one validates that the tag EQUALS the
+  # version the repository claims. A tag v1.5.0 pushed while VERSION still says
+  # 1.0.0 passes the shape check cleanly, builds an internally consistent 1.5.0
+  # bundle, and publishes a release the repository does not know about.
+  #
+  # The duplication with ci.yml is deliberate and stays: its copy covers
+  # somebody tagging without cutting a release, which this file never sees.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: the tag must be the version this repository claims
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # A missing VERSION is a failure, never "nothing to check". The whole
+          # point of this job is to be the thing that cannot be skipped, and a
+          # gate that opens when its input disappears is not a gate.
+          if [ ! -f VERSION ]; then
+            echo "::error::VERSION is missing from the repository root. This job compares"
+            echo "::error::the release tag against it and refuses to guess when it is absent."
+            exit 1
+          fi
+
+          version="$(tr -d '[:space:]' < VERSION)"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::VERSION reads '$version', which is not MAJOR.MINOR.PATCH."
+            echo "::error::core/version.Parse takes exactly three numeric components and"
+            echo "::error::core/version.Current() panics on anything else."
+            exit 1
+          fi
+
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "VERSION is $version and well formed. Not a tag run, so there is no tag to compare it with."
+            exit 0
+          fi
+
+          # One leading v is tolerated on the tag and nothing else is: the
+          # comparison is exact against a file that is bare MAJOR.MINOR.PATCH.
+          #
+          # A consequence worth knowing rather than discovering: while VERSION
+          # is bare, a pre-release tag (v1.0.0-rc1) cannot pass this, so the
+          # --prerelease path in publish is presently unreachable. That is the
+          # two checks agreeing rather than an oversight - ci.yml's copy would
+          # refuse the same tag - and it is what to revisit if release
+          # candidates are ever wanted.
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} is not the version this repository claims."
+            echo "::error::VERSION says $version. Nothing was built and no release was created."
+            echo "::error::Either the tag is wrong, or VERSION was not bumped in the commit it points at."
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches VERSION ($version)"
+
+  windows-bundle:
+    needs: verify-version
+    runs-on: windows-latest
+    # Read by the publish job below. A job's steps' outputs are not visible to
+    # another job unless they are re-exported here.
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    env:
+      # Pinned, not inherited. clients/fyne is the only package in this repo
+      # that needs a C toolchain (Fyne's desktop driver renders through OpenGL
+      # via cgo - ADR-0039), and CGO_ENABLED=0 does not announce itself as a
+      # missing compiler: go-gl's files drop out on a build constraint and the
+      # error names a package no reader connects to the cause.
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      # go.mod rather than `stable`, which is what ci.yml uses. The difference
+      # is deliberate: ci.yml asks "does this still build on the current Go",
+      # and a release asks "build it with the toolchain this repo declares".
+      # ADR-0052 section 5 wants a pinned toolchain version for the release
+      # build for the same reason.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # Same find-or-install as ci.yml's windows-fyne-client job, for the same
+      # reason it gives: these runner images move mingw between releases and
+      # the image is not something this repo pins. As of 2026-08-02
+      # windows-latest ships one on PATH already.
+      - name: ensure a mingw-w64 gcc
+        shell: pwsh
+        run: |
+          if (Get-Command gcc -ErrorAction SilentlyContinue) {
+            "gcc already on PATH: $((Get-Command gcc).Source)"
+            exit 0
+          }
+          $dirs = @(
+            "C:\msys64\mingw64\bin",
+            "C:\ProgramData\mingw64\mingw64\bin",
+            "C:\mingw64\bin"
+          )
+          $dir = $dirs | Where-Object { Test-Path (Join-Path $_ "gcc.exe") } | Select-Object -First 1
+          if ($dir) {
+            "preinstalled toolchain at $dir"
+            Add-Content -Path $env:GITHUB_PATH -Value $dir
+            exit 0
+          }
+          "no preinstalled mingw-w64 on this image; installing one"
+          choco install mingw --no-progress --yes
+
+      - name: confirm the toolchain
+        shell: pwsh
+        run: |
+          gcc --version
+          if ($LASTEXITCODE -ne 0) { throw "no working mingw-w64 gcc on PATH - see the step above" }
+          $cgo = go env CGO_ENABLED
+          if ($cgo -ne "1") { throw "CGO_ENABLED=$cgo - a release built at 0 would not link the GL stack" }
+          "CGO_ENABLED=$cgo CC=$(go env CC) go=$(go version)"
+
+      # windows-latest has shipped Inno Setup for years, but that is an image
+      # detail nobody here controls, and its disappearance should cost one step
+      # rather than a red release nobody can read.
+      - name: ensure Inno Setup
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          if (Get-Command iscc -ErrorAction SilentlyContinue) {
+            "iscc already on PATH: $((Get-Command iscc).Source)"
+            exit 0
+          }
+          $found = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if ($found) {
+            "preinstalled Inno Setup at $found"
+            Add-Content -Path $env:GITHUB_PATH -Value (Split-Path -Parent $found)
+            exit 0
+          }
+          "no preinstalled Inno Setup on this image; installing one"
+          choco install innosetup --no-progress --yes
+          $found = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+          if (-not $found) { throw "Inno Setup still not found after installing it" }
+          Add-Content -Path $env:GITHUB_PATH -Value (Split-Path -Parent $found)
+
+      # The version comes from the git TAG and from nothing else. Not from a
+      # file in the tree: a release is the tag, and a file that disagrees with
+      # it is a second source of truth to keep in step.
+      #
+      # Two values fall out, and they are not the same value:
+      #
+      #   version - the display form, used in file names and in the installer's
+      #             Programs-and-Features entry. May carry a pre-release
+      #             suffix (1.0.0-rc1).
+      #   semver  - the bare MAJOR.MINOR.PATCH stamped into the binary through
+      #             core/version.current. core/version.Parse takes exactly
+      #             three numeric components and Current() PANICS on anything
+      #             else, so a tag this cannot read must fail the release here,
+      #             loudly, rather than produce a client that dies at its first
+      #             connect.
+      - name: derive the version from the tag
+        id: version
+        shell: pwsh
+        run: |
+          function Get-ReleaseVersion {
+            param([Parameter(Mandatory)] [string] $Tag)
+            $version = $Tag -replace '^v', ''
+            # Anchored at both ends of the numeric head: "1.2.3" or a
+            # pre-release "1.2.3-rc1", and nothing else. Semver build metadata
+            # ("1.2.3+ci") is deliberately rejected rather than mangled - it is
+            # not usable in the file names these artifacts get.
+            $m = [regex]::Match($version, '^(\d+\.\d+\.\d+)($|-)')
+            if (-not $m.Success) {
+              throw "tag '$Tag' is not MAJOR.MINOR.PATCH[-prerelease]; core/version cannot be stamped from it"
+            }
+            $semver = $m.Groups[1].Value
+            [pscustomobject]@{ Version = $version; SemVer = $semver; Prerelease = ($version -ne $semver) }
+          }
+
+          # The tag path above cannot be reached by any run on a branch, so it
+          # is exercised here instead, on every run including the dry ones.
+          # This is the only release-only logic in this file with a wrong answer
+          # that is not obviously wrong: a mis-stamped core/version does not
+          # fail the build, it ships a client that panics at its first connect
+          # or lies to the coordinator about which release it is.
+          $cases = @(
+            @{ Tag = 'v1.2.3';     Version = '1.2.3';     SemVer = '1.2.3';    Prerelease = $false },
+            @{ Tag = '1.2.3';      Version = '1.2.3';     SemVer = '1.2.3';    Prerelease = $false },
+            @{ Tag = 'v1.0.0-rc1'; Version = '1.0.0-rc1'; SemVer = '1.0.0';    Prerelease = $true  },
+            @{ Tag = 'v10.20.30';  Version = '10.20.30';  SemVer = '10.20.30'; Prerelease = $false }
+          )
+          foreach ($c in $cases) {
+            $r = Get-ReleaseVersion -Tag $c.Tag
+            if ($r.Version -ne $c.Version -or $r.SemVer -ne $c.SemVer -or $r.Prerelease -ne $c.Prerelease) {
+              throw "tag '$($c.Tag)' read as $($r.Version)/$($r.SemVer)/$($r.Prerelease), wanted $($c.Version)/$($c.SemVer)/$($c.Prerelease)"
+            }
+          }
+          foreach ($bad in @('nightly', 'v1.2', 'v1.2.3.4', 'release-1.0.0', '1.2.3+ci')) {
+            $rejected = $false
+            try { Get-ReleaseVersion -Tag $bad | Out-Null } catch { $rejected = $true }
+            if (-not $rejected) { throw "the version rule accepted '$bad', which core/version cannot be stamped from" }
+          }
+          "version rule checked against $($cases.Count) tags it must accept and 5 it must reject"
+
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $r = Get-ReleaseVersion -Tag $env:GITHUB_REF_NAME
+            $version = $r.Version
+            $semver = $r.SemVer
+            $prerelease = if ($r.Prerelease) { 'true' } else { 'false' }
+          } else {
+            # A dry run. Nothing is published, so the number only has to be
+            # legible and valid; 0.0.0 parses, which keeps the stamping path
+            # itself exercised rather than skipped.
+            $version = "0.0.0-dev.$($env:GITHUB_SHA.Substring(0,7))"
+            $semver = '0.0.0'
+            $prerelease = 'true'
+          }
+          # Tee rather than a bare redirect: the values end up in the job log
+          # too, which is where anyone reading a release run looks first.
+          "version=$version"       | Tee-Object -FilePath $env:GITHUB_OUTPUT -Append
+          "semver=$semver"         | Tee-Object -FilePath $env:GITHUB_OUTPUT -Append
+          "prerelease=$prerelease" | Tee-Object -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: build the zip and the installer
+        shell: pwsh
+        run: |
+          ./deploy/windows/build-bundle.ps1 `
+            -Version '${{ steps.version.outputs.version }}' `
+            -SemVer '${{ steps.version.outputs.semver }}' `
+            -OutDir dist
+
+      # What the release actually contains, in the log, so a run is answerable
+      # from its own output.
+      - name: what was produced
+        shell: pwsh
+        run: |
+          Get-ChildItem dist -File | Format-Table Name, Length -AutoSize
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: upload the artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-bundle
+          # The staging and download directories under dist/ are inputs, not
+          # outputs; only the three published files go up.
+          path: |
+            dist/*.zip
+            dist/*.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  publish:
+    needs: windows-bundle
+    # Only a tag PUSH publishes. A manual dispatch is always a dry run, even
+    # when dispatched from a tag, because "I wanted to see if it builds" must
+    # not be able to mint a release.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      # The only privileged step in this file, in the only job that needs it.
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.windows-bundle.outputs.version }}
+      PRERELEASE: ${{ needs.windows-bundle.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: windows-bundle
+          path: dist
+
+      - name: write the release notes
+        run: |
+          cat > notes.md <<'EOF'
+          Bacchus for Windows. Two artifacts, one build:
+
+          - **`.zip` - portable, and the one to reach for first.** Unzip it
+            anywhere and run `bacchus-fyne.exe` as Administrator. Nothing is
+            installed, nothing is registered, and there is nothing to
+            uninstall - delete the folder and it is gone. It runs from a USB
+            stick. `README.txt` inside it is the first thing to read.
+          - **`-setup-...exe` - the installer**, for a Start menu entry, an
+            uninstaller and a normal-looking install.
+
+          Both carry `wintun.dll` (the tunnel driver, redistributed unmodified
+          from wintun.net) beside the client, so nothing has to be fetched from
+          a third-party host to make a connection work.
+
+          **Both are unsigned**, so Windows shows "Windows protected your PC" -
+          choose More info, then Run anyway. Code signing is tracked separately
+          and is not done yet.
+
+          Check what you downloaded against `SHA256SUMS.txt`, ideally obtained
+          by a different route than the files:
+
+          ```
+          Get-FileHash .\<file> -Algorithm SHA256
+          ```
+          EOF
+          cat notes.md
+
+      # gh rather than a third-party action: it is preinstalled on the runner,
+      # and the one job in this file that can write to the repository should
+      # depend on as little as possible.
+      #
+      # DRAFT on purpose. This job's first real execution is a real release -
+      # no run on a branch can reach it - so it lands somewhere a human looks
+      # at it before anyone can download it. It is also the shape ADR-0052
+      # section 6 asks for: signing is a deliberate act performed on artifacts
+      # CI produced, never a step inside the pipeline that produced them, and a
+      # draft is exactly where artifacts wait for that act.
+      #
+      # If this fails because the release already exists (a re-run), delete the
+      # draft and run it again rather than reaching for --clobber here.
+      - name: create the draft release
+        run: |
+          set -euo pipefail
+          flags=(--draft --verify-tag)
+          # Through the environment, not interpolated into the script: nothing
+          # here should be able to become shell just because a value changed.
+          if [ "$PRERELEASE" = "true" ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            "${flags[@]}" \
+            --title "Bacchus $VERSION for Windows" \
+            --notes-file notes.md \
+            dist/*.zip dist/*.exe dist/SHA256SUMS.txt
+          echo "draft release created for $GITHUB_REF_NAME - review it and publish by hand"
