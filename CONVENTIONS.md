@@ -40,3 +40,9 @@
   why the form matters. Do not renumber a retired reference in an existing record — most
   have no current equivalent, and `#76 §9-N` survives as a label in live issue titles.
   See [docs/adr/README.md](docs/adr/README.md).
+- **In a Go comment the same reference is plain: `old #157`, no code span.** The span in
+  the rule above does one job — defeat GitHub's autolinker on rendered markdown. Go
+  source is not rendered as markdown and nothing in it autolinks, so backticks there
+  defeat nothing and only make the comment harder to read. (It carries a span *here*
+  because markdown quotes a code sample that way, which is a different job.) Markdown
+  gets the span; code gets the words.
