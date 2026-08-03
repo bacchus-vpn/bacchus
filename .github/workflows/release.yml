@@ -473,7 +473,8 @@ jobs:
             anywhere and run `bacchus-fyne.exe` as Administrator. Nothing is
             installed, nothing is registered, and there is nothing to
             uninstall - delete the folder and it is gone. It runs from a USB
-            stick. `README.txt` inside it is the first thing to read.
+            stick. `README.en.txt` / `README.ru.txt` inside it are the first
+            thing to read.
           - **`-setup-...exe` - the installer**, for a Start menu entry, an
             uninstaller and a normal-looking install.
 
