@@ -1,6 +1,6 @@
 # 42. Country-only exit assignment, with a coordinator-derived country and country-granularity backpressure
 
-- Status: accepted (issues #136, #146, #147); amended 2026-07-28 (issues #1, #2, #3 — see the amendment at the end)
+- Status: accepted (issues #136, #146, #147); amended 2026-07-28 (issues #1, #2, #3 — see the amendment at the end); §8 updated 2026-08-03 (issue #113 — see the dated blockquote there)
 - Date: 2026-07-25
 
 ## Context
@@ -417,6 +417,126 @@ packet finally left from. An operator who places their whole apparatus behind on
 address can still egress elsewhere. Country is a strong signal about where a node sits.
 It is not a proof about where its traffic leaves, and `deploy/README.md` says so in the
 same words.
+
+> **Update (2026-08-03):** the country the node claims is no longer thrown away, and an
+> admin can correct the one this coordinator derives (issue #113, owner ruling B).
+>
+> §8 above resolves a country and returns it. It also computes a *second* answer on the
+> way and discards it — `deriveCountry` had the node's own `-country` tag canonicalized
+> in hand at the moment it returned the observed one — so from the instant a node
+> registered, nothing anywhere could tell there had ever been two. Staging the country
+> database on a real fleet for the first time is what made that visible: restarting with
+> a database flipped **two exits out of three**, same nodes, same addresses, same
+> registrations. The operator knew where those machines were, because they rented them.
+>
+> **Both claims are now carried, and they answer different questions.** The derived
+> country answers *"what will every destination site conclude about a user egressing
+> here"*, which is a property of the ADDRESS. The declared one answers *"which building
+> does the traffic physically leave from"*, which is a property of the MACHINE and which
+> only its operator knows. `coldstart.Entry.DeclaredCountry` carries the second beside
+> the first, `omitempty`, in the pattern `Ingress` and `Operator` already use — so a
+> pre-change snapshot is byte-identical on the wire and `SnapshotVersion` does not move.
+> Nothing in this repository selects, filters, groups or displays on it, and nothing
+> should: a user who picks DE picks it to **be treated as** German by every site, and an
+> address that resolves US is treated as US regardless of which building it sits in.
+>
+> It is carried under `-geoip-required` too, where it is precisely *not* the country.
+> That flag's promise is that no node self-report reaches a client's country CHOICE, and
+> a labelled claim that is never `Country` is not that choice — such an entry ships with
+> `Country` empty and the declaration beside it, which is the honest shape of "the node
+> says DE and this coordinator will not confirm it". It is also **not elided when it
+> agrees**: collapsing *made no claim* into *made a claim that checks out* is the exact
+> bug the #2 amendment below closed for the advertised endpoint, and this field has the
+> same shape.
+>
+> **The disagreement is the ORDINARY case, and `CountryContradicted` must never learn
+> it.** That predicate is fail-closed — `core/relaychain` refuses a contradicted entry as
+> a terminating exit — and what it names is the coordinator's own *two observations*
+> disagreeing, both checkable. A node's declaration disagreeing with an observation is a
+> different animal: a large cloud provider's block is commonly registered to that
+> provider's home country whatever datacentre an instance runs in, so an instance in one
+> country resolving to another is normal rather than anomalous. Feeding it into the
+> fail-closed test would refuse most of a cloud fleet and stop a client chaining at all
+> against a coordinator behaving exactly as it always has — the same failure this record
+> already rejects for `hint`, one step further out. `Entry.DeclaredCountryDiffers()`
+> observes the difference and deliberately refuses nothing.
+>
+> **An admin can correct the derivation: `-country-overrides`.** A `{"nodeID":"CC"}` JSON
+> file in `-operators`' shape — coordinator-side truth, explicitly not a node self-report
+> — carrying its own provenance, `admin-override`, distinct from `observed` and `hint`
+> because an admin correction is neither: calling it observed would claim a resolution
+> that did not happen, and calling it a hint would credit the node with a statement it
+> never made. It replaces the derived country everywhere the derived country is used: the
+> country aggregate, assignment, and the signed directory.
+>
+> **It wins, including under `-geoip-required`.** That flag's promise is about NODE
+> self-reports, and an operator assertion is not one — it has the same standing
+> `operators` has. This is written into the flag's own text as well as here, because a
+> guarantee that narrows one quiet exception at a time ends up guaranteeing nothing, and
+> that already happened to this flag once (#2 below).
+>
+> **It is a correction to the DERIVED value, never a promotion of the DECLARED one.**
+> Legitimate: *"your GeoIP table is wrong — this address really does present as DE"*, an
+> assertion about the ADDRESS that an admin can check against what real sites conclude
+> and this coordinator cannot. Illegitimate: *"the machine is physically in DE even
+> though its address resolves US"* — that is the declared value, and promoting it
+> delivers exactly the misrouting this section exists to prevent, arriving from the
+> operator's side instead of the node's. Both are the same two letters at the moment of
+> editing, so the distinction is enforced by being **legible where the admin meets it**:
+> the flag text and the file's documented format, not only here.
+>
+> **What it costs, stated rather than papered over.** An override is terminal: the
+> derivation runs to completion and is then replaced wholesale, so for an exit the
+> signaling-vs-advertised-endpoint comparison is not re-run against the correction and
+> cannot demote it back to `observed-signaling-only`. Overriding a split-endpoint exit
+> therefore switches off the one label a chaining client fails closed on. An override
+> that *could* be demoted would not be an override, so the cost is paid and made visible
+> instead: the derivation is applied last precisely so the coordinator still knows what
+> it would have concluded, and it logs a WARNING naming the verdict a correction
+> displaced.
+>
+> **Hot-reloaded, which is against the nearest precedent and deliberately so.**
+> `-operators` is read once at startup, and that is right for what it holds: an
+> ownership assignment changes on a planned event around which a restart is nothing.
+> Ruling B has an admin edit this file **when prompted** — the coordinator surfaces a
+> country it could not agree on and somebody answers — so a correction behind a restart
+> is a correction that gets deferred, batched and eventually not made. The two revocation
+> files are the precedent for the other choice and the closer analogy besides: like a
+> revocation, this is an admin saying part of what the network currently believes is
+> wrong, and the interval between believing it and stopping is the whole point. A country
+> is re-derived on every heartbeat already, so an edit lands within about one reload plus
+> one heartbeat with no restart and no touch to the node. The risk hot reload adds — a
+> bad write changing what is published with nobody at a terminal — is bounded two ways: a
+> file with any unusable row is refused WHOLE (partial application produces a correction
+> that looks applied and is not, which is the failure #113 was found through), and a
+> refused reload keeps the corrections already in force. Note also that unlike a trust
+> anchor, a wrong value here cannot widen who may join the network; it can only mislabel
+> where a node is, which is visible, one edit from reversible, and already the thing the
+> admin was asked about.
+>
+> **The prompting is designed here and built elsewhere (#148).** This coordinator has no
+> admin surface at all — `net/http` appears once in `cmd/coordinator`, as a *client*
+> fetching the policy bundle — and giving it one would mean an authenticated
+> administrative listener on the binary whose attack surface this design keeps smallest,
+> to solve a presentation problem. The admin console is `bacchus-payment#20` `[F1]` and
+> is unbuilt. So the correcting half is local and per-coordinator today, and the open
+> question is how a central correction would reach a pool: it can ride the **signed
+> policy bundle** (ADR-0043), which every coordinator already fetches and verifies
+> against an offline root, or a **sibling signed document** on the same path. The bundle
+> carries floors, fences and reserves — network-wide numbers a coordinator cannot author
+> — where a per-node country map is *identity-scoped* data of a different kind: putting
+> it in the bundle grows every coordinator's policy fetch with the fleet's node count and
+> puts a country correction behind whatever ceremony a policy revision needs, while a
+> sibling document is a second delegation and a second fetch path to get right. Named,
+> not decided — it needs the owner.
+>
+> **What this does not settle**, and must not be settled by accident: which value is the
+> DEFAULT for selection (ruling B keeps it the derived one for 1.0), what a client shows
+> (nothing new — the picker is per-country while the disagreement is per-exit, so there
+> is no "the declared country" of a country to display), and whether the declared value
+> needs any corroboration at all. It is still a bare assertion; carrying it beside a
+> derived value that contradicts it is honest, presenting it as equally verified would
+> not be.
 
 ### 9. What this leaves for client-assembled relay chaining (#142, ADR-0038)
 

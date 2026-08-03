@@ -27,7 +27,10 @@ type Entry struct {
 	// coordinator can see disagrees with where the node says it serves traffic from —
 	// all three used to arrive here byte-identical in shape. The signature over this
 	// snapshot proves the coordinator said it; it says nothing about which of those
-	// three it is.
+	// three it is. A fourth joined them with issue #113 — a country a coordinator
+	// ADMINISTRATOR asserted by hand, correcting a derivation they hold evidence is
+	// wrong (CountryAdminOverride) — and it is the one a consumer is least able to
+	// guess at, since it is neither observed nor claimed by the node.
 	//
 	// That mattered less when the snapshot was a bootstrap contact list. It matters now
 	// because ADR-0042 §9 made it THE exit-discovery path for relay chaining: a
@@ -40,6 +43,47 @@ type Entry struct {
 	// still falls back to the node's own -country hint whenever that address resolves
 	// to nothing.
 	CountrySource string `json:"countrySource,omitempty"`
+
+	// DeclaredCountry is what the NODE ITSELF said its country is — its own -country
+	// flag, canonicalized — carried beside Country rather than discarded at derivation
+	// time (issue #113).
+	//
+	// The two answer different questions and the project spent a long time with only
+	// one name for both. Country answers "what will every destination site conclude
+	// about a user egressing here", which is a property of the ADDRESS. This answers
+	// "which building does the traffic physically leave from", which is a property of
+	// the MACHINE, and only its operator knows it. They disagree routinely and
+	// innocently: a large cloud provider's address block is commonly registered to that
+	// provider's home country regardless of which datacentre an instance runs in, so an
+	// instance in one country resolving to another is the normal case. The first fleet
+	// where this was measured disagreed on two exits out of three.
+	//
+	// **It is a bare self-report and must never be used as a jurisdiction.** A user who
+	// picks DE picks it to BE TREATED AS German by every site they visit, and an address
+	// that resolves US is treated as US no matter which building it sits in — so
+	// selecting, filtering or displaying on this field would deliver the exact
+	// misrouting ADR-0042 §8 exists to prevent, from the one input that record removed
+	// from the trust path. Nothing in this repository reads it for selection, and
+	// nothing should. It is here so an operator-facing surface can say what the node
+	// claims, and so the coordinator stops throwing away the one thing the operator
+	// actually knows.
+	//
+	// Carried even under -geoip-required, where it is precisely NOT the country: that
+	// flag's promise is that no node self-report reaches a client's country CHOICE, and
+	// a labelled claim that is never Country is not that choice. Such an entry ships
+	// with Country empty and this field set, which is the honest shape of "the node says
+	// DE and this coordinator will not confirm it".
+	//
+	// It is NOT elided when it agrees with Country. Collapsing "made no claim" into
+	// "made a claim that checks out" is the exact bug class ADR-0042's own #2 amendment
+	// closed for the advertised endpoint, and this field is the same shape: a consumer
+	// must be able to tell a node that declared nothing from one whose declaration was
+	// confirmed. omitempty therefore means "this node declared no usable country",
+	// nothing else.
+	//
+	// Additive with omitempty in the pattern Ingress and Operator already use, so a
+	// pre-#113 snapshot is byte-identical on the wire and SnapshotVersion does not move.
+	DeclaredCountry string `json:"declaredCountry,omitempty"`
 
 	// Ingress is the TCP address a client's onion layer dials to reach this node as
 	// an INTERMEDIATE relay hop in a multi-hop chain (issue #124, ADR-0038 §9 item 3).
@@ -96,6 +140,24 @@ const (
 	// node advertises no data-plane endpoint at all, so there is nothing to corroborate
 	// the resolution against (issue #2). Such an entry carries no Country.
 	CountryNoEndpoint = "unverifiable-no-endpoint"
+	// CountryAdminOverride: neither observed nor claimed (issue #113, ADR-0042 §8
+	// update 2026-08-03). A coordinator ADMINISTRATOR asserted this country for this
+	// node id out of band, and the assertion replaced whatever the coordinator derived.
+	//
+	// It exists as its own value because an admin correction is a third kind of thing
+	// and folding it into either neighbour would misreport it: calling it observed
+	// would claim a resolution that did not happen, and calling it a hint would credit
+	// the NODE with a statement the node did not make.
+	//
+	// What it is FOR is correcting the derivation — "your table is wrong, this address
+	// really does present as DE", an assertion about the ADDRESS that an admin can
+	// check against what real sites say and the coordinator cannot. What it must never
+	// be used for is promoting [Entry.DeclaredCountry] — "the machine is physically in
+	// DE even though its address resolves US" — which is the same misrouting ADR-0042
+	// §8 exists to prevent, arriving from the operator's side instead of the node's.
+	// The two are indistinguishable on the wire, so the guarantee here is narrower than
+	// for an observed tag and is stated where the admin edits rather than only here.
+	CountryAdminOverride = "admin-override"
 )
 
 // CountryContradicted reports whether the coordinator itself observed this entry's
@@ -115,12 +177,54 @@ const (
 // An empty CountrySource is NOT contradicted: it means the coordinator predates the
 // field, which is the pre-#3 status quo rather than a discovered disagreement.
 //
+// # DeclaredCountry is NOT this, and must never be folded into it (issue #113)
+//
+// The disagreement this names is between two things the coordinator OBSERVED — the
+// address the signaling arrived from and the data-plane endpoint the node advertises —
+// and it is an anomaly precisely because both are checkable and they do not match.
+// [Entry.DeclaredCountry] disagreeing with Country is a different animal: a node CLAIM
+// disagreeing with an observation, which #113 measured as the ordinary case rather than
+// an anomaly. A large cloud provider's address block is commonly registered to that
+// provider's home country whatever datacentre the instance runs in, so on a real fleet
+// two exits in three disagreed.
+//
+// Feeding that into this predicate would therefore fail closed on most of a cloud fleet
+// and stop a client chaining at all against a coordinator behaving exactly as it always
+// has — the same failure the paragraph above rejects for [CountryHinted], one step
+// further out. Use [Entry.DeclaredCountryDiffers] to observe the difference; it is
+// deliberately not a refusal.
+//
 // Note the asymmetry with -geoip-required, and that it is intentional. Under that flag
 // a contradicted exit carries no country at all and never reaches a country filter in
 // the first place; this predicate is what protects the -geoip-WITHOUT-required
 // deployment, where such an exit keeps its signaling-derived tag and is assignable.
 func (e Entry) CountryContradicted() bool {
 	return e.CountrySource == CountrySignalingOnly
+}
+
+// DeclaredCountryDiffers reports whether this node's own declaration ([DeclaredCountry])
+// disagrees with the country the coordinator published for it (Country) — issue #113.
+//
+// **It is not an anomaly, not a refusal, and not a fail-closed test.** Read
+// [Entry.CountryContradicted]'s doc before wiring the two together: the disagreement
+// this reports is the expected steady state for a fleet on cloud address space, so
+// gating selection on it would refuse most of that fleet. It exists so an operator- or
+// admin-facing surface can LIST the disagreement — which today it cannot, because until
+// #113 the second answer was computed and dropped, and nothing downstream could tell
+// there had ever been one.
+//
+// Both values must be present for there to be a disagreement at all. A node that
+// declared nothing has not disagreed with anything, and an entry with no Country has
+// published nothing to disagree WITH — that case is already named by CountrySource
+// (unresolved, or one of the -geoip-required refusals) and reporting it here as well
+// would blur a missing country into a disputed one.
+//
+// Note what it compares: the PUBLISHED country, not the derived one. Where an admin
+// override is in force (CountryAdminOverride) this reports the node's declaration
+// against the admin's correction, which is the comparison that matters — the admin's
+// value is the one clients act on.
+func (e Entry) DeclaredCountryDiffers() bool {
+	return e.DeclaredCountry != "" && e.Country != "" && e.DeclaredCountry != e.Country
 }
 
 // RelayEligible reports whether this entry can serve as an intermediate hop in a

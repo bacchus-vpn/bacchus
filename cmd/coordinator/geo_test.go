@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -648,6 +649,7 @@ func TestCountrySourceWireContract(t *testing.T) {
 		{countryHinted, coldstart.CountryHinted},
 		{countrySplit, coldstart.CountrySignalingOnly},
 		{countryNoEndpoint, coldstart.CountryNoEndpoint},
+		{countryOverride, coldstart.CountryAdminOverride},
 	} {
 		if tc.mine != tc.theirs {
 			t.Errorf("country provenance literal drifted: coordinator has %q, coldstart has %q", tc.mine, tc.theirs)
@@ -668,5 +670,498 @@ func TestNoGeoIPKeepsThePreviousBehaviour(t *testing.T) {
 	registerExitFrom("e1", "nl", from(ipInNL))
 	if cc, source := exitCountry(t, "e1"); cc != "NL" || source != countryHinted {
 		t.Errorf("with no database: country = %q (%s); want the hint NL", cc, source)
+	}
+}
+
+// Two claims under one name (issue #113, ADR-0042 §8 update 2026-08-03).
+//
+// A node's country was two different claims collapsed at derivation time: where the
+// ADDRESS resolves, which is what every destination site concludes, and where the
+// MACHINE is, which only its operator knows. deriveCountry computed both and returned
+// one, so from the moment a node registered nothing could tell there had been a second
+// answer. These cover keeping both, keeping them apart, and the admin correction that
+// can replace the first — never promote the second.
+
+// exitClaims reads everything the registry holds about an exit's country.
+func exitClaims(t *testing.T, id string) countryClaims {
+	t.Helper()
+	mu.Lock()
+	defer mu.Unlock()
+	e := exits[id]
+	if e == nil {
+		t.Fatalf("exit %s is not registered", id)
+	}
+	return e.claims()
+}
+
+func relayClaims(t *testing.T, id string) countryClaims {
+	t.Helper()
+	mu.Lock()
+	defer mu.Unlock()
+	r := relays[id]
+	if r == nil {
+		t.Fatalf("relay %s is not registered", id)
+	}
+	return r.claims()
+}
+
+// stageCountryOverrides installs a set of admin corrections for the duration of a test,
+// restoring the previous set afterwards. It writes the map directly rather than through
+// a file, so a test of the DERIVATION does not also depend on the loader; the loader has
+// its own tests below.
+func stageCountryOverrides(t *testing.T, m map[string]string) {
+	t.Helper()
+	prev := countryOverrides.Load()
+	countryOverrides.Store(&m)
+	t.Cleanup(func() { countryOverrides.Store(prev) })
+}
+
+// writeOverridesFile writes an override file and returns its path.
+func writeOverridesFile(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "country-overrides.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}
+
+// TestBothCountryClaimsAreKept is issue #113 itself: a node whose observed address and
+// self-reported tag disagree keeps BOTH, distinguishably, and the derived one is still
+// the one that wins.
+//
+// This is the shape the staging run found — an exit whose operator knows it is in DE
+// while its provider's address block resolves elsewhere — and it is the normal case, not
+// an anomaly. Before this, the declaration was computed and dropped on the floor.
+func TestBothCountryClaimsAreKept(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, false)
+
+	// Observed in NL, declares DE.
+	registerExitFrom("cloudy", "DE", from(ipInNL))
+	c := exitClaims(t, "cloudy")
+	if c.derived != "NL" || c.source != countryObserved {
+		t.Errorf("derived = %q (%s); want NL observed — the derivation must still win", c.derived, c.source)
+	}
+	if c.declared != "DE" {
+		t.Errorf("declared = %q; want DE — the node's own claim must survive losing (issue #113)", c.declared)
+	}
+
+	// A relay is covered too: #113 is about both roles, and a relay's country falls back
+	// to its hint just as an exit's does.
+	handle(wire{Type: "register", Role: "relay", ID: "r-cloudy", Country: "de", IngressPort: 9443}, from(ipInNL))
+	rc := relayClaims(t, "r-cloudy")
+	if rc.derived != "NL" || rc.declared != "DE" {
+		t.Errorf("relay claims = %+v; want derived NL, declared DE (canonicalized)", rc)
+	}
+
+	// And both reach the SIGNED directory, which is the only place a consumer can read
+	// them. A value that never leaves the coordinator is a value nothing can act on —
+	// exactly the state the split-endpoint provenance was in before #3.
+	snap := buildSnapshot("198.51.100.1:8080")
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	var back coldstart.Snapshot
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	for _, id := range []string{"cloudy", "r-cloudy"} {
+		e := findEntry(t, back, id)
+		if e.Country != "NL" || e.DeclaredCountry != "DE" {
+			t.Errorf("%s shipped Country=%q DeclaredCountry=%q; want NL / DE", id, e.Country, e.DeclaredCountry)
+		}
+		if !e.DeclaredCountryDiffers() {
+			t.Errorf("%s does not report its two claims as differing — the disagreement is not a fact any surface can list", id)
+		}
+		// The trap: this must NOT have become the fail-closed jurisdiction refusal.
+		if e.CountryContradicted() {
+			t.Errorf("%s reports itself CONTRADICTED because its declaration disagrees — that predicate is fail-closed and this is the ordinary case; it would refuse most of a cloud fleet", id)
+		}
+	}
+}
+
+// TestDeclarationSurvivesAHeartbeat: a heartbeat carries no -country tag, so a
+// re-derivation that rebuilt the declaration from the recycled hint would blank it on
+// the first heartbeat for every node whose address resolved — which is exactly the set
+// of nodes whose two claims disagree.
+func TestDeclarationSurvivesAHeartbeat(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, false)
+
+	registerExitFrom("cloudy", "DE", from(ipInNL))
+	handle(wire{Type: "register", Role: "relay", ID: "r-cloudy", Country: "DE"}, from(ipInNL))
+	handle(wire{Type: "heartbeat", ID: "cloudy"}, from(ipInNL))
+	handle(wire{Type: "heartbeat", ID: "r-cloudy"}, from(ipInNL))
+
+	if c := exitClaims(t, "cloudy"); c.declared != "DE" || c.derived != "NL" {
+		t.Errorf("after a heartbeat the exit holds %+v; want derived NL, declared DE", c)
+	}
+	if c := relayClaims(t, "r-cloudy"); c.declared != "DE" || c.derived != "NL" {
+		t.Errorf("after a heartbeat the relay holds %+v; want derived NL, declared DE", c)
+	}
+}
+
+// TestGeoIPRequiredRecordsTheDeclarationWithoutUsingIt: with both values carried,
+// "refuse" and "fall back" became two distinct options, and the strict posture must stay
+// the first. The declaration is RECORDED and published as a labelled declaration —
+// carrying a claim is not choosing one — while the country stays empty and the exit
+// stays unreachable.
+func TestGeoIPRequiredRecordsTheDeclarationWithoutUsingIt(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, true)
+
+	registerExitFrom("claims-de", "DE", from(ipUnmapped))
+	c := exitClaims(t, "claims-de")
+	if c.derived != countryUnknown || c.source != countryUnknown {
+		t.Errorf("with -geoip-required an unresolved address took the declaration: %+v", c)
+	}
+	if c.declared != "DE" {
+		t.Errorf("declared = %q; want DE — the refusal is about what may become the country, not about what may be recorded", c.declared)
+	}
+	// The property, not just the tag: the exit is still invisible to assignment.
+	if _, refusal := chooseExit("DE", nil, time.Now(), tierLimits{}); refusal != refuseNoCountry {
+		t.Errorf("connect to DE was refused %q; want %q — the declaration must not have become assignable", refusal, refuseNoCountry)
+	}
+	if _, found := countryIn(wire{Countries: countrySnapshot(time.Now(), tierLimits{})}, "DE"); found {
+		t.Error("the declared country appeared in the country map — a client would be offered a country nothing verified")
+	}
+	// On the wire it ships as what it is: no country, and a labelled claim beside it.
+	e := findEntry(t, buildSnapshot("198.51.100.1:8080"), "claims-de")
+	if e.Country != "" || e.DeclaredCountry != "DE" {
+		t.Errorf("snapshot entry = {Country:%q DeclaredCountry:%q}; want no country and the declaration carried", e.Country, e.DeclaredCountry)
+	}
+	if e.DeclaredCountryDiffers() {
+		t.Error("an entry with no published country reported a disagreement — there is nothing to disagree with")
+	}
+}
+
+// TestCountryOverrideBeatsTheDerivation is ruling B's correcting half: an admin who
+// holds evidence this coordinator does not — "your table is wrong, that address really
+// does present as DE" — can say so, and it wins.
+func TestCountryOverrideBeatsTheDerivation(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, false)
+	stageCountryOverrides(t, map[string]string{"corrected": "DE"})
+
+	registerExitFrom("corrected", "RU", from(ipInNL)) // resolves NL, declares RU
+	c := exitClaims(t, "corrected")
+	if c.derived != "DE" {
+		t.Errorf("derived = %q; want DE, the admin's correction", c.derived)
+	}
+	if c.source != countryOverride {
+		t.Errorf("source = %q; want %q — an admin correction is neither an observation nor a node claim, and must not be reported as either", c.source, countryOverride)
+	}
+	if c.declared != "RU" {
+		t.Errorf("declared = %q; the override must not touch what the node claimed", c.declared)
+	}
+	// What the correction DISPLACED is carried on the derivation rather than stored on
+	// the entry (it describes one act of overriding, and every heartbeat re-derives), so
+	// it is read where it is produced. The operator log needs it to say what was
+	// overridden.
+	if d := deriveExitCountry("corrected", from(ipInNL), "RU", net.JoinHostPort(ipInNL, "20000")); d.displaced != countryObserved {
+		t.Errorf("displaced = %q; want %q — the operator log has to be able to say what the correction overrode", d.displaced, countryObserved)
+	}
+
+	// It is the country for every purpose, not a decoration: assignment groups on it.
+	if _, refusal := chooseExit("DE", nil, time.Now(), tierLimits{}); refusal != refuseNone {
+		t.Errorf("connect to DE was refused %q; the corrected country must be the assignable one", refusal)
+	}
+	if _, refusal := chooseExit("NL", nil, time.Now(), tierLimits{}); refusal != refuseNoCountry {
+		t.Errorf("connect to NL was refused %q; want %q — the displaced country must not still be assignable", refusal, refuseNoCountry)
+	}
+	e := findEntry(t, buildSnapshot("198.51.100.1:8080"), "corrected")
+	if e.Country != "DE" || e.CountrySource != coldstart.CountryAdminOverride {
+		t.Errorf("snapshot entry = {Country:%q CountrySource:%q}; want DE / %q", e.Country, e.CountrySource, coldstart.CountryAdminOverride)
+	}
+	if e.CountryContradicted() {
+		t.Error("an admin-corrected entry reports itself contradicted — a correction is an assertion, not a discovered disagreement")
+	}
+}
+
+// TestCountryOverrideWinsUnderGeoIPRequired states the exemption out loud, because it is
+// exactly the kind of quiet erosion that flag exists to prevent.
+//
+// The flag's promise is that no NODE SELF-REPORT reaches a client's country choice. An
+// admin correction is this coordinator's own operator speaking — the same standing
+// -operators has — so honouring it leaves the promise as strong as it was. What must
+// stay refused under the flag is the NODE's claim, and the second half asserts that it
+// is: an identical node with no override still gets nothing.
+func TestCountryOverrideWinsUnderGeoIPRequired(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, true)
+	stageCountryOverrides(t, map[string]string{"corrected": "DE"})
+
+	registerExitFrom("corrected", "RU", from(ipUnmapped)) // resolves to nothing
+	c := exitClaims(t, "corrected")
+	if c.derived != "DE" || c.source != countryOverride {
+		t.Errorf("under -geoip-required the override did not win: %+v", c)
+	}
+	// Non-vacuity: the node's own claim is still refused under the same flag.
+	registerExitFrom("uncorrected", "RU", from(ipUnmapped))
+	if c := exitClaims(t, "uncorrected"); c.derived != countryUnknown {
+		t.Errorf("-geoip-required let a node self-report through: %+v — the exemption is for the ADMIN, not for the node", c)
+	}
+}
+
+// TestCountryOverrideIsNotAPromotionOfTheDeclaration pins the crux of ruling B in the
+// one way code can pin it.
+//
+// Whether an admin typed the RIGHT value is not checkable here — "the address presents
+// as DE" and "the machine is in DE" arrive as the same two letters, which is why the
+// distinction is written where the admin edits. What IS checkable is that the mechanism
+// never promotes the declaration on its own, and never launders a correction into either
+// of the other two provenances: an override that happens to equal what the node claimed
+// is still recorded as an admin assertion, so nothing downstream can conclude the
+// coordinator resolved it or that the node was believed.
+func TestCountryOverrideIsNotAPromotionOfTheDeclaration(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, false)
+	stageCountryOverrides(t, map[string]string{"agrees": "RU"})
+
+	// The node declared RU; the admin also says RU. Same letters, different speaker.
+	registerExitFrom("agrees", "RU", from(ipInNL))
+	c := exitClaims(t, "agrees")
+	if c.source != countryOverride {
+		t.Errorf("source = %q; want %q — a correction that happens to match the node's claim is still the ADMIN's statement, not the node's", c.source, countryOverride)
+	}
+	if c.declared != "RU" {
+		t.Errorf("declared = %q; want RU, unchanged", c.declared)
+	}
+
+	// And with no override staged for it, a declaration is never promoted no matter how
+	// far it is from the derivation.
+	registerExitFrom("unpromoted", "RU", from(ipInNL))
+	if c := exitClaims(t, "unpromoted"); c.derived != "NL" {
+		t.Errorf("derived = %q; want NL — nothing promotes a declaration on its own", c.derived)
+	}
+}
+
+// TestCountryOverrideIsTerminalForTheEndpointCheck records a cost rather than a benefit,
+// because it is invisible otherwise.
+//
+// An override replaces the derivation before the signaling-vs-advertised-endpoint
+// comparison is reached, so an overridden split-endpoint exit stops reporting the
+// contradiction a chaining client fails closed on (ADR-0042 §8). That is the price of an
+// override that cannot be demoted back to "contradicted" — an override that could be
+// would not be an override — and the coordinator warns when it happens.
+func TestCountryOverrideIsTerminalForTheEndpointCheck(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, false)
+	stageCountryOverrides(t, map[string]string{"forwarded": "DE"})
+
+	registerSplitExit("forwarded", "", from(ipInNL), net.JoinHostPort(ipInRU, "20000"))
+	c := exitClaims(t, "forwarded")
+	if c.source != countryOverride || c.derived != "DE" {
+		t.Errorf("claims = %+v; want the override to win over a split endpoint too", c)
+	}
+	// The derivation is run to completion BEFORE the override replaces it, precisely so
+	// this coordinator can name the verdict a correction switched off. Applied first, the
+	// override would suppress the endpoint comparison before it was ever computed and
+	// nothing could report what had been suppressed.
+	if d := deriveExitCountry("forwarded", from(ipInNL), "", net.JoinHostPort(ipInRU, "20000")); d.displaced != countrySplit {
+		t.Errorf("displaced = %q; want %q — the warning has to be able to name what was switched off", d.displaced, countrySplit)
+	}
+	if findEntry(t, buildSnapshot("198.51.100.1:8080"), "forwarded").CountryContradicted() {
+		t.Error("an overridden split-endpoint exit still reports itself contradicted; if that ever becomes true, the override is not terminal and this test's comment is the wrong story")
+	}
+
+	// Non-vacuity: without an override the same exit is still labelled, so this is about
+	// the override and not about the check having been removed.
+	registerSplitExit("untouched", "", from(ipInNL), net.JoinHostPort(ipInRU, "20000"))
+	if c := exitClaims(t, "untouched"); c.source != countrySplit {
+		t.Errorf("an un-overridden split endpoint recorded %q; want %q", c.source, countrySplit)
+	}
+}
+
+// TestCountryOverrideIsNotRecycledAsAHint: a withdrawn correction must not survive as
+// though the node had claimed it. Same asymmetry rederiveHint already enforces for an
+// observed tag, one step further out — an ADMIN's assertion is not a node's.
+func TestCountryOverrideIsNotRecycledAsAHint(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, false)
+	m := map[string]string{"corrected": "DE"}
+	stageCountryOverrides(t, m)
+
+	registerExitFrom("corrected", "", from(ipInNL))
+	if c := exitClaims(t, "corrected"); c.derived != "DE" {
+		t.Fatalf("setup: %+v", c)
+	}
+	// The admin withdraws it, and the node moves to an address that resolves to nothing.
+	stageCountryOverrides(t, map[string]string{})
+	handle(wire{Type: "heartbeat", ID: "corrected"}, from(ipUnmapped))
+	if c := exitClaims(t, "corrected"); c.derived != countryUnknown {
+		t.Errorf("after the override was withdrawn the node kept %+v; a correction must not persist as a hint", c)
+	}
+}
+
+// TestLoadCountryOverridesRefusesABadFileWhole covers the loader's decisions: a missing
+// file and an empty path are "nothing configured", and a present file with ANY unusable
+// row is refused ENTIRELY rather than partly applied.
+//
+// The partial-application alternative produces a correction that looks applied and is
+// not, which is the failure #113 was found through — a documentation placeholder pasted
+// into COUNTRY= and accepted verbatim.
+func TestLoadCountryOverridesRefusesABadFileWhole(t *testing.T) {
+	if m, err := loadCountryOverrides(""); err != nil || len(m) != 0 {
+		t.Errorf("empty path: (%v, %v); want an empty map and no error", m, err)
+	}
+	if m, err := loadCountryOverrides(filepath.Join(t.TempDir(), "absent.json")); err != nil || len(m) != 0 {
+		t.Errorf("missing file: (%v, %v); want an empty map and no error", m, err)
+	}
+
+	good := writeOverridesFile(t, `{"n1":"de","n2":"RU"}`)
+	m, err := loadCountryOverrides(good)
+	if err != nil {
+		t.Fatalf("good file: %v", err)
+	}
+	if m["n1"] != "DE" || m["n2"] != "RU" {
+		t.Errorf("loaded %v; want canonicalized codes — a lower-case correction must not produce a tag no filter matches", m)
+	}
+
+	for _, tc := range []struct{ name, body string }{
+		{"not an object", `["n1","DE"]`},
+		{"not a country code", `{"n1":"DE","n2":"Germany"}`},
+		{"a placeholder pasted in", `{"n1":"<TAG>"}`},
+		{"empty code", `{"n1":""}`},
+		{"empty node id", `{"":"DE"}`},
+		{"truncated", `{"n1":`},
+	} {
+		if _, err := loadCountryOverrides(writeOverridesFile(t, tc.body)); err == nil {
+			t.Errorf("%s: accepted %s — one unusable row must refuse the whole file, not leave a correction silently unapplied", tc.name, tc.body)
+		}
+	}
+}
+
+// TestCountryOverridesReloadKeepsTheLastGoodSet is the hot-reload half, and its failure
+// direction.
+//
+// An admin edits this file when prompted, so it takes effect without a restart — but a
+// bad write must never silently drop the corrections already in force, the same
+// direction reloadRevocationsLoop fails in (a malformed file must not un-revoke
+// everyone).
+func TestCountryOverridesReloadKeepsTheLastGoodSet(t *testing.T) {
+	resetRegistry(t)
+	setPC(t)
+	stageGeoIP(t, false)
+	prev := countryOverrides.Load()
+	// The reload loop setupCountryOverrides starts is a real goroutine on a real ticker,
+	// so it is cancelled BEFORE the globals it reads are restored — a loop left running
+	// past its test reads another test's state.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); countryOverrides.Store(prev) })
+
+	path := writeOverridesFile(t, `{"corrected":"DE"}`)
+	if err := setupCountryOverrides(ctx, path); err != nil {
+		t.Fatalf("setupCountryOverrides: %v", err)
+	}
+	registerExitFrom("corrected", "", from(ipInNL))
+	if c := exitClaims(t, "corrected"); c.derived != "DE" {
+		t.Fatalf("setup: %+v", c)
+	}
+
+	// A good edit lands with no restart, on the node's next heartbeat.
+	if err := os.WriteFile(path, []byte(`{"corrected":"FR"}`), 0o600); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	reloadCountryOverrides(path)
+	handle(wire{Type: "heartbeat", ID: "corrected"}, from(ipInNL))
+	if c := exitClaims(t, "corrected"); c.derived != "FR" {
+		t.Errorf("after an edit and a heartbeat: %+v; want FR — a correction behind a restart is a correction that will not be made", c)
+	}
+
+	// A bad edit changes nothing at all.
+	if err := os.WriteFile(path, []byte(`{"corrected":"Germany"}`), 0o600); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	reloadCountryOverrides(path)
+	handle(wire{Type: "heartbeat", ID: "corrected"}, from(ipInNL))
+	if c := exitClaims(t, "corrected"); c.derived != "FR" {
+		t.Errorf("a malformed edit disturbed the corrections in force: %+v; want FR still", c)
+	}
+
+	// And a withdrawal reverts to this coordinator's own derivation.
+	if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	reloadCountryOverrides(path)
+	handle(wire{Type: "heartbeat", ID: "corrected"}, from(ipInNL))
+	if c := exitClaims(t, "corrected"); c.derived != "NL" || c.source != countryObserved {
+		t.Errorf("after withdrawing the override: %+v; want the observed NL back", c)
+	}
+}
+
+// TestSetupCountryOverridesIsFatalOnABadFile: at startup a present-but-unusable file is
+// an error rather than a shrug, matching -operators and -geoip. An admin who staged a
+// correction must not get a coordinator that came up looking configured while still
+// publishing the country they were correcting.
+func TestSetupCountryOverridesIsFatalOnABadFile(t *testing.T) {
+	prev := countryOverrides.Load()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); countryOverrides.Store(prev) })
+
+	if err := setupCountryOverrides(ctx, writeOverridesFile(t, `{"n1":"nonsense"}`)); err == nil {
+		t.Error("setupCountryOverrides accepted an unusable file")
+	}
+	// And the ordinary cases are not errors: no file, and no path at all.
+	if err := setupCountryOverrides(ctx, filepath.Join(t.TempDir(), "absent.json")); err != nil {
+		t.Errorf("setupCountryOverrides rejected a missing file: %v", err)
+	}
+	if err := setupCountryOverrides(ctx, ""); err != nil {
+		t.Errorf("setupCountryOverrides rejected an empty path: %v", err)
+	}
+}
+
+// TestDescribeOverrideChanges pins the line an admin reads to know their edit landed.
+// Empty means "nothing changed", which is what keeps a 30s ticker from printing forever.
+func TestDescribeOverrideChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		prev, next map[string]string
+		want       string
+	}{
+		{"unchanged", map[string]string{"a": "DE"}, map[string]string{"a": "DE"}, ""},
+		{"both empty", map[string]string{}, map[string]string{}, ""},
+		{"added", map[string]string{}, map[string]string{"a": "DE"}, "a=DE (added)"},
+		{"changed", map[string]string{"a": "DE"}, map[string]string{"a": "FR"}, "a: DE -> FR"},
+		{"withdrawn", map[string]string{"a": "DE"}, map[string]string{}, "a: DE withdrawn, reverting to this coordinator's own derivation"},
+		{"sorted", map[string]string{}, map[string]string{"b": "FR", "a": "DE"}, "a=DE (added), b=FR (added)"},
+	} {
+		if got := describeOverrideChanges(tc.prev, tc.next); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestCountryClaimLabel pins the one operator-facing surface that exists today, which is
+// where #113's second answer becomes visible at all.
+//
+// A plain fact rather than a warning, deliberately: the disagreement is the ordinary
+// case on cloud address space, and a warning an operator learns to ignore is worse than
+// none. Silence means "no disagreement to report".
+func TestCountryClaimLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		c    countryClaims
+		want string
+	}{
+		{"agreeing", countryClaims{derived: "NL", source: countryObserved, declared: "NL"}, "observed IP"},
+		{"nothing declared", countryClaims{derived: "NL", source: countryObserved}, "observed IP"},
+		{"disagreeing", countryClaims{derived: "NL", source: countryObserved, declared: "DE"}, "observed IP; node declares DE"},
+		{"refused under the flag", countryClaims{source: countryNoEndpoint, declared: "DE"}, "observed SIGNALING IP only — no advertised endpoint to corroborate it, and -geoip-required is set; node declares DE"},
+		{"corrected", countryClaims{derived: "FR", source: countryOverride, declared: "DE"}, "ADMIN OVERRIDE, not derived; node declares DE"},
+	} {
+		if got := countryClaimLabel(tc.c); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
