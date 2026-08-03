@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bacchus-vpn/bacchus/clients/internal/enforcement"
 	"github.com/bacchus-vpn/bacchus/core"
@@ -31,7 +32,16 @@ type Controller struct {
 	cfg Config
 
 	OnState  func(ConnState)
-	OnDetail func(string)
+	OnDetail func(Detail)
+
+	// OnCountries republishes the country picker's model (issue #16) as a
+	// refresh starts, succeeds or fails. Same threading contract as OnState —
+	// always from a goroutine this Controller spawned, always under c.mu, so a
+	// slow refresh landing after a fast one cannot leave the picker showing the
+	// older answer. See publishLocked; the reasoning about ordering is the same,
+	// even though a stale country list costs a wrong number rather than a false
+	// "you are protected".
+	OnCountries func(CountryListState)
 
 	// Logf, if set, receives this client's own diagnostics and everything the
 	// enforcement layer logs (route installs that failed, kill-switch
@@ -73,6 +83,15 @@ type Controller struct {
 	// So the rule is: a stale attempt cleans up after ITSELF and touches nothing
 	// else.
 	gen uint64
+
+	// countries is the picker's model and listGen is the refresh that owns it,
+	// bumped by every RefreshCountries and by every config change. A refresh
+	// whose generation has moved on discards its own result: the config it asked
+	// under is gone, so its answer describes a coordinator pool this client may
+	// no longer be pointed at. Same rule as gen above, one feature down — a
+	// stale worker touches nothing.
+	countries CountryListState
+	listGen   uint64
 }
 
 func NewController(cfg Config) *Controller {
@@ -340,6 +359,145 @@ func noCoordinatorsError() error {
 		noCoordinators, path, settingsCaveat)
 }
 
+// Country is the country this client will ask to egress in, canonicalized, or
+// CountryAutomatic when the user has expressed no preference. Read under the
+// lock because SetCountry writes it from the UI goroutine while a connect may be
+// reading it from its own.
+func (c *Controller) Country() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return NormalizeCountry(c.cfg.Country)
+}
+
+// SetCountry records the user's choice for the next connect. code is
+// canonicalized; CountryAutomatic (or anything that is not a country code)
+// clears the choice back to "let core pick".
+//
+// It does NOT touch a live session, and that is the ruling rather than a
+// limitation. core settles the country once per engine (resolveCountry) exactly
+// so a reconnect cannot move a user to a different jurisdiction mid-session;
+// honouring a change here would have to tear the session down and rebuild it,
+// which is a thing the user should ask for by pressing Disconnect. The picker
+// says so instead: it is inert while a session is up.
+//
+// PERSISTENCE IS THE CALLER'S. This package holds the running value; the config
+// file's path, and whether the file on disk is safe to overwrite at all, are
+// main.go's — a config that failed to parse leaves c.cfg at its zero value, and
+// writing that back would turn a JSON typo into a wiped settings file.
+func (c *Controller) SetCountry(code string) {
+	cc := NormalizeCountry(code)
+	c.mu.Lock()
+	c.cfg.Country = cc
+	c.mu.Unlock()
+}
+
+// SetConfig replaces the configuration the NEXT connect is built from, and
+// invalidates any country refresh in flight against the old one.
+//
+// It closes a gap that predates the picker and that the picker makes visible:
+// the Settings window wrote its result to disk and told main.go, and nothing
+// told the Controller — so a coordinator, DNS server or kill-switch setting
+// changed in Settings did not reach a connect until the app was restarted. With
+// a country picker there is a second writer of the same file, and two stale
+// copies of one config is how a user's choice silently reverts.
+//
+// It deliberately keeps the country this Controller already holds: SetCountry is
+// the only thing that changes it, the Settings window has no widget for it, and
+// a save from a window opened before the user picked would otherwise write the
+// country back to whatever it was when that window opened.
+func (c *Controller) SetConfig(cfg Config) {
+	c.mu.Lock()
+	cfg.Country = c.cfg.Country
+	c.cfg = cfg
+	// Any refresh in flight is now describing a coordinator pool this client may
+	// no longer be pointed at, so its answer will be discarded when it lands.
+	// The spinner is cleared HERE rather than left to that worker, because a
+	// worker that has already decided to discard itself must not write anything
+	// at all — and a picker left on "Looking for countries…" over a refresh
+	// nobody is going to publish is a dead-looking window.
+	c.listGen++
+	c.countries.Loading = false
+	c.publishCountriesLocked()
+	c.mu.Unlock()
+}
+
+// Countries is the picker's current model, for a caller that needs it outside a
+// callback (the first paint, before any refresh has published anything).
+func (c *Controller) Countries() CountryListState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.countries
+}
+
+// RefreshCountries asks a coordinator for the country list, entirely off the
+// calling goroutine, and republishes the picker's model as it goes.
+//
+// It is safe to call while connected. The list engine is separate from the
+// session's, binds nothing, and asks a question whose answer changes as the
+// network fills up, which is the whole reason a Refresh button exists.
+//
+// Concurrent refreshes are ordered rather than refused: the newest generation
+// wins and every older answer is dropped. Refusing one while another is in
+// flight was tried and is worse — the settings window changes the coordinator
+// pool and immediately asks for a list, and that request must not be the one
+// that gets swallowed because a refresh happened to be running. Not starting
+// twenty engines is a UI concern and is handled where it belongs: the Refresh
+// button disables itself while Loading.
+func (c *Controller) RefreshCountries() {
+	c.mu.Lock()
+	c.listGen++
+	gen := c.listGen
+	cfg := c.cfg
+	// Loading is published on top of whatever is already there: the previous
+	// list stays on screen while this runs, because a list from a minute ago is
+	// a better basis for choosing than an empty box.
+	c.countries.Loading = true
+	c.countries.Err = nil
+	c.publishCountriesLocked()
+	c.mu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), CountryListTimeout+2*time.Second)
+		defer cancel()
+		countries, err := FetchCountries(ctx, cfg, c.logf)
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.listGen != gen {
+			// The config moved under this refresh (Settings saved, or another
+			// refresh started). Its answer describes a pool this client may no
+			// longer be pointed at, so it is dropped whole — including the
+			// Loading flag, which belongs to whichever refresh is current now.
+			return
+		}
+		c.countries.Loading = false
+		c.countries.Fetched = true
+		c.countries.Unconfigured = !hasCoordinator(cfg.Coordinators)
+		if err != nil {
+			// The previous list is KEPT. Nothing about a coordinator being
+			// unreachable makes the countries it named last time stop existing,
+			// and emptying the picker would take the user's ability to choose
+			// away at the exact moment the app is least able to explain itself.
+			c.countries.Err = err
+			c.logf("countries: %v", err)
+		} else {
+			c.countries.Err = nil
+			c.countries.Countries = countries
+		}
+		c.publishCountriesLocked()
+	}()
+}
+
+// publishCountriesLocked hands the picker's model to OnCountries. THE CALLER
+// MUST HOLD c.mu, for the ordering reason publishLocked documents at length; the
+// same "must not block, must not call back into Controller" contract applies,
+// and main.go satisfies it the same way (fyne.Do).
+func (c *Controller) publishCountriesLocked() {
+	if c.OnCountries != nil {
+		c.OnCountries(c.countries)
+	}
+}
+
 // Connect resolves an exit and brings up a session, entirely off the calling
 // goroutine. A no-op if a connect/connected session is already in flight. The
 // re-entrancy guard below runs synchronously (so a rapid double-click is
@@ -374,6 +532,23 @@ func (c *Controller) Connect() {
 func (c *Controller) connectAsync(gen uint64) {
 	if !hasCoordinator(c.cfg.Coordinators) {
 		c.abort(gen, noCoordinatorsError())
+		return
+	}
+
+	// The country the picker chose (issue #16), or CountryAutomatic. Validated
+	// before anything is built, and REFUSED rather than defaulted when it is not
+	// a country code: silently treating an unreadable value as "let core choose"
+	// would egress the user somewhere they did not ask for while their config
+	// file still named a country, which is the failure the whole feature exists
+	// to prevent. Only a hand-edited file can reach this — the picker offers
+	// nothing but codes the coordinator itself sent.
+	country, err := ValidateCountry(c.cfg.Country)
+	if err != nil {
+		c.abortWith(gen, Detail{
+			Kind:    DetailCountryConfig,
+			Country: strings.TrimSpace(c.cfg.Country),
+			Text:    err.Error(),
+		})
 		return
 	}
 
@@ -444,11 +619,19 @@ func (c *Controller) connectAsync(gen uint64) {
 		Advertise:  volunteer.Advertise,
 		ListenAddr: volunteer.ListenAddr,
 		ExitKeyHex: volunteer.ExitKeyHex,
-		// No exit is named. Country-only assignment (issue #146, ADR-0042) means the
-		// coordinator picks the exit; leaving Geo unset lets core take the first
-		// country the coordinator reports as available, which is what the throwaway
-		// list-and-pick-the-first engine here used to do by hand. The country picker
-		// this unblocks is #150, in the client's own lane.
+		// No exit is named, and no client can name one: country-only assignment
+		// (issue #146, ADR-0042) means the coordinator picks the exit inside the
+		// country that was asked for. Geo is that country — the picker's choice
+		// (issue #16), canonicalized above.
+		//
+		// Empty is not a fallback, it is the picker's "Automatic" row: core then
+		// fetches the country list itself and takes the first assignable country
+		// (resolveCountry/pickCountry), which is exactly what this client did
+		// before it had a picker at all. A non-empty Geo is used VERBATIM by core
+		// even when that country is busy or unknown — see Config.Country on why
+		// substituting a working country for the one asked for is refused rather
+		// than helpful.
+		Geo:      country,
 		STUNURL:  c.cfg.STUN,
 		TURNURL:  c.cfg.TURN,
 		TURNUser: c.cfg.TURNUser,
@@ -706,8 +889,8 @@ func (c *Controller) onEvent(gen uint64, ev core.Event) {
 	// The detail line stays outside the lock: it is cosmetic prose, it makes no
 	// safety claim, and a stale one costs a confusing sentence rather than a false
 	// "you are protected".
-	if text, show := DetailFor(ev, cur); show {
-		c.notifyDetail(text)
+	if d, show := DetailFor(ev, cur); show {
+		c.notifyDetail(d)
 	}
 }
 
@@ -715,6 +898,13 @@ func (c *Controller) onEvent(gen uint64, ev core.Event) {
 // why. Never called once a session is up (past that point a drop is Blocked,
 // not a failure - see onEvent/StateFor).
 func (c *Controller) abort(gen uint64, err error) {
+	c.abortWith(gen, Detail{Text: err.Error()})
+}
+
+// abortWith is abort for a failure this client itself diagnosed, where there is
+// a fixed sentence to say rather than an error to relay — so it can be said in
+// the user's own language (see DetailKind).
+func (c *Controller) abortWith(gen uint64, d Detail) {
 	// A stale attempt reports nothing and touches nothing. It lost a race it does not
 	// know it was in — most concretely, it lost the bind on SocksAddr to the attempt
 	// the user actually wants — and the state it would clear belongs to the winner.
@@ -726,7 +916,7 @@ func (c *Controller) abort(gen uint64, err error) {
 		return
 	}
 
-	c.notifyDetail(err.Error()) // before the state, so the reason is on screen when it lands
+	c.notifyDetail(d) // before the state, so the reason is on screen when it lands
 
 	c.mu.Lock()
 	// Re-checked: gen can move while the detail is being delivered, and the check
@@ -776,8 +966,8 @@ func (c *Controller) publishLocked(s ConnState) {
 	}
 }
 
-func (c *Controller) notifyDetail(s string) {
+func (c *Controller) notifyDetail(d Detail) {
 	if c.OnDetail != nil {
-		c.OnDetail(s)
+		c.OnDetail(d)
 	}
 }

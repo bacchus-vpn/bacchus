@@ -64,14 +64,23 @@ var settingsOpen bool
 // splitTunnelModes is the Select widget's option list.
 var splitTunnelModes = []string{appstate.BypassModeExclude, appstate.BypassModeInclude}
 
-// showSettings opens the settings window seeded from cfg. onSaved is called
-// with the new config and the path it was written to after a successful
+// showSettings opens the settings window seeded from current(). onSaved is
+// called with the new config and the path it was written to after a successful
 // save, so main.go can update the config it holds for the next connect.
-func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced, volunteeringRefused bool, onSaved func(appstate.Config, string)) {
+//
+// current is a function rather than a value because this window is no longer the
+// only thing that writes the config file: the country picker (bacchus#16) writes
+// it too, from the main window, while this one may be open. Seeded from a copy
+// taken at open time, a save half an hour later would carry every field back to
+// what it was then - silently reverting a country the user chose in between, in
+// a window that has no control for it and so cannot even show what it undid.
+// Asking again at save time means this window overwrites only what it edits.
+func showSettings(a fyne.App, current func() appstate.Config, cfgPath string, enforced, volunteeringRefused bool, onSaved func(appstate.Config, string)) {
 	if settingsOpen {
 		return
 	}
 	settingsOpen = true
+	cfg := current()
 
 	w := a.NewWindow(lang.L("Bacchus — Settings"))
 	w.SetOnClosed(func() { settingsOpen = false })
@@ -322,7 +331,10 @@ func showSettings(a fyne.App, cfg appstate.Config, cfgPath string, enforced, vol
 	form.CancelText = lang.L("Cancel")
 	form.OnCancel = func() { w.Close() }
 	form.OnSubmit = func() {
-		next := cfg
+		// Re-read rather than reuse the copy the widgets were seeded from, so a
+		// field changed elsewhere while this window sat open survives the save.
+		// See this function's doc.
+		next := current()
 		next.Bypass = appstate.SplitBypassLines(bypassEntry.Text)
 		next.BypassMode = appstate.NormalizeBypassMode(modeSelect.Selected)
 		next.DisableKillSwitch = !killSwitchCheck.Checked

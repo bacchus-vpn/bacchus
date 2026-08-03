@@ -19,6 +19,12 @@ import (
 // AdmissionPubKey down is the user-facing Settings window's surface, edited via
 // settings.go and persisted the same way.
 //
+// Country is the one field belonging to neither group: it is the MAIN window's,
+// set by the country picker (issue #16) and written back to this same file the
+// moment the user chooses. It is deliberately not in the Settings window — the
+// jurisdiction you exit in is the product's headline choice, not a preference to
+// go looking for behind a menu.
+//
 // The admission fields were config-file-only until issue #93: they are a
 // security check, and leaving them out did not make this client simpler, it
 // made it fail open. They stay readable from the file — an operator scripting a
@@ -37,6 +43,26 @@ type Config struct {
 	TURN         string   `json:"turn"` // turn:host:port
 	TURNUser     string   `json:"turnUser"`
 	TURNPass     string   `json:"turnPass"`
+
+	// Country is the country to egress in, as an ISO-3166-1 alpha-2 code, and it
+	// reaches core.Config.Geo unchanged (via ValidateCountry). Empty is
+	// CountryAutomatic: core resolves the country itself and takes the first
+	// assignable one the coordinator offers, which is exactly what this client
+	// did before it had a picker, so the zero value is pre-#16 behaviour.
+	//
+	// A country set here is used VERBATIM even when the coordinator says it is
+	// busy or does not know it — the connect is refused and the user is told,
+	// never rerouted. That is core's rule (pickCountry) and it is the reason the
+	// picker shows a country's busy state BEFORE the click rather than
+	// substituting after it: silently egressing somebody through a jurisdiction
+	// they did not choose is the worst failure available to this project.
+	//
+	// It is stored here rather than kept in memory for the session because a
+	// choice of jurisdiction that resets at every launch is not a choice. The
+	// file is written 0600 and already carries a TURN password, an exit identity
+	// key and a bypass list naming the sites this user does not tunnel; one
+	// country code is not what makes it sensitive.
+	Country string `json:"country"`
 
 	// AdmissionPubKey and AdmissionCRLPath mirror the same-named core.Config
 	// fields, and mirror what the Windows tray client passed (its main.go set

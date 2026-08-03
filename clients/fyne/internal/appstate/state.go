@@ -63,6 +63,52 @@ func StateFor(cur ConnState, ev core.Event) ConnState {
 	return cur
 }
 
+// DetailKind classifies a detail-line message so the layer that owns the
+// user's language can render it there.
+//
+// It exists because this package cannot import Fyne (see the package doc) and so
+// cannot call lang.L, while every sentence a user reads has to be translatable —
+// clients/fyne/translations_test.go fails the build over exactly that, and its
+// reasoning applies with more force here than to a settings label: this line is
+// what a user reads when a connect did not happen. Passing a rendered English
+// string out and translating it back by matching on its own text would make the
+// English copy a key nobody can see is one; passing a kind and its one variable
+// part lets the outer package write a literal lang.L call the AST walk can find.
+//
+// Text is filled in on every kind, so a caller that does not translate (the
+// tests, and anything reading this as a log) still gets the whole sentence.
+type DetailKind int
+
+const (
+	// DetailVerbatim: Text is the message, as it stands. Everything core emits
+	// arrives this way — an engine error is not a fixed sentence and has no
+	// translation to look up.
+	DetailVerbatim DetailKind = iota
+	// DetailCountryBusy: the coordinator refused the connect because every exit
+	// in the requested country is at capacity, out of quota, or withheld from
+	// this client's tier (the wire's country-busy). Country names it.
+	DetailCountryBusy
+	// DetailNoSuchCountry: the coordinator knows no exit in the requested
+	// country at all (the wire's no-such-country). Country names it.
+	DetailNoSuchCountry
+	// DetailCountryConfig: the configured country is not a country code, so this
+	// client refused the connect before sending it (ValidateCountry). Country
+	// carries the offending value verbatim, which is the whole point of showing
+	// it — the user has to recognise what they typed.
+	DetailCountryConfig
+)
+
+// Detail is one detail-line message: what to say, and enough structure for the
+// UI to say it in the user's own language.
+type Detail struct {
+	Kind DetailKind
+	// Text is the English rendering, always set.
+	Text string
+	// Country is the country tag the message is about, for the three country
+	// kinds. Empty otherwise.
+	Country string
+}
+
 // DetailFor decides whether ev should update the small secondary detail line
 // beneath the headline state, and with what text. Mirrors eventStatus's own
 // show/suppress rules (the retired Windows client's main.go): an error always surfaces,
@@ -86,19 +132,76 @@ func StateFor(cur ConnState, ev core.Event) ConnState {
 // generic connection error they would retry into the same directory gap.
 const relayChainFailedPrefix = "[relay] chain not built: "
 
-func DetailFor(ev core.Event, cur ConnState) (text string, show bool) {
+func DetailFor(ev core.Event, cur ConnState) (d Detail, show bool) {
 	switch ev.Kind {
 	case core.EventError:
 		if reason, ok := strings.CutPrefix(ev.Message, relayChainFailedPrefix); ok {
-			return "Not connected — no path met your relay-hops setting: " + reason, true
+			// Left verbatim, unlike the two country refusals below: the half of
+			// this sentence that carries the information is core's own reason
+			// string, which has no translation either way, so giving the prefix a
+			// kind would translate the frame around an untranslated middle.
+			return Detail{Text: "Not connected — no path met your relay-hops setting: " + reason}, true
 		}
-		return ev.Message, true
+		if d, ok := countryRefusal(ev.Message); ok {
+			return d, true
+		}
+		return Detail{Text: ev.Message}, true
 	case core.EventInfo:
 		if cur == Protected {
-			return "", false
+			return Detail{}, false
 		}
-		return ev.Message, true
+		return Detail{Text: ev.Message}, true
 	default:
-		return "", false
+		return Detail{}, false
 	}
+}
+
+// coordinatorRefusedPrefix is how core reports a coordinator declining to pair
+// (core/client.go's attemptWith): "coordinator refused to pair in NL:
+// country-busy (…)". The country and the machine-readable reason are both in
+// there, and the wire draws the country-busy / no-such-country distinction
+// specifically so a client can act on it — but core hands it over as one
+// sentence, so recognising it here is the only way it reaches a user as anything
+// other than a line of protocol vocabulary containing the word "exit".
+//
+// This is a coupling to another package's message text, and it is the same
+// coupling relayChainFailedPrefix above already is. It is paid for the same way:
+// asserted rather than assumed. controller_test.go drives a real core.Engine
+// against a coordinator that refuses, and fails if what lands on the detail line
+// is not the plain-language sentence — so a reword in core goes red here instead
+// of silently reverting a user-facing message to protocol jargon.
+//
+// It fails in the safe direction if it ever does drift: an unrecognised message
+// falls through to DetailVerbatim, which is exactly what this client showed
+// before the picker existed.
+const coordinatorRefusedPrefix = "coordinator refused to pair in "
+
+// countryRefusal classifies core's refusal sentence into the two refusals the
+// wire names. Anything else — an unrecognised reason, a coordinator that sent a
+// bare error — is not classified, so it reaches the user verbatim rather than
+// being flattened into one of these two and telling them the wrong thing to do.
+func countryRefusal(msg string) (Detail, bool) {
+	rest, ok := strings.CutPrefix(msg, coordinatorRefusedPrefix)
+	if !ok {
+		return Detail{}, false
+	}
+	country, reason, ok := strings.Cut(rest, ": ")
+	if !ok || country == "" {
+		return Detail{}, false
+	}
+	switch {
+	case strings.HasPrefix(reason, "country-busy"):
+		return Detail{
+			Kind:    DetailCountryBusy,
+			Country: country,
+			Text:    country + " is busy right now — everything there is full. Choose another country, or try again in a moment.",
+		}, true
+	case strings.HasPrefix(reason, "no-such-country"):
+		return Detail{
+			Kind:    DetailNoSuchCountry,
+			Country: country,
+			Text:    "Bacchus has nothing in " + country + " to connect you through. Choose another country from the list.",
+		}, true
+	}
+	return Detail{}, false
 }

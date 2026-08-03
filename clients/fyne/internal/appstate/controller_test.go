@@ -283,6 +283,11 @@ type stateRecorder struct {
 
 	mu      sync.Mutex
 	details []string
+	// kinds is every Detail as published, not just its text: the two country
+	// refusals are classified rather than relayed (see DetailKind), and a test
+	// that only looked at the English sentence could not tell a classified one
+	// from a verbatim one that happens to read the same.
+	kinds   []Detail
 	escaped []ConnState
 }
 
@@ -322,9 +327,10 @@ func (r *stateRecorder) assertPublishesWereLocked(t *testing.T) {
 	}
 }
 
-func (r *stateRecorder) onDetail(text string) {
+func (r *stateRecorder) onDetail(d Detail) {
 	r.mu.Lock()
-	r.details = append(r.details, text)
+	r.details = append(r.details, d.Text)
+	r.kinds = append(r.kinds, d)
 	r.mu.Unlock()
 }
 
@@ -332,6 +338,21 @@ func (r *stateRecorder) detailsSnapshot() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]string(nil), r.details...)
+}
+
+// findKind returns the first Detail published with the given kind. Searched
+// rather than indexed because a connect that fails emits several detail lines on
+// its way down (core narrates the attempt), and which position the classified
+// one lands in is not a property worth asserting.
+func (r *stateRecorder) findKind(k DetailKind) (Detail, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, d := range r.kinds {
+		if d.Kind == k {
+			return d, true
+		}
+	}
+	return Detail{}, false
 }
 
 func (r *stateRecorder) next(t *testing.T, timeout time.Duration) ConnState {
@@ -456,7 +477,7 @@ func TestStatePublishHappensUnderTheLock(t *testing.T) {
 			escaped = append(escaped, s)
 		}
 	}
-	c.OnDetail = func(string) {}
+	c.OnDetail = func(Detail) {}
 
 	// Every path that announces a state. Connect+abort covers Connecting and the
 	// abort-to-Disconnected path; onEvent covers the reconnect edge that the bug
@@ -585,7 +606,7 @@ func TestAdmissionAnchorRejectsAnUncredentialedExit(t *testing.T) {
 func TestStaleAttemptCannotClearTheWinnersState(t *testing.T) {
 	c := NewController(Config{})
 	c.OnState = func(ConnState) {}
-	c.OnDetail = func(string) {}
+	c.OnDetail = func(Detail) {}
 
 	// Stand in for a winning attempt that has installed a live session.
 	c.mu.Lock()

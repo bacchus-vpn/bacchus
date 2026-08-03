@@ -8,9 +8,11 @@
 // connection-state indicator. Settings (#152) covers
 // split-tunnel/kill-switch/DNS/auto-connect/launch-on-boot; whether the first
 // three do anything depends on the platform having an enforcement.Enforcer
-// (Windows does, bacchus#59) - see settings.go's doc. Still no country picker
-// (#150, blocked on #146): Connect auto-selects, exactly like the retired
-// Windows tray client's picker did before a user chose.
+// (Windows does, bacchus#59) - see settings.go's doc. The window's centre is the
+// country picker (bacchus#16, picker.go): the user chooses where they appear
+// from, and Connect asks for that country and nothing else. Choosing nothing is
+// still a choice the app supports - core then takes the coordinator's first
+// assignable country, exactly as this client always did.
 //
 // Build: go build -o bacchus-fyne .  (needs a C toolchain - see README.md)
 package main
@@ -18,6 +20,7 @@ package main
 import (
 	"embed"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 
@@ -73,15 +76,46 @@ func main() {
 	action := widget.NewButton(lang.L("Connect"), nil)
 	action.OnTapped = ctrl.Connect
 
+	// The country picker (bacchus#16). onChoose is where the choice becomes
+	// durable: the Controller holds the running value and this file owns the
+	// file it came from, which is the same split settings.go already uses.
+	picker := newCountryPicker(cfg.Country, ctrl.RefreshCountries, func(code string) error {
+		ctrl.SetCountry(code)
+		if cfgErr != nil {
+			// The config file exists and did not parse, so cfg is its zero
+			// value. Writing that back would replace every setting the user has
+			// with an empty file, over a typo they have already been told about
+			// on the detail line. The choice still applies to this session.
+			return errCountryConfigUnreadable
+		}
+		cfg.Country = code
+		path := cfgPath
+		if path == "" {
+			path = appstate.DefaultConfigPath()
+		}
+		if err := appstate.SaveConfig(path, cfg); err != nil {
+			log.Println("country:", err)
+			return err
+		}
+		cfgPath = path
+		return nil
+	})
+
 	ctrl.OnState = func(s appstate.ConnState) {
 		fyne.Do(func() {
 			indicator.update(s, ctrl.DeviceEnforced())
 			applyButtonState(action, ctrl, s)
+			picker.setConnState(s)
 		})
 	}
-	ctrl.OnDetail = func(text string) {
+	ctrl.OnDetail = func(d appstate.Detail) {
 		fyne.Do(func() {
-			detail.SetText(text)
+			detail.SetText(detailText(d))
+		})
+	}
+	ctrl.OnCountries = func(s appstate.CountryListState) {
+		fyne.Do(func() {
+			picker.update(s)
 		})
 	}
 
@@ -93,6 +127,13 @@ func main() {
 	// for a config we actually, successfully read.
 	var bootErr error
 	if cfgErr == nil {
+		// Populate the picker before the user looks at it. Off the UI goroutine
+		// (RefreshCountries spawns its own), so a coordinator that never answers
+		// costs a status line rather than a window that will not paint.
+		//
+		// Ordered before AutoConnect deliberately: both run, and a client that
+		// dials on launch should still be able to show what else was on offer.
+		ctrl.RefreshCountries()
 		if cfg.AutoConnect {
 			ctrl.Connect()
 		}
@@ -116,19 +157,64 @@ func main() {
 	onConfigSaved := func(newCfg appstate.Config, path string) {
 		cfg = newCfg
 		cfgPath = path
+		// Told to the Controller, not just kept here. Until the picker existed
+		// nothing did this, so a coordinator, DNS or kill-switch setting changed
+		// in Settings did not reach a connect until the app was restarted; with
+		// two writers of one file that gap becomes a choice silently reverting.
+		// SetConfig keeps the country the picker already chose - see its doc.
+		ctrl.SetConfig(newCfg)
+		// A new coordinator pool answers a different country list, and the one
+		// on screen is now about a network this client is no longer pointed at.
+		ctrl.RefreshCountries()
 	}
 	settingsItem := fyne.NewMenuItem(lang.L("Settings…"), func() {
-		showSettings(a, cfg, cfgPath, ctrl.DeviceEnforced(), ctrl.VolunteeringRefused(), onConfigSaved)
+		showSettings(a, func() appstate.Config { return cfg }, cfgPath, ctrl.DeviceEnforced(), ctrl.VolunteeringRefused(), onConfigSaved)
 	})
 	w.SetMainMenu(fyne.NewMainMenu(fyne.NewMenu(lang.L("File"), settingsItem)))
 
-	w.SetContent(container.NewBorder(indicator.content, container.NewVBox(detail, action), nil, nil))
+	w.SetContent(container.NewBorder(indicator.content, container.NewVBox(detail, action), nil, nil, picker.content))
 	w.SetCloseIntercept(func() {
 		ctrl.Disconnect()
 		w.Close()
 	})
-	w.Resize(fyne.NewSize(420, 340))
+	// Taller than the 420x340 the shell shipped with: that window had an empty
+	// centre, and the centre is now a list somebody has to be able to read
+	// several rows of without scrolling. The width is unchanged - a country code
+	// and a short status fit in it, and a wider window would make the state band
+	// above compete less well with nothing at all.
+	w.Resize(fyne.NewSize(420, 540))
 	w.ShowAndRun()
+}
+
+// errCountryConfigUnreadable is why a country choice was not written to disk:
+// the config file on disk did not parse, so there is nothing safe to write back
+// over it. The picker recognises it (errors.Is) and says so in its own words -
+// this text is never shown, which is why it is not a translation key.
+var errCountryConfigUnreadable = errors.New("the settings file could not be read, so the choice was not saved")
+
+// detailText renders one detail-line message in the user's language.
+//
+// internal/appstate cannot import Fyne (ADR-0039's split) and so cannot call
+// lang.L, but the two country refusals it classifies are fixed sentences a user
+// reads at the moment a connect did not happen - which is exactly where an
+// untranslated English line is worst. So appstate hands over a kind and the
+// country, and the literals live here where translations_test.go's AST walk can
+// see them.
+//
+// Everything else is relayed verbatim. That is not an oversight: core's errors
+// are not fixed sentences, they have no translation to look up, and inventing a
+// generic translated sentence to replace them would throw away the only
+// diagnostic the user has.
+func detailText(d appstate.Detail) string {
+	switch d.Kind {
+	case appstate.DetailCountryBusy:
+		return fmt.Sprintf(lang.L("%s is busy right now — everything there is full. Choose another country, or try again in a moment."), d.Country)
+	case appstate.DetailNoSuchCountry:
+		return fmt.Sprintf(lang.L("Bacchus has nothing in %s to connect you through. Choose another country from the list."), d.Country)
+	case appstate.DetailCountryConfig:
+		return fmt.Sprintf(lang.L("Your settings file asks for \"%s\", which is not a country. Choose a country above, or put a two-letter code like DE in the \"country\" line of that file."), d.Country)
+	}
+	return d.Text
 }
 
 // appName is the window title. Deliberately not run through lang.L: a brand
