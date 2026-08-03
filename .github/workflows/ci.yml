@@ -122,8 +122,16 @@ jobs:
       # excluded ./clients/... and the linux-client job runs only
       # ./clients/fyne/....
       # Its Windows-tagged half is covered by the windows-enforcement job below.
+      #
+      # ./deploy/... is here for the same reason, arrived at the same way
+      # (bacchus#145): deploy/windows holds a TEST-ONLY package whose whole job
+      # is to fail when the installer's Russian and English messages fall out of
+      # step, and the enumerated lists below covered it nowhere — only the
+      # repo-wide `gofmt -l .` above touched the file at all. A parity check
+      # that runs in no job is the same as no parity check. It has no non-test
+      # Go files, which `go vet` and `go test` both handle cleanly.
       - name: vet
-        run: go vet ./core/... ./bind/... ./cmd/... ./clients/internal/...
+        run: go vet ./core/... ./bind/... ./cmd/... ./clients/internal/... ./deploy/...
       # Stamped, like every other build path that produces a binary anyone could
       # run (issue #128): deploy/install.sh, the manual builds in
       # docs/RUNNING.md, and here. A fence some builds participate in and others
@@ -183,7 +191,7 @@ jobs:
       - name: test
         env:
           BACCHUS_NETD_REQUIRE_NS: "1"
-        run: go test ./core/... ./bind/... ./cmd/... ./clients/internal/...
+        run: go test ./core/... ./bind/... ./cmd/... ./clients/internal/... ./deploy/...
 
   windows-enforcement:
     # The shared enforcement layer, vetted and tested on Windows with no C

@@ -24,15 +24,21 @@ name: release
 # Removing --draft is a one-line change to make once a release has gone
 # through this end to end. Do not remove it before that.
 #
-# The order of the three jobs is the load-bearing part of the file:
+# The order of the jobs is the load-bearing part of the file:
 #
-#   verify-version  ->  windows-bundle  ->  publish
+#   verify-version  --+
+#                     +-->  windows-bundle  ->  publish
+#   verify-table    --+
 #
-# so a refusal at the first one happens BEFORE the build. Nothing is compiled,
-# no artifact is uploaded, and no release object is created, not even a draft.
-# That is the difference between "the draft was created and then a check went
-# red" and "nothing was created", and it is why the version gate is a job here
-# rather than a step somewhere later.
+# so a refusal at either gate happens BEFORE the build. Nothing is compiled, no
+# artifact is uploaded, and no release object is created, not even a draft. That
+# is the difference between "the draft was created and then a check went red"
+# and "nothing was created", and it is why both gates are jobs here rather than
+# steps somewhere later.
+#
+# The two gates run in parallel with each other because neither orders the
+# other: one is about the tag, one is about the bytes being shipped. What
+# matters is that windows-bundle needs BOTH.
 
 on:
   push:
@@ -63,7 +69,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The gate. Nothing else in this file runs until this passes.
+  # The first of two gates. Nothing else in this file runs until both pass.
   #
   # ci.yml asserts the same thing on a tag push, and that assertion is a
   # BYSTANDER: two workflows triggered by one push start in parallel, and there
@@ -135,8 +141,117 @@ jobs:
           fi
           echo "tag ${GITHUB_REF_NAME} matches VERSION ($version)"
 
+  # The second gate (bacchus-vpn/bacchus#66): a release must not be cut on a
+  # stale IP->AS table.
+  #
+  # core/asn/table.tsv.gz is COMMITTED and embedded in the client binary
+  # (ADR-0044's first amendment), so the table a user scores relay-chain AS
+  # diversity against, for the whole life of an install, is the one that was in
+  # the tree when the release was built. There is deliberately no fetch - a
+  # periodic table fetch from every client is precisely the predictable,
+  # fingerprintable request the transport spends its entire budget avoiding -
+  # which leaves cutting a release as the only moment the table can be
+  # corrected. That is what "refreshed per release" means, and until this job
+  # existed nothing enforced it.
+  #
+  # WHY HERE AND NOT IN ci.yml, where TestEmbeddedTableIsFresh has run since
+  # bacchus-vpn/bacchus#55. On a tag push ci.yml and this file are started by
+  # the same event and run CONCURRENTLY, and there is no native way to order
+  # them - the same finding verify-version's comment above records about the
+  # version assertion, arrived at from a different direction. So ci.yml's copy
+  # is a BYSTANDER: it can go red beside a bundle that has already been built
+  # and a release that has already been created.
+  #
+  # On one tag spelling it is worse than a bystander. This workflow triggers on
+  # 'v[0-9]*' AND '[0-9]*'; ci.yml triggers on 'v*'. A tag pushed as 1.0.0
+  # rather than v1.0.0 starts this workflow and does not start ci.yml at all, so
+  # on that spelling the freshness check does not run anywhere, in parallel or
+  # otherwise.
+  #
+  # WHAT THIS JOB DELIBERATELY IS NOT is a second copy of the test suite.
+  # "It duplicates ci.yml" is not an argument against it - a parallel ci.yml
+  # gates nothing, which is the entire finding - so the reason to stop at the
+  # table is a different one. Every other test in this repository is a function
+  # of the tree, and ci.yml's run on the pull request that merged those bytes is
+  # durable evidence about them. TestEmbeddedTableIsFresh is the one assertion
+  # whose verdict changes with the CALENDAR rather than with the tree: it
+  # compares core/asn.TableRetrieved against today, so a tree that passed it on
+  # the day it merged fails it on day 91 with nothing having changed. What has
+  # to be re-asserted at the moment of release is what expires. Re-asserting the
+  # rest would mean a second copy of ci.yml's server job apparatus - user
+  # namespaces, nftables, sysctls - which would rot unnoticed because release
+  # runs are rare, and whose half-copy would SKIP the kernel tests and report
+  # green over them.
+  #
+  # One residual, named rather than hidden: nothing here checks that the tagged
+  # commit is one ci.yml ever saw. A tag on a commit that never went through a
+  # pull request has been tested by nothing at all. That is a property of the
+  # release process rather than of this table - bacchus-vpn/bacchus#151.
+  verify-table:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # go.mod rather than `stable`, for the reason windows-bundle gives below:
+      # a release asks "check it with the toolchain this repo declares".
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # `go test -run` matching NOTHING exits 0, and so does `go test` on a
+      # package whose assertion has been deleted. This repository has been
+      # bitten by that exact class once already - a -ldflags -X naming a symbol
+      # the linker cannot resolve is ignored silently with a zero exit, which is
+      # why ci.yml's release-stamp job reads the value back out of the binary
+      # rather than trusting that the flag was passed. So the existence of the
+      # assertion is checked here rather than assumed, and the step below runs
+      # the whole package instead of a -run filter that could match nothing.
+      #
+      # The other half of this belt is in Go and runs on every ordinary pull
+      # request: core/asn.TestReleaseWorkflowGatesTheTable asserts that this job
+      # exists, that it sets the environment variable below, and that
+      # windows-bundle needs it. ci.yml gates merges, so the workflow that gates
+      # merges is what guards the workflow that gates releases.
+      - name: the freshness assertion exists
+        run: |
+          set -euo pipefail
+          listed=$(go test -list 'TestEmbeddedTableIsFresh' ./core/asn/ | grep -c '^TestEmbeddedTableIsFresh$' || true)
+          if [ "$listed" != "1" ]; then
+            echo "::error::core/asn has no TestEmbeddedTableIsFresh. This job runs that package to"
+            echo "::error::assert the shipped IP->AS table is fresh enough to release; with the test"
+            echo "::error::gone the run would be green over nothing, which is the failure this step"
+            echo "::error::exists to make impossible."
+            exit 1
+          fi
+          echo "TestEmbeddedTableIsFresh is present"
+      # BACCHUS_ASN_RELEASE_TABLE turns the 90-day build floor into the 30-day
+      # release bar. Same shape and the same reason as BACCHUS_REQUIRE_STAMP and
+      # BACCHUS_NETD_REQUIRE_NS in ci.yml: an assertion that is inert by default
+      # and made mandatory by the one job that needs it. The bar cannot simply
+      # apply everywhere - at 30 days it would block every unrelated pull
+      # request one month after a refresh instead of one quarter - and it cannot
+      # be a warning, because a warning on a rare run is indistinguishable from
+      # no check at all.
+      #
+      # THIS APPLIES ON DRY RUNS TOO, not only on a tag, and that is deliberate.
+      # This file's header argues that the release-only paths are the dangerous
+      # ones precisely because nothing rehearses them; a bar whose refusal first
+      # executes during a real release is that mistake again. A pull request
+      # that touches the release path is a pull request about cutting releases,
+      # and it should not be green if a release could not be cut from it.
+      #
+      # -v so the retrieval date and the age this job passed or failed on land
+      # in the log. Five tests in the package; the noise buys a run that is
+      # answerable from its own output.
+      - name: the table this release would ship is fresh enough to ship
+        env:
+          BACCHUS_ASN_RELEASE_TABLE: "1"
+        run: go test -count=1 -v ./core/asn/
+
   windows-bundle:
-    needs: verify-version
+    # Both gates, not one. They are independent assertions - the tag against
+    # VERSION, and the shipped table against the calendar - so they run in
+    # parallel with each other, and what matters is that neither can be
+    # overtaken by the build.
+    needs: [verify-version, verify-table]
     runs-on: windows-latest
     # Read by the publish job below. A job's steps' outputs are not visible to
     # another job unless they are re-exported here.
@@ -358,7 +473,8 @@ jobs:
             anywhere and run `bacchus-fyne.exe` as Administrator. Nothing is
             installed, nothing is registered, and there is nothing to
             uninstall - delete the folder and it is gone. It runs from a USB
-            stick. `README.txt` inside it is the first thing to read.
+            stick. `README.en.txt` / `README.ru.txt` inside it are the first
+            thing to read.
           - **`-setup-...exe` - the installer**, for a Start menu entry, an
             uninstaller and a normal-looking install.
 
