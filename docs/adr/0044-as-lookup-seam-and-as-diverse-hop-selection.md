@@ -995,7 +995,8 @@ else in it. Ancestry needs one git command and no credential.
 released. If that is ever wanted it is a deliberate change to this policy and to the step
 that enforces it — the check-suites route above, already priced — and not a flag reached
 for at the moment somebody needs one. A hotfix that goes through `main` is unaffected,
-which is every release this project has cut.
+and no practice is being taken away: `release.yml`'s publish half has never run, so there
+is no branch release to grandfather.
 
 ### 2. The fetch depth is part of the decision, not an implementation detail
 
