@@ -92,10 +92,36 @@ jobs:
   #
   # The duplication with ci.yml is deliberate and stays: its copy covers
   # somebody tagging without cutting a release, which this file never sees.
+  #
+  # TWO assertions about the tag, in two steps: what it SAYS (the version) and
+  # where it POINTS (a commit main contains). They are unrelated failures and
+  # each names its own.
   verify-version:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 is load-bearing here, not tidiness, and it is the reason
+      # this checkout has a `with:` while the other two in this file do not.
+      #
+      # actions/checkout defaults to depth 1 and, on a tag push, fetches only
+      # the tagged commit - no branches at all, so no origin/main. The ancestry
+      # step below cannot be answered from that, and the way it FAILS to be
+      # answered is the trap: git does not say "I cannot tell", it errors on a
+      # missing origin/main and, given a truncated one, reports "not an
+      # ancestor" about a commit that is one. Both directions of that are wrong
+      # and only one of them is loud.
+      #
+      # The cost was measured rather than feared, because ADR-0044's second
+      # amendment section 7 says this repository carries ~3.14 MB of committed
+      # table per refresh and git cannot delta a gzip, so "full history" sounds
+      # expensive here. It is not: a fresh clone of this repository is 5.9 MB
+      # packed at full depth against 5.4 MB at depth 1 - about half a megabyte
+      # over 65 commits, because the table blob is in the depth-1 clone too.
+      # That is one ubuntu job on a rare event, and it is not a number worth
+      # trading a correct answer for. Re-measure it if the history ever gets
+      # long enough for the question to be live again.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: the tag must be the version this repository claims
         shell: bash
         run: |
@@ -141,6 +167,130 @@ jobs:
           fi
           echo "tag ${GITHUB_REF_NAME} matches VERSION ($version)"
 
+      # Where the tag POINTS (bacchus-vpn/bacchus#151). The step above checks
+      # what it says.
+      #
+      # verify-table's comment below sets out why this workflow re-runs ONE test
+      # rather than the suite: every other assertion in this repository is a
+      # function of the tree, so ci.yml's run on the pull request that merged
+      # those bytes is durable evidence about them, and only what expires with
+      # the calendar has to be re-asserted at release time. That argument is
+      # sound exactly to the extent that the tagged commit went through a pull
+      # request - and until this step, nothing made it so. A tag pushed onto a
+      # branch head, a local commit, or anything else main does not contain
+      # built a bundle and drafted a release from a tree the test suite had
+      # never seen, with every job in this file green over it. The evidence the
+      # release rests on was assumed rather than established.
+      #
+      # THE POLICY IS main-ONLY, ruled 2026-08-04: a release is cut from main or
+      # it is not cut. That forbids a hotfix cut from a branch, deliberately.
+      # The alternative was asserting a green ci.yml run for the SHA through the
+      # check-suites API, which permits hotfix branches and needs a policy for a
+      # run still in progress - more intricate, and the intricacy would sit in
+      # the one workflow that must not be wrong. If a hotfix from a branch is
+      # ever wanted, that is a deliberate change to this policy and to this
+      # step, not a flag to reach for at the moment somebody needs one.
+      #
+      # ANCESTRY IS ONLY AS GOOD AS THE HISTORY IN THE CLONE. The two guards
+      # below are why fetch-depth: 0 is on the checkout above, and they are
+      # checked rather than assumed for the reason this job's VERSION check
+      # already gives: a gate that opens - or refuses for the wrong reason -
+      # when its input disappears is not a gate.
+      #
+      # A SEPARATE STEP rather than four more lines in the one above, because
+      # the two failures are unrelated (a tag naming the wrong number; a tag on
+      # the wrong commit) and a run should say which one happened in the step
+      # name, before anybody opens the log.
+      - name: the tagged commit must be one main contains
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The full ref, never the bare "origin/main": this is the one
+          # comparison in the file where resolving to something else would be
+          # silent rather than loud.
+          main_ref="refs/remotes/origin/main"
+
+          if [ "$(git rev-parse --is-shallow-repository)" != "false" ]; then
+            echo "::error::this clone is shallow, so it cannot answer whether the tagged commit is"
+            echo "::error::on main - git would report 'not an ancestor' about a commit that is one,"
+            echo "::error::and refuse the release for a reason that is not the reason. Put"
+            echo "::error::fetch-depth: 0 back on this job's actions/checkout step."
+            exit 1
+          fi
+
+          if ! git rev-parse --verify --quiet "$main_ref" >/dev/null; then
+            echo "::error::$main_ref is not in this clone, so there is nothing to compare the"
+            echo "::error::tagged commit against. actions/checkout fetches every branch only when"
+            echo "::error::fetch-depth: 0 is set on it; on a tag push at the default depth it"
+            echo "::error::fetches the tagged commit and nothing else."
+            exit 1
+          fi
+
+          # The assertion at the foot of this step is release-only - no run on a
+          # branch can reach it - so the machinery under it is exercised on
+          # EVERY run, including the dry ones. Same reason as the version rule's
+          # self-test in windows-bundle, and the same reason this file's header
+          # gives for rehearsing the build half: a release-only path whose first
+          # execution is a real release is the thing being avoided.
+          #
+          # One pair of real commits from the history just fetched tests both
+          # directions, because a commit is never an ancestor of its own parent
+          # and its parent always is one.
+          #
+          # It does NOT subsume the depth guard above and must not be read as
+          # doing so - measured, a clone shallow at depth 20 passes both lines
+          # below and still answers the real question wrong about a commit 55
+          # back. What this pair covers is the other failure: merge-base itself
+          # not returning what this step reads its exit status as.
+          if ! git merge-base --is-ancestor "$main_ref~1" "$main_ref"; then
+            echo "::error::git says main's own parent is not an ancestor of main. Either main is a"
+            echo "::error::single root commit, or this clone's history is not what it appears to"
+            echo "::error::be, or merge-base is not behaving as this step assumes. The assertion"
+            echo "::error::below would mean nothing, so it is not run."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$main_ref" "$main_ref~1"; then
+            echo "::error::git says main is an ancestor of its own parent, so the REFUSAL half of"
+            echo "::error::this check does not work and it would admit any commit at all. Nothing"
+            echo "::error::below is trustworthy."
+            exit 1
+          fi
+          echo "ancestry answers both ways against $(git rev-parse --short "$main_ref") (main)"
+
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "Not a tag run, so there is no release commit to place on main."
+            exit 0
+          fi
+
+          # ^{commit} rather than the bare value. Not a correctness fix -
+          # merge-base peels a tag object on its own, checked against git 2.53 -
+          # but a push of an ANNOTATED tag can put a tag object's hash here, and
+          # a refusal that prints one sends the reader looking up an object that
+          # is not the tree that would have shipped. --verify also turns a SHA
+          # missing from the clone into a failure here rather than an unrelated
+          # error out of merge-base.
+          sha="$(git rev-parse --verify "${GITHUB_SHA}^{commit}")"
+          if ! git merge-base --is-ancestor "$sha" "$main_ref"; then
+            echo "::error::tag ${GITHUB_REF_NAME} points at $sha, which is not on main."
+            echo "::error::Nothing was built and no release was created."
+            echo "::error::"
+            echo "::error::WHY THIS IS REFUSED, because the rule outlives whoever hits it: nothing"
+            echo "::error::re-runs the test suite at release time. This workflow re-asserts only"
+            echo "::error::what expires with the calendar - the age of the shipped IP->AS table -"
+            echo "::error::because every other assertion here is a function of the tree, and"
+            echo "::error::ci.yml's run on the pull request that merged those bytes is durable"
+            echo "::error::evidence about them. A commit main does not contain went through no"
+            echo "::error::pull request, so no such run exists and there is no evidence to inherit."
+            echo "::error::The tree this release would ship has been tested by nothing at all."
+            echo "::error::"
+            echo "::error::A release is cut from main or it is not cut (ADR-0044, #151). Merge the"
+            echo "::error::work and tag the commit on main. A hotfix cut from a branch is a change"
+            echo "::error::to that policy and to this step, not something to work around here."
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} points at $sha, which main contains"
+
   # The second gate (bacchus-vpn/bacchus#66): a release must not be cut on a
   # stale IP->AS table.
   #
@@ -183,10 +333,13 @@ jobs:
   # runs are rare, and whose half-copy would SKIP the kernel tests and report
   # green over them.
   #
-  # One residual, named rather than hidden: nothing here checks that the tagged
-  # commit is one ci.yml ever saw. A tag on a commit that never went through a
-  # pull request has been tested by nothing at all. That is a property of the
-  # release process rather than of this table - bacchus-vpn/bacchus#151.
+  # The residual this job used to name - that nothing checked whether the tagged
+  # commit was one ci.yml ever saw, so "durable evidence about those bytes" was
+  # an assumption rather than a fact - is closed. verify-version's second step
+  # asserts the tagged commit is on main (bacchus-vpn/bacchus#151), which is
+  # what makes the paragraph above an argument rather than a hope. It sits in
+  # that job rather than this one because it is a property of the tag, not of
+  # the table, and the two gates stay split along that line.
   verify-table:
     runs-on: ubuntu-latest
     steps:

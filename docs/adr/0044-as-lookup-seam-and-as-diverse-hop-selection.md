@@ -1,6 +1,6 @@
 # 44. An independent IP→AS lookup behind one seam, AS-diverse hop selection, and the distribution question left open
 
-- Status: accepted (issue #23); amended four times — see the amendments at the end.
+- Status: accepted (issue #23); amended five times — see the amendments at the end.
   The seam, the unknown-case rule, the hop-selection ladder and the coordinator's
   use of it were accepted and implemented when this record was written. **How the
   table ships and refreshes was left open**, and was then ruled on: option A,
@@ -10,7 +10,10 @@
   client (#55). Issue #23 is delivered on both sides as of that amendment. The third
   amendment (#61) records that the vetted source covers country as well as AS. The
   fourth (#66) makes "refreshed per release" enforceable now that a release process
-  exists, and adds a release-time bar tighter than the 90-day build floor.
+  exists, and adds a release-time bar tighter than the 90-day build floor. The fifth
+  (#151) closes the residual the fourth named: a release is now cut from `main` or it
+  is not cut, so the premise the fourth amendment's scope was chosen on is enforced
+  rather than assumed.
 - Date: 2026-07-29
 
 ## Context
@@ -825,6 +828,11 @@ request has been tested by nothing at all, which weakens §3's "durable evidence
 for everything except the table. That is a property of the release process rather than of
 this table, and it is #151 rather than something fixed here.
 
+> **Update (2026-08-04, #151): closed.** `verify-version` now refuses a tag whose commit
+> `main` does not contain, so the premise this section's scope was chosen on is enforced
+> rather than assumed. The fifth amendment below records the ruling, what it forbids, and
+> the one thing ancestry still does not establish.
+
 ### 4. Which platform this actually covers
 
 **Covered: Windows.** `release.yml` builds the Windows portable zip and installer, so the
@@ -943,3 +951,131 @@ credential decision, not a CI one. Carried as #150.
   source install is outside the gate), #150 (the scheduled refresh's credential
   question), #151 (nothing checks a release tag points at a commit CI ever saw).
   #66 closes on the enforcement; none of the three is folded into it.
+  > **Update (2026-08-04):** #149 and #151 are both ruled and built — see §4's update
+  > and the fifth amendment. #150 is still open and is still a custody decision.
+
+## Amendment (2026-08-04, #151) — a release is cut from `main` or it is not cut
+
+The fourth amendment §3 chose the release gate's scope by argument rather than by
+convenience: re-assert what **expires with the calendar**, because every other assertion
+in this repository is a function of the tree and `ci.yml`'s run on the pull request that
+merged those bytes is durable evidence about them. Then it named the thing that argument
+rests on and did not have. Nothing checked that the tagged commit went through a pull
+request at all.
+
+That gap is not in the table gate — the table gate is exactly as strong as it was. It is
+in the **premise the table gate's scope was chosen on**. A tag pushed onto a branch head,
+a local commit, or anything else `main` does not contain built a bundle and drafted a
+release from a tree the suite had never seen, with every job in `release.yml` green over
+it, and §3's "stop at the table" was a preference rather than a conclusion for as long as
+that was possible. So this is the same shape as the fourth amendment itself: not a change
+of mind, but the enforcement an earlier argument had been assuming.
+
+### 1. The decision: `main`-only ancestry
+
+**A release is cut from `main` or it is not cut.** `verify-version` gains a second step,
+after the tag/`VERSION` comparison, that refuses unless `git merge-base --is-ancestor`
+places the tagged commit in `origin/main`'s history. It is a gate in the sense this
+workflow already means by that word: `windows-bundle` `needs:` the job, so a refusal lands
+before anything is compiled and before any release object exists — not even a draft.
+
+Two steps rather than four more lines in one, because the failures are unrelated: a tag
+naming the wrong number and a tag on the wrong commit are different mistakes made by
+different people, and a run should say which in the step name before anyone opens a log.
+
+**The alternative was asserting a green `ci.yml` run for the SHA** through the check-suites
+API. It is the more permissive rule — it admits a hotfix cut from a branch, which is an
+ordinary thing to want — and it is the more intricate one: an API call, a token, a policy
+for a run still in progress, and a decision about which conclusions count. That intricacy
+would sit in the one workflow in this repository whose publish half cannot be exercised
+before it matters, which is the argument `release.yml`'s own header makes about everything
+else in it. Ancestry needs one git command and no credential.
+
+**What this forbids, stated rather than discovered.** A hotfix cut from a branch cannot be
+released. If that is ever wanted it is a deliberate change to this policy and to the step
+that enforces it — the check-suites route above, already priced — and not a flag reached
+for at the moment somebody needs one. A hotfix that goes through `main` is unaffected,
+which is every release this project has cut.
+
+### 2. The fetch depth is part of the decision, not an implementation detail
+
+`actions/checkout` defaults to depth 1, and on a tag push at that depth it fetches the
+tagged commit and no branches at all. The ancestry question cannot be answered from that
+clone, and **the way it fails to be answered is the trap**, because git does not say it
+cannot tell:
+
+| clone | what `git merge-base --is-ancestor <tagged> origin/main` does |
+|---|---|
+| no `origin/main` (checkout's default on a tag push) | `fatal: Not a valid object name origin/main`, exit **128** |
+| `origin/main` fetched shallow, tagged commit deeper than the graft | exit **1** — a clean *"not an ancestor"* about a commit that is one |
+| complete | exit 0, the true answer |
+
+Measured on this repository, 2026-08-04: a clone shallow at depth 20 with the tagged
+commit 55 back on `main` returns exit 1, with no error and no warning. The release is
+refused, the log says the tag is off `main`, and it is not. That is worse than the hole
+being closed, because it is a check that is confidently wrong — and it is precisely what
+#151's own four-line sketch (`git fetch --depth=... origin main`) would have produced.
+
+So `fetch-depth: 0`, and the clone is **checked rather than assumed**:
+`git rev-parse --is-shallow-repository` and the presence of `refs/remotes/origin/main` are
+both asserted first, each with a message naming `fetch-depth: 0` as the fix. This is the
+rule the same job already applies to a missing `VERSION` file — a gate that opens, or
+refuses for the wrong reason, when its input disappears is not a gate.
+
+**The cost was measured rather than feared**, because the second amendment §7 says this
+repository carries ~3.14 MB of committed table per refresh and git cannot delta a gzip, so
+"full history" sounds expensive here. It is not: a fresh clone is **5.9 MB packed at full
+depth against 5.4 MB at depth 1** — about half a megabyte over 65 commits, since the table
+blob is in the depth-1 clone too. One ubuntu job, on a rare event.
+
+The refusal is also **rehearsed on every run, including the dry ones**: a commit is never
+an ancestor of its own parent and its parent always is one, so one pair of real commits
+tests both directions of the answer before the release-only assertion is reached. That is
+the same device as the version rule's self-test in `windows-bundle` and the same reason —
+a release-only path whose first execution is a real release is what this file exists to
+avoid. It does **not** subsume the depth guard, and is not written as though it does: the
+depth-20 clone above passes both self-test lines and still answers the real question wrong.
+
+### 3. What ancestry establishes, and the one thing it does not
+
+The property wanted is *"`ci.yml` ran on this tree"*. What is asserted is *"`main` contains
+this commit"*. They coincide because `ci.yml` triggers on `pull_request` **and** on
+`push: branches: [main]`, so a commit that arrives on `main` — through a merge, or pushed
+straight at it — starts a full run at the pushed tip.
+
+**Where they come apart, named rather than hidden.** `ci.yml`'s push run is on the tip of a
+push, not on every commit in it. A push of several commits directly to `main` gives the
+interior ones no run of their own, and this gate would admit a tag on one. That requires a
+direct multi-commit push to `main`, and nothing on the platform prevents it: checked
+2026-08-04, `main` carries **no branch protection and no rulesets**, so "changes only
+through reviewed, merged pull requests" is workflow discipline rather than something the
+forge enforces. Ancestry is therefore a very good proxy and not the thing itself, and the
+remaining sliver closes with branch protection rather than with more shell in this
+workflow. Carried as a card rather than left in this paragraph.
+
+**Scope is unchanged from the fourth amendment §4.** `release.yml` builds Windows, so this
+covers the platform that has releases. A Linux source install through `deploy/install.sh`
+is not a release, has no tag and no ancestry to check; #149 already rules what that path
+does instead, and it warns rather than refuses.
+
+### 4. Consequences
+
+- **A release cannot be cut from a tree nothing tested.** The fourth amendment §3's
+  "durable evidence" argument now rests on an enforced fact rather than a convention, which
+  is what makes stopping at the table a conclusion instead of a preference.
+- **The refusal names the policy, not just the assertion.** The failure text says why a
+  release from off `main` is refused — that nothing re-runs the suite at release time, so a
+  commit `main` does not contain has no run to inherit evidence from — because the person
+  who hits this in a year needs the reason and not the rule.
+- **`fetch-depth: 0` is now load-bearing on one job**, and removing it fails loudly and
+  names itself rather than degrading. That is deliberate: of the two ways to break this
+  check, the depth is the one that defends itself, and deleting the step outright is the
+  one that would be silent.
+- **Deleting the step outright is still silent**, and unlike the table gate there is no
+  assertion from the other side yet. The fourth amendment §3 built
+  `core/asn.TestReleaseWorkflowGatesTheTable` for exactly that reason — the workflow that
+  gates merges guarding the workflow that gates releases — and the same treatment belongs
+  on this step. Named here so it is not mistaken for having been done.
+- **A pre-release tag is still unreachable**, unchanged. `verify-version`'s first step
+  compares against a bare `VERSION`, so `v1.0.0-rc1` cannot pass it and never reaches this
+  step. Nothing here revisits that.
