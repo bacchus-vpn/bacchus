@@ -98,8 +98,9 @@ already own.
   `cmd/coordinator`'s `loadOrGenerateBootstrapKey`. Silently minting a
   replacement key on a corrupt file would silently strand whatever credential
   this device already holds, since `DevicePub` is what a credential binds
-  (account-model.md §5, §6 — device count is an install cap spent at
-  enrollment). That harm is invisible until the next connect fails for a reason
+  (the account service's own `account-model.md` §5, §6 — device count is an
+  install cap spent at enrollment; that document is in `bacchus-payment` and
+  is not public). That harm is invisible until the next connect fails for a reason
   nobody can see from here, so it is refused at startup instead.
 - **The credential + issuer cert** (`Store`) soft-fails to empty on anything
   short of a clean read, mirroring `core/selection`'s cache. Losing this loses a
@@ -138,7 +139,7 @@ because it never makes one.
 Renewal needs a live network round trip to *some* account-service endpoint. No
 such endpoint has a specified request shape anywhere — not in this repository,
 not in `bacchus-payment`'s design docs, which sketch the message conceptually
-(`{ device_pubkey, sign_device(nonce) }`, account-model.md §5) but define no
+(`{ device_pubkey, sign_device(nonce) }`, its `account-model.md` §5) but define no
 path, method, or wire encoding, and that service currently has no HTTP surface
 at all (`grep -r net/http` there returns nothing).
 
@@ -154,8 +155,10 @@ client that does not renew simply stops connecting once the gate is on," which
 is a legible, already-handled refusal (§3), not a crash.
 
 What *is* fully implemented, because it is pure cryptography this repository
-already owns the framing for: `devicecred_connect.go`'s `purposeRenew` constant
-(`bacchus/assert-renew/v1`, `credential-wire.md` §4's table) and a `Sign` closure
+already owns the framing for: `devicecred_connect.go`'s `purposeRenew` constant —
+the literal string `bacchus/assert-renew/v1`, stated here rather than cited,
+because the table it comes from lives in the account service's own repository
+and a public reader following the citation would find nothing — and a `Sign` closure
 handed to the seam instead of the raw private key, scoped to exactly that
 purpose. `core/devicecred` deliberately declares only `PurposeConnect` — "a
 coordinator has no business holding a verifier for" the others — but `Purpose` is
@@ -166,7 +169,8 @@ argument the purpose tag itself exists for: a key that signs in several contexts
 is only safe if nothing outside the intended context can produce its output. A
 background loop (`deviceRenewLoop`, mirroring `reloadCRLLoop`'s ticker shape)
 checks `devicestore.NeedsRenewal` against a configurable margin (default 6h,
-comfortably inside the 24-72h lifetime account-model.md §5 describes) and calls
+comfortably inside the 24-72h lifetime `bacchus-payment`'s `account-model.md`
+§5 describes) and calls
 the seam when due.
 
 > **Update (2026-08-04):** the reason above is spent. The seam stays, for
@@ -244,6 +248,39 @@ the seam when due.
 > and whether the seam survives underneath as the escape hatch a downstream
 > deployment substitutes its own issuer into.
 
+> **Update (2026-08-04, later the same day): the trigger fired. The seam
+> survives.** See **ADR-0056** (#163), which is the enrollment path landing here
+> and answers all five of the questions listed above.
+>
+> All three of the reasons above were re-read against a repository that now
+> enrolls, and two of the three are spent:
+>
+> 1. **Gone.** `core/accountclient` obtains a first credential by claim code, so
+>    renewal is no longer the second half of a flow whose first half is missing.
+>    Enrollment and renewal shipped together, in one change, as this paragraph
+>    asked.
+> 2. **Answered rather than spent.** The challenge comes from `POST /v1/challenge`
+>    and the audience is pinned client-side out of band, never read from a
+>    response. That had to be settled to enroll at all, and settling it did not
+>    make a built-in renewal client correct — it made one *possible*, which is a
+>    different thing.
+> 3. **Paid, once, deliberately, and in a package `core` does not import.** This
+>    repository now dials the account service. `go list -deps ./core` still names
+>    no HTTP client, and that is the property the ruling protects: an operator
+>    running Bacchus with no account service imports nothing and configures
+>    nothing.
+>
+> What keeps the seam is therefore no longer any of the three. It is that the
+> alternative — renewal built into `core` — would put the closed service's wire
+> format inside the package every embedder must import, and would make an
+> operator with no account service configure their way out of a component they
+> never wanted. ADR-0056 §2 states that in full and prices what it costs.
+>
+> **What this record's §7 said about `clients/fyne` is also now false**, and the
+> falseness is the point: that client sets `Config.DeviceCredDir` and fills
+> `Config.DeviceRenew`, so the 1.0 desktop client holds a device credential and
+> keeps it fresh. The seam has been filled by an embedder for the first time.
+
 ### 7. Config surface: `-device-cred-dir` is proposed, not applied, in this change
 
 Issue #53 asks for "how an operator/user supplies the initial credential,
@@ -295,6 +332,13 @@ chains instead (`core/devicecred_connect_test.go`'s `mintTestChain`, the pattern
   > See §6's update for the three reasons that replace the one this record gave
   > (#159). Nothing in this repository has been tested against the real endpoint;
   > whatever fills the seam is what will be.
+  >
+  > **Update (2026-08-04, later the same day):** it has been. `core/accountclient`
+  > fills the seam, and it has been run against the real `bacchus-payment`
+  > handlers — enrollment, renewal and both refusals — with the exchange frozen
+  > into `core/accountclient/testdata/wire_vectors.json` so this repository can
+  > keep testing against those bytes without reaching the private one. ADR-0056
+  > §5. The last sentence of this bullet is discharged.
 - **`cmd/node` needs one new flag.** Tracked here rather than silently left
   undiscoverable; see §7.
 

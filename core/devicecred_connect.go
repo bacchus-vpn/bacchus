@@ -155,6 +155,125 @@ func (e *Engine) awaitChallenge(ctx context.Context, l *coordLink, timeout time.
 // account service is what actually checks it.
 const purposeRenew devicecred.Purpose = "bacchus/assert-renew/v1"
 
+// purposeEnroll is bacchus/assert-enroll/v1: a device proving possession of the
+// key it is asking the account service to bind, on the one call that spends a
+// claim code. It is the third of the four tags in the wire format's assertion
+// table (see purposeConnect's home in core/devicecred and purposeRenew above);
+// the fourth, sibling approval, is not spoken by anything here.
+//
+// It is unexported for the same reason purposeRenew is, and the reason is not
+// symmetry. core/devicecred deliberately declares only the purpose a COORDINATOR
+// verifies, because a coordinator has no business holding a verifier for the
+// others. This tag is verified by the account service and by nothing in this
+// repository, so the only thing this repository needs is the ability to SIGN
+// under it — which DeviceEnrollment.SignEnroll below is, and which is
+// deliberately the only way out.
+const purposeEnroll devicecred.Purpose = "bacchus/assert-enroll/v1"
+
+// DeviceEnrollment is a device's own half of enrollment: the key a credential
+// will be bound to, a signer scoped to exactly the enrollment purpose, and the
+// store the engine will read the result back out of.
+//
+// It exists because enrollment happens BEFORE there is an Engine. Config.DeviceRenew
+// is handed a DeviceRenewRequest by a running engine that already loaded the key;
+// a device that has never enrolled has no credential, so nothing has started, and
+// the caller has to be able to reach the same key and the same store on its own.
+// This is that reach, and it is deliberately narrow: the private key is not a
+// field, Sign is not a parameter, and the purpose is not a caller's choice.
+//
+// That last part is the whole argument ADR-0046 §6 makes for keeping the
+// ed25519.Sign call in this repository rather than handing a caller the raw key
+// and trusting it to remember the tag. A key that signs in four contexts is only
+// safe if nothing outside the intended context can produce its output, and an
+// enrollment signer that could be asked for a connect assertion — or worse, a
+// sibling approval — would hand a hostile or merely careless embedder the exact
+// substitution the purpose tag was invented to make impossible.
+//
+// core itself never constructs one of these and never calls any of its methods.
+// It is here rather than in the enrollment client because of what it holds, not
+// because of who uses it.
+type DeviceEnrollment struct {
+	key   ed25519.PrivateKey
+	store *devicestore.Store
+	dir   string
+}
+
+// OpenDeviceEnrollment loads (or generates, on first run) the on-device keypair
+// in deviceCredDir and opens the credential store beside it — the same key and
+// the same file New would use for a Config with that DeviceCredDir, via the same
+// two calls, so a device cannot enroll under one identity and connect under
+// another.
+//
+// deviceCredDir == "" is devicestore's documented in-memory mode: a fresh key
+// that persists nowhere. It is useful in a test and useless in a client, because
+// the credential an enrollment buys is bound to a key the next start will not
+// have. Callers that mean to enroll a real device pass a real directory.
+func OpenDeviceEnrollment(deviceCredDir string) (*DeviceEnrollment, error) {
+	key, err := devicestore.LoadOrGenerateKey(deviceCredDir)
+	if err != nil {
+		return nil, fmt.Errorf("device enrollment: %w", err)
+	}
+	store, err := devicestore.Open(DeviceCredPath(deviceCredDir))
+	if err != nil {
+		return nil, fmt.Errorf("device enrollment: %w", err)
+	}
+	return &DeviceEnrollment{key: key, store: store, dir: deviceCredDir}, nil
+}
+
+// DevicePub is the public half of the on-device key — what an enrollment binds a
+// credential to, and what an account service resolves an account by afterwards.
+func (d *DeviceEnrollment) DevicePub() ed25519.PublicKey {
+	return d.key.Public().(ed25519.PublicKey)
+}
+
+// Dir is the directory this enrollment's key and credential live in, so a caller
+// that keeps its own adjacent state has one answer for where it goes rather than
+// re-deriving a path the engine also computes. Empty for an in-memory enrollment.
+func (d *DeviceEnrollment) Dir() string { return d.dir }
+
+// Enrolled reports whether this device already holds a credential — the question
+// a caller must ask BEFORE spending a claim code, because a claim code is spent
+// exactly once and the second spend does not fail safely, it fails
+// unrecoverably.
+func (d *DeviceEnrollment) Enrolled() bool {
+	_, _, ok := d.store.Get()
+	return ok
+}
+
+// Current returns the stored credential and issuer cert, matching
+// devicestore.Store.Get. It is what a caller renews FROM.
+func (d *DeviceEnrollment) Current() (cred, issuerCert string, ok bool) {
+	return d.store.Get()
+}
+
+// SignEnroll produces a bacchus/assert-enroll/v1 assertion over audience and
+// challenge. audience is the account service's own identity, pinned out of band
+// by whoever configured the service's address — never a value read out of the
+// response being signed against, which would let the responder choose the
+// binding.
+//
+// This is the only enrollment signature this repository can produce, and it can
+// produce no other kind: the purpose is a constant here, not an argument.
+func (d *DeviceEnrollment) SignEnroll(audience string, challenge []byte) ([]byte, error) {
+	return devicecred.SignAssertion(d.key, purposeEnroll, audience, challenge)
+}
+
+// SignRenew produces a bacchus/assert-renew/v1 assertion, the same signature
+// Config.DeviceRenew's seam hands out — offered here as well because the
+// renewal verb is also how a device RECOVERS a credential whose enrollment
+// response it failed to read, and that recovery happens on the enrollment path,
+// before any engine exists to supply the seam.
+func (d *DeviceEnrollment) SignRenew(audience string, challenge []byte) ([]byte, error) {
+	return devicecred.SignAssertion(d.key, purposeRenew, audience, challenge)
+}
+
+// Put persists a freshly issued credential and the issuer cert it chains to,
+// exactly as devicestore.Store.Put does — both together, because a client that
+// wrote them in two steps could persist a fresh credential against a stale cert.
+func (d *DeviceEnrollment) Put(cred, issuerCert string) error {
+	return d.store.Put(cred, issuerCert)
+}
+
 // DeviceRenewRequest is what Config.DeviceRenew is called with: enough to renew
 // without ever handing the caller this device's private key. Sign produces a
 // PurposeRenew assertion over whatever audience and challenge the account
@@ -249,6 +368,27 @@ func (e *Engine) maybeRenewDeviceCred(ctx context.Context, now time.Time) {
 	e.emit(EventInfo, "", "device credential: renewed")
 }
 
+// DeviceCredPath is where a DeviceCredDir keeps the credential + issuer cert
+// pair, and it is exported because an enroller and the engine MUST agree on it.
+//
+// Before enrollment existed in this repository the join was invisible: one
+// function computed the path, opened the store, and read it. Now two packages
+// touch the same directory — an enrollment client writes the first credential a
+// device ever holds, and New reads it back — and if they disagreed about the
+// filename, enrollment would report success, the file would be on disk, and the
+// engine would present nothing on every connect thereafter. Nothing would log an
+// error, because from each side the operation succeeded. One definition, read by
+// both, makes that disagreement unrepresentable rather than merely unlikely.
+//
+// An empty dir returns an empty path, which devicestore.Open reads as its
+// documented in-memory mode rather than as an error.
+func DeviceCredPath(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "credential.json")
+}
+
 // setupDeviceCredential builds this client's on-device keypair and credential
 // store. Called from New before the engine exists, for the same reason
 // exitVerifier and relayDir are built there: a client told to hold a device
@@ -266,11 +406,7 @@ func setupDeviceCredential(cfg Config, roles map[string]bool) (ed25519.PrivateKe
 	if err != nil {
 		return nil, nil, fmt.Errorf("device credential: %w", err)
 	}
-	credPath := ""
-	if cfg.DeviceCredDir != "" {
-		credPath = filepath.Join(cfg.DeviceCredDir, "credential.json")
-	}
-	store, err := devicestore.Open(credPath)
+	store, err := devicestore.Open(DeviceCredPath(cfg.DeviceCredDir))
 	if err != nil {
 		return nil, nil, fmt.Errorf("device credential: %w", err)
 	}

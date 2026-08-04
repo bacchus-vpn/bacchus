@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -724,3 +726,164 @@ var errBoom = &testError{"renewal transport failed"}
 type testError struct{ s string }
 
 func (e *testError) Error() string { return e.s }
+
+// ---------------------------------------------------------------------------
+// Enrollment primitives (bacchus#163, ADR-0056)
+// ---------------------------------------------------------------------------
+
+// TestDeviceEnrollmentAndTheEngineUseTheSameFilesIsTheWholePoint is the test
+// that would have caught the silent failure this API exists to prevent.
+//
+// Enrollment writes a credential from OUTSIDE the engine, and the engine reads
+// it back at construction. If the two disagreed about the filename — or about
+// which key the credential is bound to — enrollment would report success, the
+// file would be on disk, and every connect thereafter would present nothing.
+// Neither side would log an error, because from each side the operation
+// succeeded.
+func TestDeviceEnrollmentAndTheEngineUseTheSameFilesIsTheWholePoint(t *testing.T) {
+	dir := t.TempDir()
+
+	dev, err := OpenDeviceEnrollment(dir)
+	if err != nil {
+		t.Fatalf("OpenDeviceEnrollment: %v", err)
+	}
+	if dev.Enrolled() {
+		t.Fatal("a fresh directory reported an enrolled device")
+	}
+	if dev.Dir() != dir {
+		t.Fatalf("Dir() = %q, want %q", dev.Dir(), dir)
+	}
+
+	if err := dev.Put("bacchusd1:enrolled-out-of-band", "bacchusi1:its-issuer"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if !dev.Enrolled() {
+		t.Fatal("Enrolled() is false immediately after Put")
+	}
+
+	// The engine, built the way a client builds it, must find exactly that.
+	key, store, err := setupDeviceCredential(Config{DeviceCredDir: dir}, map[string]bool{RoleClient: true})
+	if err != nil {
+		t.Fatalf("setupDeviceCredential: %v", err)
+	}
+	cred, issuerCert, ok := store.Get()
+	if !ok {
+		t.Fatal("the engine found no credential where enrollment wrote one — the two disagree about the path")
+	}
+	if cred != "bacchusd1:enrolled-out-of-band" || issuerCert != "bacchusi1:its-issuer" {
+		t.Fatalf("the engine read back %q / %q", cred, issuerCert)
+	}
+	// And the same key: a credential bound to one key and presented under
+	// another is refused by the coordinator with no local sign of why.
+	if !key.Public().(ed25519.PublicKey).Equal(dev.DevicePub()) {
+		t.Fatal("enrollment and the engine loaded different device keys from one directory")
+	}
+}
+
+// TestDeviceEnrollmentSignsUnderExactlyOnePurposeEach: a key that signs in four
+// contexts is only safe if nothing outside the intended context can produce its
+// output, which is why the purpose is a constant at each call site rather than
+// an argument a caller supplies.
+func TestDeviceEnrollmentSignsUnderExactlyOnePurposeEach(t *testing.T) {
+	dev, err := OpenDeviceEnrollment(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenDeviceEnrollment: %v", err)
+	}
+	challenge := bytes.Repeat([]byte{7}, 32)
+	const audience = "account.example"
+
+	enrollSig, err := dev.SignEnroll(audience, challenge)
+	if err != nil {
+		t.Fatalf("SignEnroll: %v", err)
+	}
+	renewSig, err := dev.SignRenew(audience, challenge)
+	if err != nil {
+		t.Fatalf("SignRenew: %v", err)
+	}
+
+	// Each verifies under its own tag...
+	if err := devicecred.VerifyAssertion(dev.DevicePub(), purposeEnroll, audience, challenge, enrollSig); err != nil {
+		t.Fatalf("the enrollment assertion does not verify under its own purpose: %v", err)
+	}
+	if err := devicecred.VerifyAssertion(dev.DevicePub(), purposeRenew, audience, challenge, renewSig); err != nil {
+		t.Fatalf("the renewal assertion does not verify under its own purpose: %v", err)
+	}
+	// ...and under no other. A single one of these passing would mean a
+	// signature collected for one context is spendable in another.
+	for _, tc := range []struct {
+		name string
+		sig  []byte
+		as   devicecred.Purpose
+	}{
+		{"enroll as renew", enrollSig, purposeRenew},
+		{"enroll as connect", enrollSig, devicecred.PurposeConnect},
+		{"renew as enroll", renewSig, purposeEnroll},
+		{"renew as connect", renewSig, devicecred.PurposeConnect},
+	} {
+		if err := devicecred.VerifyAssertion(dev.DevicePub(), tc.as, audience, challenge, tc.sig); err == nil {
+			t.Fatalf("%s verified; the purpose tag is doing nothing", tc.name)
+		}
+	}
+	// And the audience binds, so an assertion made for one service is useless
+	// at another.
+	if err := devicecred.VerifyAssertion(dev.DevicePub(), purposeEnroll, "other.example", challenge, enrollSig); err == nil {
+		t.Fatal("the enrollment assertion verified under an audience it was never bound to")
+	}
+}
+
+// TestDeviceEnrollmentRefusesAShortChallenge: the device does not choose the
+// challenge and must not sign a weak one, because a signature over a predictable
+// value is a reusable token rather than a proof.
+func TestDeviceEnrollmentRefusesAShortChallenge(t *testing.T) {
+	dev, err := OpenDeviceEnrollment(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenDeviceEnrollment: %v", err)
+	}
+	if _, err := dev.SignEnroll("account.example", []byte("short")); err == nil {
+		t.Fatal("SignEnroll accepted a 5-byte challenge")
+	}
+	if _, err := dev.SignRenew("account.example", []byte("short")); err == nil {
+		t.Fatal("SignRenew accepted a 5-byte challenge")
+	}
+}
+
+// TestOpenDeviceEnrollmentKeepsTheKeyAcrossOpens: an enrollment binds a
+// credential to a public key, so a key regenerated on the next launch would
+// strand the entitlement it just bought.
+func TestOpenDeviceEnrollmentKeepsTheKeyAcrossOpens(t *testing.T) {
+	dir := t.TempDir()
+	first, err := OpenDeviceEnrollment(dir)
+	if err != nil {
+		t.Fatalf("OpenDeviceEnrollment: %v", err)
+	}
+	second, err := OpenDeviceEnrollment(dir)
+	if err != nil {
+		t.Fatalf("OpenDeviceEnrollment (again): %v", err)
+	}
+	if !first.DevicePub().Equal(second.DevicePub()) {
+		t.Fatal("two opens of one directory produced two device identities")
+	}
+}
+
+// TestOpenDeviceEnrollmentRefusesACorruptKey mirrors setupDeviceCredential's own
+// posture: a present-but-broken key file is a hard error, never a silent
+// regeneration, because regenerating would orphan whatever credential this
+// device already holds with nothing to see from here.
+func TestOpenDeviceEnrollmentRefusesACorruptKey(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "device.key"), []byte("not hex"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenDeviceEnrollment(dir); err == nil {
+		t.Fatal("OpenDeviceEnrollment silently regenerated a corrupt device key")
+	}
+}
+
+func TestDeviceCredPathIsEmptyForAnEmptyDir(t *testing.T) {
+	if got := DeviceCredPath(""); got != "" {
+		t.Fatalf("DeviceCredPath(\"\") = %q, want empty (devicestore's in-memory mode)", got)
+	}
+	if got := DeviceCredPath("/x"); got != filepath.Join("/x", "credential.json") {
+		t.Fatalf("DeviceCredPath = %q", got)
+	}
+}

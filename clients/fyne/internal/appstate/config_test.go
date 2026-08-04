@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -352,5 +353,183 @@ func TestLoadConfigNotExist(t *testing.T) {
 	}
 	if path != "" {
 		t.Fatalf("LoadConfig path = %q, want empty", path)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The account service (bacchus#163, ADR-0056)
+// ---------------------------------------------------------------------------
+
+// TestAccountServiceFieldsRoundTrip pins the JSON keys, because they are the
+// operator's interface: a key renamed here is a config file that silently stops
+// naming an account service, which reads exactly like a deployment that has
+// none.
+func TestAccountServiceFieldsRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bacchus-fyne.config.json")
+	want := Config{
+		AccountServiceURL:      "https://account.example:8443",
+		AccountServiceAudience: "account.example",
+		AccountServiceCA:       "/etc/bacchus/account-ca.pem",
+		DeviceCredDir:          "/var/lib/bacchus/device",
+		ClaimCode:              "BC1-EXAMPLE",
+		DeviceLabel:            "laptop",
+	}
+	if err := SaveConfig(path, want); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"accountServiceUrl", "accountServiceAudience", "accountServiceCa", "deviceCredDir", "claimCode", "deviceLabel"} {
+		if _, ok := raw[key]; !ok {
+			t.Fatalf("config file has no %q key", key)
+		}
+	}
+	var got Config
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round trip = %+v, want %+v", got, want)
+	}
+}
+
+func TestAccountServiceConfiguredAndItsDefaults(t *testing.T) {
+	var empty Config
+	if empty.AccountServiceConfigured() {
+		t.Fatal("an empty config claims to name an account service")
+	}
+	if got := empty.EffectiveDeviceLabel(); got != DefaultDeviceLabel {
+		t.Fatalf("EffectiveDeviceLabel = %q", got)
+	}
+	// The default label must say nothing about the machine: it travels to the
+	// service in the clear and is stored there durably.
+	host, _ := os.Hostname()
+	if host != "" && strings.Contains(DefaultDeviceLabel, host) {
+		t.Fatal("the default device label carries this machine's hostname")
+	}
+
+	c := Config{AccountServiceURL: "  https://a.example  ", DeviceLabel: "  laptop  ", DeviceCredDir: "  /d  "}
+	if !c.AccountServiceConfigured() {
+		t.Fatal("a URL with surrounding whitespace read as no account service")
+	}
+	if got := c.EffectiveDeviceLabel(); got != "laptop" {
+		t.Fatalf("EffectiveDeviceLabel = %q", got)
+	}
+	if got := c.EffectiveDeviceCredDir(); got != "/d" {
+		t.Fatalf("EffectiveDeviceCredDir = %q", got)
+	}
+}
+
+// TestEffectiveDeviceCredDirDefaultsPerUserNotBesideTheExecutable: the
+// exe-adjacent path is issue #118's failure again — a device key written next to
+// a binary in a system directory fails on permissions for the ordinary user, and
+// core's documented failure mode for an unwritable key path is a hard
+// construction error at connect.
+func TestEffectiveDeviceCredDirDefaultsPerUserNotBesideTheExecutable(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	got := Config{}.EffectiveDeviceCredDir()
+	if got == "" {
+		t.Fatal("no default device-credential directory")
+	}
+	if !strings.HasPrefix(got, dir) {
+		t.Fatalf("default device dir = %q, want it under the per-user config directory %q", got, dir)
+	}
+	exe, err := os.Executable()
+	if err == nil && filepath.Dir(got) == filepath.Dir(exe) {
+		t.Fatalf("default device dir sits beside the executable: %q", got)
+	}
+}
+
+// TestClearClaimCodeErasesOnlyTheClaimCode: it re-reads before it writes, so a
+// settings save that landed between the connect starting and the enrollment
+// finishing is not reverted.
+func TestClearClaimCodeErasesOnlyTheClaimCode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	perUser := filepath.Join(dir, "Bacchus")
+	if err := os.MkdirAll(perUser, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(perUser, "fyne-client.json")
+	start := Config{
+		Coordinators: []string{"c.example:8080"},
+		Country:      "NL",
+		ClaimCode:    "BC1-SPENT",
+		DeviceLabel:  "laptop",
+	}
+	if err := SaveConfig(path, start); err != nil {
+		t.Fatal(err)
+	}
+
+	// Something else edits the file while the connect is in flight.
+	edited := start
+	edited.Country = "DE"
+	if err := SaveConfig(path, edited); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ClearClaimCode(); err != nil {
+		t.Fatalf("ClearClaimCode: %v", err)
+	}
+	got, _, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ClaimCode != "" {
+		t.Fatalf("the claim code survived: %q", got.ClaimCode)
+	}
+	if got.Country != "DE" {
+		t.Fatalf("country = %q; the concurrent edit was reverted", got.Country)
+	}
+	if len(got.Coordinators) != 1 || got.DeviceLabel != "laptop" {
+		t.Fatalf("other fields were disturbed: %+v", got)
+	}
+}
+
+// TestClearClaimCodeOnAFreshInstallIsNotAnError: nothing on disk holds a spent
+// claim code, which is the state this function exists to reach.
+func TestClearClaimCodeOnAFreshInstallIsNotAnError(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	if err := ClearClaimCode(); err != nil {
+		t.Fatalf("ClearClaimCode with no config file: %v", err)
+	}
+}
+
+// TestTheExampleConfigCarriesEveryFieldAJSONConfigCanSet: the template is what
+// an operator copies, and a field missing from it is a field nobody knows to
+// set — which is how AdmissionPubKey came to be unreachable before #93.
+func TestTheExampleConfigCarriesEveryFieldAJSONConfigCanSet(t *testing.T) {
+	b, err := os.ReadFile("../../bacchus-fyne.config.example.json")
+	if err != nil {
+		t.Fatalf("read the example config: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("the example config is not valid JSON: %v", err)
+	}
+	typ := reflect.TypeOf(Config{})
+	for i := 0; i < typ.NumField(); i++ {
+		tag := typ.Field(i).Tag.Get("json")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		if _, ok := raw[name]; !ok {
+			t.Errorf("bacchus-fyne.config.example.json has no %q key, so an operator copying the template cannot discover it", name)
+		}
 	}
 }

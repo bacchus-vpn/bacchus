@@ -207,6 +207,132 @@ type Config struct {
 	VolunteerExit      bool   `json:"volunteerExit"`
 	VolunteerAdvertise string `json:"volunteerAdvertise"`
 	VolunteerExitKey   string `json:"volunteerExitKey"`
+
+	// The account service (bacchus#163, ADR-0056). This is the first group of
+	// fields in this file that makes the client talk to anything other than the
+	// coordinator pool, and every one of them is OPTIONAL: a deployment that runs
+	// no account service leaves all five empty and is not degraded by doing so,
+	// exactly as it leaves AdmissionPubKey empty today. That is not politeness —
+	// core's device-credential gate is off unless a coordinator enables it, and a
+	// Bacchus network without an entitlement authority is a supported shape.
+	//
+	// AccountServiceURL, AccountServiceAudience and AccountServiceCA are the
+	// three values an operator hands over together, and none of them can be
+	// discovered:
+	//
+	//   - AccountServiceURL is "https://host:port", scheme and host only. Plain
+	//     http is refused: the assertions this client signs authenticate it TO
+	//     the service and cover no response byte, so the credential travelling
+	//     back is unprotected without TLS and an attacker who suppressed the
+	//     request could simply complete it and keep the result.
+	//   - AccountServiceAudience is the service's own identity, bound into every
+	//     assertion. It is deliberately never in any response, so it MUST arrive
+	//     out of band; a client that read it from the reply it was about to sign
+	//     against would let the responder choose the binding.
+	//   - AccountServiceCA is a PEM file authenticating the service's TLS
+	//     identity. Required whenever the URL is set, and the system's public
+	//     root pool is never consulted even as a fallback — the service is
+	//     reached under a name chosen for camouflage, so a publicly-trusted
+	//     certificate for that name authenticates the decoy rather than the
+	//     service.
+	AccountServiceURL      string `json:"accountServiceUrl"`
+	AccountServiceAudience string `json:"accountServiceAudience"`
+	AccountServiceCA       string `json:"accountServiceCa"`
+
+	// DeviceCredDir is where this device's own keypair, its device credential and
+	// its admission credential live across restarts — core.Config.DeviceCredDir,
+	// which this client set nowhere at all before #163 and therefore held no
+	// device credential under any configuration.
+	//
+	// Empty is NOT "off": DefaultDeviceCredDir picks a per-user directory beside
+	// the config file, because the alternative core documents for an empty value
+	// is a fresh device identity at every launch, and a device identity that
+	// changes is an enrollment spent on a device that no longer exists. An
+	// operator who genuinely wants the in-memory behaviour has core's own field
+	// for it and is not configuring a desktop client.
+	DeviceCredDir string `json:"deviceCredDir"`
+
+	// ClaimCode is a ONE-SHOT bootstrap value: the code an operator hands a user
+	// so that this device can enroll. It is redeemed at the next connect and
+	// ERASED FROM THIS FILE the moment enrollment succeeds.
+	//
+	// It is here, rather than in a dialog, because there is no settings surface
+	// for it yet and this file is the client's existing operator-facing seam —
+	// see ADR-0056 §3, which rules that the field is the interim and the dialog
+	// is the shape. What is NOT interim is the erasure: a claim code is a bearer
+	// secret that is spent exactly once, the account service erases its own copy
+	// on redemption rather than flagging it, and a client that kept a spent one
+	// on disk would be the only remaining record that the code ever existed.
+	//
+	// A code that is REFUSED is left in place, deliberately. A user who mistyped
+	// needs to see and correct what they typed, and erasing it would leave them
+	// with an empty field and no idea what to put back.
+	ClaimCode string `json:"claimCode"`
+
+	// DeviceLabel is what the account's owner sees this device called in their
+	// own device list. It travels to the account service in the clear and is
+	// stored there durably.
+	//
+	// This client NEVER derives it from the machine. A hostname is a username on
+	// most desktops and a real name on many, and the transport specification
+	// singles this field out as "the one field in this system a user might put a
+	// name in" precisely because it is the one place identifying text can enter
+	// by accident. Empty uses DefaultDeviceLabel, which says nothing about
+	// anybody.
+	DeviceLabel string `json:"deviceLabel"`
+}
+
+// DefaultDeviceLabel is the device label used when Config.DeviceLabel is empty:
+// a word, not a machine's name. Every device on every account sharing it is the
+// intended outcome — a label that distinguishes devices is a label a user chose
+// to make distinguishing, and one derived here would distinguish them to the
+// service whether or not they meant it to.
+const DefaultDeviceLabel = "desktop"
+
+// DefaultDeviceCredDir is where this client keeps its device identity when
+// Config.DeviceCredDir is empty: a "device" directory beside the per-user config
+// file, which is the one location this client already knows it can write to and
+// already keeps 0600 secrets in.
+//
+// Deliberately NOT next to the executable, even though LoadConfig will read a
+// config from there. The exe-adjacent path is a portable install, and issue
+// #118's finding applies with more force to this directory than it did to the
+// config file: a device key written next to a binary in /usr/local/bin fails on
+// permissions for the ordinary user, and the failure mode core documents for an
+// unwritable key path is a hard construction error at connect.
+//
+// Returns "" when the OS cannot name a per-user config directory, which
+// Controller reads as "no device credential on this machine" rather than
+// guessing.
+func DefaultDeviceCredDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "Bacchus", "device")
+}
+
+// AccountServiceConfigured reports whether this config names an account service
+// at all. False is a complete, supported deployment: no enrollment, no renewal,
+// and whatever core/devicestore already holds is what this device presents.
+func (c Config) AccountServiceConfigured() bool {
+	return strings.TrimSpace(c.AccountServiceURL) != ""
+}
+
+// EffectiveDeviceCredDir is DeviceCredDir, or the default when it is empty.
+func (c Config) EffectiveDeviceCredDir() string {
+	if d := strings.TrimSpace(c.DeviceCredDir); d != "" {
+		return d
+	}
+	return DefaultDeviceCredDir()
+}
+
+// EffectiveDeviceLabel is DeviceLabel, or DefaultDeviceLabel when it is empty.
+func (c Config) EffectiveDeviceLabel() string {
+	if l := strings.TrimSpace(c.DeviceLabel); l != "" {
+		return l
+	}
+	return DefaultDeviceLabel
 }
 
 // BypassModeInclude and BypassModeExclude are the two values BypassMode
@@ -353,6 +479,34 @@ func SaveConfig(path string, c Config) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0o600)
+}
+
+// ClearClaimCode erases Config.ClaimCode from whichever config file is actually
+// in use, leaving every other field as it stands on disk.
+//
+// It re-reads before it writes rather than saving a Config the caller is
+// holding, and that is the whole reason it exists as its own function. The
+// caller here is a connect attempt that took its copy of the config when the
+// user pressed Connect; the settings window may have written the file since. A
+// blind save of the connect's copy would silently revert whatever was changed in
+// between, which is a worse bug than the one this is fixing — so this reads what
+// is there now, clears one field, and puts it back.
+//
+// A missing config file is not an error: nothing is on disk to hold a spent
+// claim code, which is the state this function exists to reach.
+func ClearClaimCode() error {
+	c, path, err := LoadConfig()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if c.ClaimCode == "" {
+		return nil
+	}
+	c.ClaimCode = ""
+	return SaveConfig(path, c)
 }
 
 // DefaultConfigPath is the SAVE target: where SaveConfig should write when
