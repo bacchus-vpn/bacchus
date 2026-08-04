@@ -258,12 +258,17 @@ require_platform() {
 # install_file overwrites unconditionally, which is what makes re-running safe:
 # there is no "already there" branch to get wrong, and an upgrade is just
 # another run.
+# file_mode rather than mode: sh has no function scope, so `mode=$3` here
+# assigns the SAME variable the final dispatch switches on (`case $mode in`,
+# at the bottom of this file). Nothing reads it after the dispatch begins, so
+# this was not a live bug — it was one edit away from being one, in a script
+# where the wrong branch of that case is an uninstall.
 install_file() {
 	src=$1
 	dest=$(p "$2")
-	mode=$3
+	file_mode=$3
 	[ -f "$src" ] || die "missing file to install: $src"
-	install -D -m "$mode" "$src" "$dest"
+	install -D -m "$file_mode" "$src" "$dest"
 	log "installed $dest"
 }
 

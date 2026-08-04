@@ -114,6 +114,80 @@ jobs:
           fi
           echo "tag $tag matches VERSION"
 
+  # deploy/ is shell, and until issue #160 no job here checked any of it in any
+  # way. Two absences, one job:
+  #
+  #   - Nothing linted it. deploy/install.sh is ~1,200 lines that run as root,
+  #     write systemd units and manage a kill switch, and no workflow mentioned
+  #     shellcheck. The class of bug that has actually shown up in these files —
+  #     an unquoted expansion, a missing -R, a `set -e` interaction — is exactly
+  #     what a linter reads for and what `sh -n` cannot see.
+  #   - Nothing RAN deploy/install-test.sh. It had been dying two thirds of the
+  #     way through since 451555c (issue #158), exiting non-zero every time, and
+  #     no job was there to notice. Any job invoking it would have caught that
+  #     the day it broke.
+  #
+  # WHY IT IS HERE AT ALL, since the argument against was that the suite is slow
+  # and wants a filesystem. Measured rather than assumed: the whole suite is
+  # about a second and a half. It builds nothing — the binaries it installs are
+  # stand-in shell scripts and `go` is stubbed — so it needs no toolchain, no
+  # container and no root, and a runner is a filesystem. There was no cost to
+  # weigh.
+  #
+  # WHAT IT STILL DOES NOT COVER, unchanged: nothing here proves systemd accepts
+  # the units, that the socket comes up 0660 root:bacchus, or that the helper is
+  # activated on first connect. Those need a booted systemd and root, they are
+  # the REAL-SYSTEM CHECKLIST at the foot of install-test.sh, and they are still
+  # run by hand on a disposable machine. This job is not that, and a green tick
+  # here is not evidence about any of it.
+  #
+  # Lint before behaviour, in the order `server` uses (gofmt, vet, then test).
+  # Both steps are seconds, so ordering costs nothing either way.
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # The GitHub Ubuntu images ship shellcheck, so this normally prints a
+      # version and stops. Located rather than assumed, for the reason the
+      # windows-fyne-client job locates its mingw: the image is not something
+      # this repo pins, and its contents changing should cost one step rather
+      # than a red job whose message is "shellcheck: command not found".
+      - name: ensure shellcheck
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends shellcheck
+          fi
+          shellcheck --version
+      # Default severity, i.e. everything including style notes. A file this old
+      # and this unlinted will have findings; the answer to each is a fix or a
+      # `# shellcheck disable=` at the exact line with a comment saying why, and
+      # never a blanket exclusion here — an exclusion list in this file suppresses
+      # a rule across code nobody has read yet, including code not yet written.
+      - name: shellcheck
+        run: shellcheck deploy/*.sh
+      # install-test.sh's last case runs the installer at REAL absolute paths
+      # inside a user+mount namespace, which is the one thing a --root staging
+      # prefix cannot check. Ubuntu 24.04 ships
+      # kernel.apparmor_restrict_unprivileged_userns=1 and that blocks it; same
+      # knob, same tolerance for its absence, as the server job below.
+      - name: allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
+      # BACCHUS_INSTALL_TEST_REQUIRE_NS turns that case's SKIP into a failure,
+      # for the reason BACCHUS_NETD_REQUIRE_NS and BACCHUS_REQUIRE_STAMP exist:
+      # a runner that lost the capability would otherwise report green over the
+      # only absolute-path coverage there is.
+      #
+      # The suite also now pins its own case and assertion counts and checks
+      # them from an EXIT trap, so a run that stops early fails here instead of
+      # printing a screen of `ok` and a truncated tally (issue #158).
+      - name: install-test
+        env:
+          BACCHUS_INSTALL_TEST_REQUIRE_NS: "1"
+        run: sh deploy/install-test.sh
+
   server:
     runs-on: ubuntu-latest
     steps:

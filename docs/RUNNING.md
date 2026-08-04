@@ -300,12 +300,17 @@ you want the exit to keep its identity across a rebuild; nothing else has a copy
 
 `deploy/install-test.sh` runs install → verify → uninstall → verify-clean for
 every mode, asserting against the filesystem and the recorded system commands
-rather than the installer's own output. **CI does not run it** — the checks need
-a booted systemd and a container runtime that `.github/workflows/ci.yml` has no
-step for. Run it by hand, and see the REAL-SYSTEM CHECKLIST at the end of that
-file for the things no harness can assert: that systemd accepts the units, that
-the socket really comes up `0660 root:bacchus`, and that the helper is activated
-by the client's first connect.
+rather than the installer's own output. **CI runs it** — the `deploy` job in
+`.github/workflows/ci.yml`, which also runs `shellcheck` over `deploy/*.sh`
+(issues #158 and #160). It did not until then, which is how the suite spent
+weeks dying two thirds of the way through and reporting the part it reached; it
+now pins its own case and assertion counts and fails a run that stops early.
+
+What CI still does not run is the half that needs a booted systemd and root: see
+the REAL-SYSTEM CHECKLIST at the end of that file for the things no harness can
+assert — that systemd accepts the units, that the socket really comes up
+`0660 root:bacchus`, and that the helper is activated by the client's first
+connect. Those are still done by hand on a disposable machine.
 
 ## Run relay + client
 Endpoints/credentials are passed as flags (or, for the Windows client, via
