@@ -278,9 +278,19 @@ make_stub() {
 	chmod +x "$stubdir/$name"
 }
 
+# The single-quoted halves below are SOURCE CODE FOR THE GENERATED STUB, not
+# strings this shell should expand: $a and $1 are the stub's own loop variable
+# and the stub's own argument, and expanding them here would bake in this
+# shell's values and produce a stub that records nothing. The parts that DO
+# have to be resolved now — the fake_groups path, which the stub cannot know —
+# are spliced in by leaving the quotes, which is what the '"…"' seams are.
+# Hence the disables rather than a rewrite; SC2016 is describing the intent
+# correctly and the intent is right.
 make_stub systemctl 'exit 0'
 make_stub usermod 'exit 0'
+# shellcheck disable=SC2016
 make_stub groupadd 'for a; do case $a in -*) ;; *) echo "$a" >>"'"$fake_groups"'";; esac; done; exit 0'
+# shellcheck disable=SC2016
 make_stub groupdel 'grep -vx "$1" "'"$fake_groups"'" >"'"$fake_groups"'.n" || true; mv "'"$fake_groups"'.n" "'"$fake_groups"'"; exit 0'
 make_stub systemd-sysusers 'echo bacchus >>"'"$fake_groups"'"; exit 0'
 
@@ -288,6 +298,11 @@ make_stub systemd-sysusers 'echo bacchus >>"'"$fake_groups"'"; exit 0'
 # so that the desktop user's home directory is resolved the way the installer
 # will really resolve it (and then prefixed by --root, which is what keeps this
 # test out of the real home directory).
+#
+# Same reason for the disable as the stubs above: ${1:-}, ${2:-} and "$@" are
+# the generated getent's parameters and must reach the file unexpanded. The two
+# paths that must NOT are passed as printf arguments and land through %s.
+# shellcheck disable=SC2016
 {
 	printf '#!/bin/sh\n'
 	printf 'if [ "${1:-}" = group ]; then\n'
@@ -651,7 +666,7 @@ env -u SUDO_USER BACCHUS_ROOT="$stage" sh "$installer" client --binaries "$bins"
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
-	ok 'exits non-zero with no --user and no $SUDO_USER'
+	ok "exits non-zero with no --user and no \$SUDO_USER"
 else
 	bad 'guessed a user instead of refusing'
 fi
@@ -686,6 +701,11 @@ assert_absent "$stage/usr/local/bin/bacchus-node"
 
 # Writes a runnable stand-in at whatever -o names, because the installer goes on
 # to install what it just "built".
+#
+# Single-quoted for the reason the other stubs are: "$@", $a, $prev and $out
+# belong to the generated `go`, which has to read the installer's real argument
+# list at the time the installer runs it.
+# shellcheck disable=SC2016
 make_stub go 'out=""; prev=""
 for a in "$@"; do
 	if [ "$prev" = "-o" ]; then out=$a; fi
@@ -809,6 +829,10 @@ done
 # offset is a COMPLETE script and installs correctly. It looked like a
 # tempting "almost the whole file" case and it is really a positive control —
 # which the piped-full-script case above already covers properly.
+# A grep PATTERN, not a string to expand: the \$ matches the literal dollar in
+# the installer's own `case $mode in` line. Expanding it here would search for
+# whatever this suite happens to have in $mode, which is nothing.
+# shellcheck disable=SC2016
 dispatch_at=$(grep -n '^case \$mode in' "$installer" | cut -d: -f1)
 pre=$(head -n "$((dispatch_at - 1))" "$installer" | wc -c)
 offsets="$offsets $pre $((pre + 20)) $((total - 5))"
@@ -880,6 +904,11 @@ if ! unshare -Urm --propagation private true 2>/dev/null; then
 else
 	nsout=$work/ns.log
 	set +e
+	# The single-quoted body is the inner shell's script, and $1/$2/$3 are the
+	# arguments handed to it after the `_` at the bottom of this command. It
+	# must reach that shell unexpanded — this one has no positional parameters
+	# to give it.
+	# shellcheck disable=SC2016
 	unshare -Urm --propagation private sh -c '
 		set -eu
 		mount -t tmpfs none /usr/local
