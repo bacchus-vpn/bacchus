@@ -169,6 +169,81 @@ checks `devicestore.NeedsRenewal` against a configurable margin (default 6h,
 comfortably inside the 24-72h lifetime account-model.md §5 describes) and calls
 the seam when due.
 
+> **Update (2026-08-04):** the reason above is spent. The seam stays, for
+> different reasons (#159).
+>
+> **What changed.** The account service now specifies *and serves* a renewal
+> endpoint — `POST /v1/credential`, in `bacchus-payment`'s
+> `docs/design/account-service-transport.md` §3. The two paragraphs above turn on
+> "no such endpoint has a specified request shape anywhere" and "that service
+> currently has no HTTP surface at all". Both sentences were true when this record
+> was accepted and neither is true now. They stand as the record of what was
+> decided in July; **they are no longer a reason for anything**, and nothing
+> should cite them. What follows replaces them.
+>
+> That matters because the old reason was a *dependency*, and a decision resting
+> on a dependency is not a decision — it expires the moment the dependency
+> arrives. This one has, so the question was re-asked on its merits, and the
+> merits are these.
+>
+> **Ruling: `Config.DeviceRenew` remains a seam.** Three reasons, each true on
+> this date, none of them a restatement of the one above.
+>
+> 1. **Renewal is the second half of a flow whose first half is still not here.**
+>    `maybeRenewDeviceCred` returns before it ever reaches the seam when the store
+>    is empty, and nothing in this repository ever fills it. Enrollment is
+>    out-of-band by §7 below, by this record's own Consequences, and by
+>    `cmd/node`'s `-device-cred-dir` flag text, which says so to the operator's
+>    face; `clients/fyne` — the client 1.0 actually ships — does not set
+>    `Config.DeviceCredDir` at all, so it holds no credential to renew under any
+>    configuration. A built-in renewal client would give a device the ability to
+>    re-up a credential it has no ability to obtain. That is not the seam filled,
+>    it is the seam moved onto the harder half, where the claim code, the sibling
+>    approval and the six-digit code live. Whatever ships enrollment should ship
+>    renewal with it: one change, one protocol, one place a user configures it.
+> 2. **A specified endpoint is not a specified exchange.** The primitive this
+>    repository owns is challenge-bound — `DeviceRenewRequest.Sign(audience,
+>    challenge)` — so a built-in client must commit to where that challenge comes
+>    from and what audience string binds it. Knowing that a path exists supplies
+>    neither, and inferring them is the same backwards contract the paragraphs
+>    above refused.
+>    That objection was never really about the endpoint being unspecified; it was
+>    about which repository gets to originate a contract, and it reads identically
+>    against a specified endpoint.
+> 3. **Nothing in this repository dials the account service.** At `b30ce54` the
+>    whole tree holds exactly one `net/http` import — `cmd/coordinator/policy.go`,
+>    fetching a signed policy from an operator-configured URL. The device-credential
+>    machinery is offline verification end to end, stated as a designed property in
+>    more than one package doc (`core/devicecred`'s: it "never depends on, and never
+>    leaks to, the closed account service"; `verify.go`'s: "It never contacts the
+>    account service — that is the whole point"). A renewal client would be the
+>    first outbound call from this AGPL tree to the closed service. The property
+>    those docs describe belongs to the coordinator rather than to a client, so
+>    this is the weakest of the three on its own — but it is what makes the AGPL
+>    argument concrete: an operator running Bacchus without an account service
+>    should not have to configure their way out of a component the client assumes.
+>
+> **The cost, stated rather than argued away.** A seam every deployment must fill
+> is a seam every deployment can get wrong, and this one is currently filled by
+> nobody, so the honest description of renewal today is *not shipped* rather than
+> *pluggable*. That is acceptable only because the gate is off by default
+> (`-device-root-pubkey` unset) and no shipped client holds a credential in the
+> first place — the moment either changes, this ruling is due for re-reading, and
+> the trigger is written down below rather than left to be noticed.
+>
+> **What would reopen this.** Not another endpoint. The seam should be re-asked
+> the day this repository grows an enrollment path, because on that day reason 1
+> is gone, reason 2 has to be answered anyway to enroll at all, and reason 3 is
+> paid once instead of twice. That change reaches into a private repository's wire
+> format and wants a card and a wave of its own; it would have to cover how a user
+> supplies a claim code and where it is entered (`cmd/node` flag, `clients/fyne`
+> UI, or both), which verbs beyond `POST /v1/credential` a client speaks and how it
+> obtains the challenge and audience each is bound to, where the service's base URL
+> is configured and what a deployment that runs no account service configures
+> instead, what a failed renewal looks like to a user rather than to a log line,
+> and whether the seam survives underneath as the escape hatch a downstream
+> deployment substitutes its own issuer into.
+
 ### 7. Config surface: `-device-cred-dir` is proposed, not applied, in this change
 
 Issue #53 asks for "how an operator/user supplies the initial credential,
@@ -185,6 +260,14 @@ hold — is out of this change by the issue's own dependency note: account-servi
 work, tracked separately, this card built and tested against locally minted
 chains instead (`core/devicecred_connect_test.go`'s `mintTestChain`, the pattern
 `cmd/coordinator/devicecred_test.go` already established on the verifying side).
+
+> **Update (2026-08-04):** the proposal was taken — `cmd/node` carries
+> `-device-cred-dir` today, and its flag text repeats that enrollment happens
+> elsewhere. Enrollment itself is still out of this repository, which is the first
+> of the three reasons §6's update gives for keeping the seam. `clients/fyne` sets
+> no `Config.DeviceCredDir` at all, so the 1.0 desktop client persists no device
+> credential under any configuration; that is a gap in the client rather than in
+> this record, and it is named here because §6's update leans on it.
 
 ## Consequences
 
@@ -203,6 +286,15 @@ chains instead (`core/devicecred_connect_test.go`'s `mintTestChain`, the pattern
   none is reachable to test against. `DeviceRenew`'s contract is proven with a
   fake seam; the day `bacchus-payment` ships an HTTP surface, wiring it is an
   embedder's `Config.DeviceRenew` closure, not a change to this package.
+
+  > **Update (2026-08-04):** that day has arrived and the bullet's conclusion
+  > survives it. `bacchus-payment` serves `POST /v1/credential`, so "none is
+  > reachable to test against" describes July rather than today — but wiring one
+  > is still an embedder's closure and not a change to this package, and that is
+  > now a ruling on the merits rather than a consequence of a missing dependency.
+  > See §6's update for the three reasons that replace the one this record gave
+  > (#159). Nothing in this repository has been tested against the real endpoint;
+  > whatever fills the seam is what will be.
 - **`cmd/node` needs one new flag.** Tracked here rather than silently left
   undiscoverable; see §7.
 

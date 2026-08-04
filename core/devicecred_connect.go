@@ -158,9 +158,11 @@ const purposeRenew devicecred.Purpose = "bacchus/assert-renew/v1"
 // DeviceRenewRequest is what Config.DeviceRenew is called with: enough to renew
 // without ever handing the caller this device's private key. Sign produces a
 // PurposeRenew assertion over whatever audience and challenge the account
-// service's protocol turns out to want — this package does not and cannot know
-// that shape, since no such endpoint is specified yet anywhere (see ADR-0046) —
-// so the caller supplies both and gets back only the signature.
+// service's protocol asks for. That endpoint exists now, and this package still
+// does not bind itself to the exchange around it: knowing a path is specified is
+// not knowing where a client's challenge comes from or what audience string binds
+// it (ADR-0046's 2026-08-04 update). So the caller supplies both and gets back
+// only the signature.
 type DeviceRenewRequest struct {
 	DevicePub         ed25519.PublicKey
 	CurrentCred       string // the "bacchusd1:" envelope about to expire

@@ -531,12 +531,17 @@ type Config struct {
 	// key is never handed out. Nil (the default) leaves renewal off: the client
 	// runs on whatever core/devicestore already holds until it expires.
 	//
-	// This is a seam rather than a built-in HTTP client on purpose: the account
-	// service's renewal endpoint has no specified request shape anywhere yet (see
-	// ADR-0046), and the public repository committing to one would bind a
-	// contract the private service does not yet own. Only the client role reads
-	// it, and only when DeviceCredDir (or an out-of-band Put into its store) has
-	// given this device something to renew in the first place.
+	// This is a seam rather than a built-in HTTP client on purpose, and the
+	// purpose is no longer that the endpoint is unspecified - it is specified and
+	// served now (ADR-0046's 2026-08-04 update, which re-took the decision once
+	// that stopped being true). What keeps it a seam: nothing in this repository
+	// ENROLLS a device, so a built-in client could renew a credential it has no
+	// way to obtain; the renewal proof is challenge-bound, so a built-in client
+	// would still have to guess where its challenge and audience come from; and
+	// nothing here dials the account service at all. Whatever ships enrollment
+	// ships renewal with it. Only the client role reads this field, and only when
+	// DeviceCredDir (or an out-of-band Put into its store) has given this device
+	// something to renew in the first place.
 	DeviceRenew func(ctx context.Context, req DeviceRenewRequest) (cred, issuerCert string, err error)
 
 	// DeviceRenewMargin is how far before its claimed expiry a stored device
