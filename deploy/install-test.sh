@@ -31,22 +31,51 @@
 # Nothing here proves that systemd accepts the units, that the socket comes up
 # with mode 0660 root:bacchus, that the helper is activated on first connect, or
 # that a real groupadd/usermod behaves as the stubs assume. Those need a booted
-# systemd and root, which means a container or a VM. The repo's CI has no
-# container runtime step for this, so CI DOES NOT RUN ANY OF IT — not this file
-# and not the real-system checks. The manual procedure is at the bottom of this
-# file under REAL-SYSTEM CHECKLIST, and it is what has to be run by hand on a
-# disposable machine before this is called verified.
+# systemd and root, which means a container or a VM. The real-system half is
+# still manual: the procedure is at the bottom of this file under REAL-SYSTEM
+# CHECKLIST and has to be run by hand on a disposable machine before this is
+# called verified. This FILE now runs in CI (the `deploy` job in
+# .github/workflows/ci.yml) — it did not until issues #158 and #160.
+#
+# WHY IT COUNTS ITS OWN CASES
+#
+# `set -eu` is in force, so any command that fails outside a guard stops this
+# script where it stands. Between 451555c and issue #158 that is exactly what
+# happened: fixture_repo's `cp` met the new deploy/windows DIRECTORY, exited
+# non-zero, and took the release-stamp and pipe-safety sections with it. Every
+# case above the failure printed `ok` and nothing said the rest had not run.
+#
+# So the totals are pinned and checked from an EXIT trap, which is the one place
+# that runs even when the bottom of the file is never reached. A run that does
+# not reach every case is reported as no result at all, rather than as the pass
+# it happens to look like.
 
 set -eu
 
+# What a complete run does. Both are asserted in finish(); a case or an
+# assertion added or removed on purpose is a deliberate edit here in the same
+# change, which is the difference between a change and a loss.
+#
+# `checks` is stable across hosts because a case that cannot run on this one
+# calls skip(), which counts. The only such case today is the user+mount
+# namespace one at the bottom.
+expected_cases=29
+expected_checks=138
+
 failures=0
 checks=0
+cases=0
+skips=0
 current=''
+reached_the_end=''
 
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 installer=$here/install.sh
 
 work=$(mktemp -d)
+# Upgraded to finish() as soon as that is defined, a few lines below. This
+# first form exists only so the temporary tree is still removed if something
+# fails in the setup between here and there.
 trap 'rm -rf "$work"' EXIT INT TERM
 
 calls=$work/calls.log
@@ -60,6 +89,7 @@ fake_groups=$work/groups
 
 case_start() {
 	current=$1
+	cases=$((cases + 1))
 	printf '\n== %s\n' "$current"
 }
 
@@ -73,6 +103,99 @@ bad() {
 	failures=$((failures + 1))
 	printf '   FAIL %s\n' "$1"
 }
+
+# A check this host cannot make. It counts, so the total stays the same
+# everywhere and a skip cannot be mistaken for coverage — the tally names it
+# separately instead.
+skip() {
+	checks=$((checks + 1))
+	skips=$((skips + 1))
+	printf '   SKIP %s\n' "$1"
+}
+
+# The end of a run, wherever the run actually ends.
+#
+# This is the EXIT trap rather than the last few lines of the file, because the
+# last few lines of the file are precisely what a run killed by `set -e` never
+# reaches — see WHY IT COUNTS ITS OWN CASES at the top.
+#
+# The verdict is ordered deliberately. `cases` is the truncation signal and
+# nothing else perturbs it: case_start runs unconditionally, whatever the
+# assertions inside a case do. A short case count therefore means the run
+# stopped, and no other reading of the output is worth anything. Only once the
+# run is known to be complete do failures, and then a drifted check count, mean
+# what they say.
+finish() {
+	status=$?
+	trap - EXIT INT TERM
+	set +e
+	rm -rf "$work"
+
+	printf '\n%s of %s cases, %s of %s checks, %s failures' \
+		"$cases" "$expected_cases" "$checks" "$expected_checks" "$failures"
+	[ "$skips" -eq 0 ] || printf ', %s skipped' "$skips"
+	printf '\n'
+
+	if [ "$cases" -ne "$expected_cases" ] || [ -z "$reached_the_end" ]; then
+		cat <<EOF
+
+THIS RUN IS NOT A RESULT. It stopped in case $cases of $expected_cases
+(exit status $status):
+
+  $current
+
+The cases below that one did not run, did not fail, and are covered by
+nothing above. The failure itself is printed after that case's '==' heading.
+
+If a case was added or removed on purpose, expected_cases at the top of this
+file is part of that change.
+EOF
+		exit 1
+	fi
+
+	[ "$failures" = '0' ] || exit 1
+
+	if [ "$checks" -ne "$expected_checks" ]; then
+		cat <<EOF
+
+Every case ran and none failed, but $checks assertions were made where
+$expected_checks were expected. A case did less than it is written to do —
+a loop that iterated the wrong number of times, or a branch that quietly
+asserted nothing. Find it before trusting this run.
+
+If an assertion was added or removed on purpose, expected_checks at the top
+of this file is part of that change.
+EOF
+		exit 1
+	fi
+
+	[ "$status" = '0' ] || exit "$status"
+
+	cat <<'EOF'
+
+REAL-SYSTEM CHECKLIST — none of the above ran systemd, and CI runs this file
+but not the real-system checks. On a disposable machine with systemd (a VM, or
+a container booted with systemd as PID 1), as root:
+
+  sh deploy/install.sh client --user <you>
+  systemctl status bacchus-netd.socket           # active (listening)
+  stat -c '%a %U:%G' /run/bacchus/netd.sock      # 660 root:bacchus
+  systemctl is-enabled bacchus-netd.service      # must NOT be enabled
+  # log out, log back in, then:
+  id -nG | tr ' ' '\n' | grep -x bacchus         # membership took effect
+  bacchus-fyne                                   # connect: helper is reachable
+  sh deploy/install.sh uninstall client --user <you>
+  systemctl status bacchus-netd.socket           # not found
+  getent group bacchus                           # empty
+  ls /usr/local/lib/bacchus /run/bacchus         # both gone
+
+  sh deploy/install.sh node --role exit --binaries /path/to/staged
+  # edit /etc/bacchus/node.env, then re-run the same command
+  systemctl status bacchus-exit                  # active
+  sh deploy/install.sh uninstall node --purge
+EOF
+}
+trap finish EXIT INT TERM
 
 assert_file() {
 	path=$1
@@ -155,9 +278,19 @@ make_stub() {
 	chmod +x "$stubdir/$name"
 }
 
+# The single-quoted halves below are SOURCE CODE FOR THE GENERATED STUB, not
+# strings this shell should expand: $a and $1 are the stub's own loop variable
+# and the stub's own argument, and expanding them here would bake in this
+# shell's values and produce a stub that records nothing. The parts that DO
+# have to be resolved now — the fake_groups path, which the stub cannot know —
+# are spliced in by leaving the quotes, which is what the '"…"' seams are.
+# Hence the disables rather than a rewrite; SC2016 is describing the intent
+# correctly and the intent is right.
 make_stub systemctl 'exit 0'
 make_stub usermod 'exit 0'
+# shellcheck disable=SC2016
 make_stub groupadd 'for a; do case $a in -*) ;; *) echo "$a" >>"'"$fake_groups"'";; esac; done; exit 0'
+# shellcheck disable=SC2016
 make_stub groupdel 'grep -vx "$1" "'"$fake_groups"'" >"'"$fake_groups"'.n" || true; mv "'"$fake_groups"'.n" "'"$fake_groups"'"; exit 0'
 make_stub systemd-sysusers 'echo bacchus >>"'"$fake_groups"'"; exit 0'
 
@@ -165,6 +298,11 @@ make_stub systemd-sysusers 'echo bacchus >>"'"$fake_groups"'"; exit 0'
 # so that the desktop user's home directory is resolved the way the installer
 # will really resolve it (and then prefixed by --root, which is what keeps this
 # test out of the real home directory).
+#
+# Same reason for the disable as the stubs above: ${1:-}, ${2:-} and "$@" are
+# the generated getent's parameters and must reach the file unexpanded. The two
+# paths that must NOT are passed as printf arguments and land through %s.
+# shellcheck disable=SC2016
 {
 	printf '#!/bin/sh\n'
 	printf 'if [ "${1:-}" = group ]; then\n'
@@ -528,7 +666,7 @@ env -u SUDO_USER BACCHUS_ROOT="$stage" sh "$installer" client --binaries "$bins"
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
-	ok 'exits non-zero with no --user and no $SUDO_USER'
+	ok "exits non-zero with no --user and no \$SUDO_USER"
 else
 	bad 'guessed a user instead of refusing'
 fi
@@ -563,6 +701,11 @@ assert_absent "$stage/usr/local/bin/bacchus-node"
 
 # Writes a runnable stand-in at whatever -o names, because the installer goes on
 # to install what it just "built".
+#
+# Single-quoted for the reason the other stubs are: "$@", $a, $prev and $out
+# belong to the generated `go`, which has to read the installer's real argument
+# list at the time the installer runs it.
+# shellcheck disable=SC2016
 make_stub go 'out=""; prev=""
 for a in "$@"; do
 	if [ "$prev" = "-o" ]; then out=$a; fi
@@ -575,7 +718,12 @@ fixture_repo() {
 	fixture=$work/fixture.$1
 	rm -rf "$fixture"
 	mkdir -p "$fixture/deploy"
-	cp "$here"/* "$fixture/deploy/"
+	# -R because deploy/ has held a SUBDIRECTORY since 451555c (deploy/windows).
+	# Without it `cp` refuses the directory and exits non-zero, `set -eu` kills
+	# the suite here, and everything below this line silently stops running —
+	# which is issue #158 and is why the tally is now asserted rather than
+	# printed.
+	cp -R "$here"/* "$fixture/deploy/"
 	: >"$fixture/go.mod"
 }
 
@@ -681,6 +829,10 @@ done
 # offset is a COMPLETE script and installs correctly. It looked like a
 # tempting "almost the whole file" case and it is really a positive control —
 # which the piped-full-script case above already covers properly.
+# A grep PATTERN, not a string to expand: the \$ matches the literal dollar in
+# the installer's own `case $mode in` line. Expanding it here would search for
+# whatever this suite happens to have in $mode, which is nothing.
+# shellcheck disable=SC2016
 dispatch_at=$(grep -n '^case \$mode in' "$installer" | cut -d: -f1)
 pre=$(head -n "$((dispatch_at - 1))" "$installer" | wc -c)
 offsets="$offsets $pre $((pre + 20)) $((total - 5))"
@@ -735,12 +887,28 @@ fi
 # are tmpfs. That closes the one gap a prefix leaves — a path-joining bug that
 # only shows up when the prefix is empty — and it is the same trick
 # cmd/bacchus-netd's tests use to get a real kernel without root.
+#
+# BACCHUS_INSTALL_TEST_REQUIRE_NS turns the skip into a failure, and CI sets it.
+# Same shape and same reason as BACCHUS_NETD_REQUIRE_NS and
+# BACCHUS_REQUIRE_STAMP in ci.yml: this is the only case that runs at a real
+# absolute path, and a runner that quietly lost the capability would report a
+# green job over the one thing a staging prefix cannot check. A developer's
+# machine without user namespaces still skips, and the tally names the skip.
 case_start 'real absolute paths inside a user+mount namespace'
 if ! unshare -Urm --propagation private true 2>/dev/null; then
-	printf '   SKIP unprivileged user+mount namespaces are unavailable on this host\n'
+	if [ -n "${BACCHUS_INSTALL_TEST_REQUIRE_NS:-}" ]; then
+		bad 'unprivileged user+mount namespaces are unavailable, and BACCHUS_INSTALL_TEST_REQUIRE_NS demands them'
+	else
+		skip 'unprivileged user+mount namespaces are unavailable on this host'
+	fi
 else
 	nsout=$work/ns.log
 	set +e
+	# The single-quoted body is the inner shell's script, and $1/$2/$3 are the
+	# arguments handed to it after the `_` at the bottom of this command. It
+	# must reach that shell unexpanded — this one has no positional parameters
+	# to give it.
+	# shellcheck disable=SC2016
 	unshare -Urm --propagation private sh -c '
 		set -eu
 		mount -t tmpfs none /usr/local
@@ -770,29 +938,7 @@ fi
 
 # ---------------------------------------------------------------------------
 
-printf '\n%s checks, %s failures\n' "$checks" "$failures"
-[ "$failures" = '0' ] || exit 1
-
-cat <<'EOF'
-
-REAL-SYSTEM CHECKLIST — none of the above ran systemd, and CI does not run any
-of this file. On a disposable machine with systemd (a VM, or a container booted
-with systemd as PID 1), as root:
-
-  sh deploy/install.sh client --user <you>
-  systemctl status bacchus-netd.socket           # active (listening)
-  stat -c '%a %U:%G' /run/bacchus/netd.sock      # 660 root:bacchus
-  systemctl is-enabled bacchus-netd.service      # must NOT be enabled
-  # log out, log back in, then:
-  id -nG | tr ' ' '\n' | grep -x bacchus         # membership took effect
-  bacchus-fyne                                   # connect: helper is reachable
-  sh deploy/install.sh uninstall client --user <you>
-  systemctl status bacchus-netd.socket           # not found
-  getent group bacchus                           # empty
-  ls /usr/local/lib/bacchus /run/bacchus         # both gone
-
-  sh deploy/install.sh node --role exit --binaries /path/to/staged
-  # edit /etc/bacchus/node.env, then re-run the same command
-  systemctl status bacchus-exit                  # active
-  sh deploy/install.sh uninstall node --purge
-EOF
+# The last statement in the file, and the only thing that sets this. finish()
+# reads it: an unset value means the run stopped somewhere above, whatever the
+# counters happen to say.
+reached_the_end=yes
