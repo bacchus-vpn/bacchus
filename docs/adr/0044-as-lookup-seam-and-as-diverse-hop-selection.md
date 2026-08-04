@@ -1051,7 +1051,9 @@ direct multi-commit push to `main`, and nothing on the platform prevents it: che
 through reviewed, merged pull requests" is workflow discipline rather than something the
 forge enforces. Ancestry is therefore a very good proxy and not the thing itself, and the
 remaining sliver closes with branch protection rather than with more shell in this
-workflow. Carried as a card rather than left in this paragraph.
+workflow. It has **no card yet**, and this paragraph is not a substitute for one — which
+is the fourth amendment's own lesson, since a residual it named and carried is what this
+amendment exists to close.
 
 **Scope is unchanged from the fourth amendment §4.** `release.yml` builds Windows, so this
 covers the platform that has releases. A Linux source install through `deploy/install.sh`
