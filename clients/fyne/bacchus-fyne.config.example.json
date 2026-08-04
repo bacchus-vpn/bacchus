@@ -36,5 +36,12 @@
   "volunteerRelay": false,
   "volunteerExit": false,
   "volunteerAdvertise": "",
-  "volunteerExitKey": ""
+  "volunteerExitKey": "",
+
+  "accountServiceUrl": "",
+  "accountServiceAudience": "",
+  "accountServiceCa": "",
+  "deviceCredDir": "",
+  "claimCode": "",
+  "deviceLabel": ""
 }

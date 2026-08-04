@@ -1,0 +1,102 @@
+{
+  "note": "Frozen from the account service's REAL handlers, driven by core/accountclient, by the cross-repo conformance harness ADR-0056 describes. Not hand-written and not editable by hand: every signature, key, challenge, serial and credential here was minted by an in-memory service that no longer exists, under a development root, and none of it authenticates anything. The one edited field is the claim code's value, replaced before freezing because it is the only one shaped like a live bearer secret.",
+  "audience": "conformance.account.service",
+  "exchanges": [
+    {
+      "verb": "/v1/challenge",
+      "request": {},
+      "status": 200,
+      "response": {
+        "challenge": "0Scp6l6Mi2mv2MB37qutWVeGYYgPwfAbAkLhr7DL9ww=",
+        "expires_at": "2026-08-04T16:59:53.490451544Z"
+      }
+    },
+    {
+      "verb": "/v1/enroll",
+      "request": {
+        "challenge": "0Scp6l6Mi2mv2MB37qutWVeGYYgPwfAbAkLhr7DL9ww=",
+        "claim": "BC1-VALUE-REDACTED-BEFORE-FREEZING",
+        "device_pub": "JFgnZWrVrdDJkmE6M0yLbSsdIsu4lxAPutXvbBLwd5Q=",
+        "label": "desktop",
+        "sig": "6QX/UiC4QmAJ1UMe2CMWNaas+9qRt0C+QfBfmqE+HI3mBWsC3e77zwpBmfHvW/44uXqjh0lareQplkZ+2FHXAA=="
+      },
+      "status": 200,
+      "response": {
+        "admission": "bacchusc1:eyJ2IjoxLCJzZXJpYWwiOiI0YzNhNWUzYTY3YzE0MzdhIiwic3ViIjoiMjQ1ODI3NjU2YWQ1YWRkMGM5OTI2MTNhMzM0YzhiNmQyYjFkMjJjYmI4OTcxMDBmYmFkNWVmNmMxMmYwNzc5NCIsInJvbGVzIjpbImNsaWVudCJdLCJuYmYiOiIyMDI2LTA4LTA0VDE2OjU0OjUzLjQ5MDcyMTE4OVoiLCJleHAiOiIyMDI2LTA4LTA2VDE2OjU0OjUzLjQ5MDcyMTE4OVoiLCJ0cnVzdCI6ImVwaGVtZXJhbCIsInBsYW4iOiJwcm8ifWUdC1b2NmMm0HWUJFs40kXqB_6sTovy5EVXojmtq-8PNcX9RLsVr763S4LaxoTdG8NcctacYTgQPxiEhvtiugA",
+        "device": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiIzNmY5ZWRmZWRlMWU5ZjRmIiwiZHB1YiI6IkpGZ25aV3JWcmRESmttRTZNMHlMYlNzZElzdTRseEFQdXRYdmJCTHdkNVE9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDgtMDRUMTY6NTQ6NTMuNDkwNzIxMTg5WiIsImV4cCI6IjIwMjYtMDgtMDZUMTY6NTQ6NTMuNDkwNzIxMTg5WiJ9QZen7Xx8Om1fWpsOQUpZwkieeS9a_flP8aBZQKpS1t0AcVUkYjwf-DmMvUKPIFyZqyN_S5BvQ4zzV1zZ-MAtCg",
+        "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiIyMGZiMDMxNzVkMmRjZGI0IiwiaXB1YiI6InUvdHpLY3o5VjBaL0FaQ0xxMVdOOHdGYXZabWEyYTQwSStSaWcraHRMR2c9IiwibmJmIjoiMjAyNi0wOC0wNFQxNjo1NDo1My40ODY2ODQyMDZaIiwiZXhwIjoiMjAyNy0wOC0wNFQxNjo1NDo1My40ODY2ODQyMDZaIiwibXR0bCI6MjU5MjAwMDAwMDAwMDAwLCJub3RlIjoiZGV2ZWxvcG1lbnQgaXNzdWVyIC0gdGhyb3dhd2F5IHJvb3QifabrqHumkeg5Q_tu3RDYlZjDQ4cQzVbD_svCEdF04YMi1zbCyaT7_PeHqYvnSTY--mA0LhVGXNjLVm6voXj7NAU"
+      }
+    },
+    {
+      "verb": "/v1/challenge",
+      "request": {},
+      "status": 200,
+      "response": {
+        "challenge": "7k1LDIbddOjpL/Svxt+URzBzSVAR9K7f6UlaPaZh4Xc=",
+        "expires_at": "2026-08-04T16:59:53.491959692Z"
+      }
+    },
+    {
+      "verb": "/v1/credential",
+      "request": {
+        "challenge": "7k1LDIbddOjpL/Svxt+URzBzSVAR9K7f6UlaPaZh4Xc=",
+        "device_pub": "JFgnZWrVrdDJkmE6M0yLbSsdIsu4lxAPutXvbBLwd5Q=",
+        "sig": "8fH7LxWu5FfSv8TlRf8b4DLPd4a947MnpMBlPc1W9sw2XrGemBCiablpY494afDPh4QtTq8h+uV+2d3gxTu7AA=="
+      },
+      "status": 200,
+      "response": {
+        "admission": "bacchusc1:eyJ2IjoxLCJzZXJpYWwiOiIwMjM4MmMxMGM5NDk5NDQwIiwic3ViIjoiMjQ1ODI3NjU2YWQ1YWRkMGM5OTI2MTNhMzM0YzhiNmQyYjFkMjJjYmI4OTcxMDBmYmFkNWVmNmMxMmYwNzc5NCIsInJvbGVzIjpbImNsaWVudCJdLCJuYmYiOiIyMDI2LTA4LTA0VDE2OjU0OjUzLjQ5MjM3MjM2NVoiLCJleHAiOiIyMDI2LTA4LTA2VDE2OjU0OjUzLjQ5MjM3MjM2NVoiLCJ0cnVzdCI6ImVwaGVtZXJhbCIsInBsYW4iOiJwcm8ifd7fFg3_Ol52meNvZieiVJQqDnpGw0J6y8mArRyVfCyLBxSeSQvQJoVkKn3itC8vBb9-Jax4a6ej6Bpc-3ba2A0",
+        "device": "bacchusd1:eyJ2IjoxLCJzZXJpYWwiOiJjMDU3NzNmOWU4NThmYTc3IiwiZHB1YiI6IkpGZ25aV3JWcmRESmttRTZNMHlMYlNzZElzdTRseEFQdXRYdmJCTHdkNVE9IiwiZXBvY2giOjAsIm5iZiI6IjIwMjYtMDgtMDRUMTY6NTQ6NTMuNDkyMzcyMzY1WiIsImV4cCI6IjIwMjYtMDgtMDZUMTY6NTQ6NTMuNDkyMzcyMzY1WiJ9_CqdAjf6zKv5ciIQST5qWyD60HtPR_Y4AY8j50DrE9T87heeWNqO5Glz-ey5PSpLytLYnA3ZElNfibx-iX_rCw",
+        "issuer_cert": "bacchusi1:eyJ2IjoxLCJzZXJpYWwiOiIyMGZiMDMxNzVkMmRjZGI0IiwiaXB1YiI6InUvdHpLY3o5VjBaL0FaQ0xxMVdOOHdGYXZabWEyYTQwSStSaWcraHRMR2c9IiwibmJmIjoiMjAyNi0wOC0wNFQxNjo1NDo1My40ODY2ODQyMDZaIiwiZXhwIjoiMjAyNy0wOC0wNFQxNjo1NDo1My40ODY2ODQyMDZaIiwibXR0bCI6MjU5MjAwMDAwMDAwMDAwLCJub3RlIjoiZGV2ZWxvcG1lbnQgaXNzdWVyIC0gdGhyb3dhd2F5IHJvb3QifabrqHumkeg5Q_tu3RDYlZjDQ4cQzVbD_svCEdF04YMi1zbCyaT7_PeHqYvnSTY--mA0LhVGXNjLVm6voXj7NAU"
+      }
+    },
+    {
+      "verb": "/v1/challenge",
+      "request": {},
+      "status": 200,
+      "response": {
+        "challenge": "cCoRf61mrTbYLu8eXeybuSOsLTGSlqLSxAvy5ANglWo=",
+        "expires_at": "2026-08-04T16:59:53.49332147Z"
+      }
+    },
+    {
+      "verb": "/v1/enroll",
+      "request": {
+        "challenge": "cCoRf61mrTbYLu8eXeybuSOsLTGSlqLSxAvy5ANglWo=",
+        "claim": "BC1-VALUE-REDACTED-BEFORE-FREEZING",
+        "device_pub": "MvFKYGj0iY6WuDkmxbg1DjxhXQz005wFIBE6H1I/6u4=",
+        "label": "desktop",
+        "sig": "bdHDFQJJhQCJKSP7UCNy7p9oAiiP1FqKZqG9SmmO0LoCUX4HD2h2tpC+8x+EHt+1ZyY0BKW+BUUIaRxnExjiCw=="
+      },
+      "status": 403,
+      "response": {
+        "error": {
+          "code": "claim_rejected"
+        }
+      }
+    },
+    {
+      "verb": "/v1/challenge",
+      "request": {},
+      "status": 200,
+      "response": {
+        "challenge": "RqySAbTx4Z8jL+yXtglPbetmJfVqJtl9t6nyqdDulwY=",
+        "expires_at": "2026-08-04T16:59:53.494017111Z"
+      }
+    },
+    {
+      "verb": "/v1/credential",
+      "request": {
+        "challenge": "RqySAbTx4Z8jL+yXtglPbetmJfVqJtl9t6nyqdDulwY=",
+        "device_pub": "Bn+CsZBpDjAexIEhnAw5fBPb3aJU5J+8QwcZ+cAD9iw=",
+        "sig": "KbQ8b1HJgFga7XpqaZF/sbrwox9R0sgrhJJFySOvhkWYQFCQwXUBQZjyF0SYPCsR3p4t/QScR9etEwpuk1meCw=="
+      },
+      "status": 403,
+      "response": {
+        "error": {
+          "code": "bad_assertion"
+        }
+      }
+    }
+  ]
+}

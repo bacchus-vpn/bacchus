@@ -7,11 +7,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +23,9 @@ import (
 
 	"github.com/bacchus-vpn/bacchus/clients/internal/enforcement"
 	"github.com/bacchus-vpn/bacchus/core"
+	"github.com/bacchus-vpn/bacchus/core/accountclient"
+	"github.com/bacchus-vpn/bacchus/core/delegation"
+	"github.com/bacchus-vpn/bacchus/core/devicecred"
 	"github.com/pion/turn/v4"
 )
 
@@ -1437,4 +1444,414 @@ func TestUnderlayDialHookIsWiredToTheEnforcer(t *testing.T) {
 	if got := enf.reservedUnderlays(); len(got) != 1 || got[0] != "192.0.2.10:443" {
 		t.Errorf("the Enforcer was told to reserve %v, want [192.0.2.10:443] — the hook is pointed somewhere else, and an underlay dialled before enforcement starts is excluded by nothing", got)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// The device credential (bacchus#163, ADR-0056)
+// ---------------------------------------------------------------------------
+
+// enrollmentTestService is a stand-in for the account service, over real TLS,
+// answering the three verbs the client speaks. It is deliberately minimal —
+// core/accountclient's own tests are where the wire is exercised, including
+// against bytes the REAL service produced. What is under test here is what this
+// CLIENT does with each outcome.
+type enrollmentTestService struct {
+	srv        *httptest.Server
+	ca         string
+	enrollCode string // non-empty answers /v1/enroll with this coded refusal
+	enrolls    int
+}
+
+func newEnrollmentTestService(t *testing.T) *enrollmentTestService {
+	t.Helper()
+	s := &enrollmentTestService{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/challenge", func(w http.ResponseWriter, r *http.Request) {
+		nonce := make([]byte, 32)
+		if _, err := rand.Read(nonce); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(map[string]any{"challenge": nonce, "expires_at": time.Now().Add(5 * time.Minute).UTC()})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
+	})
+	issue := func(w http.ResponseWriter, r *http.Request) {
+		b, _ := json.Marshal(map[string]any{
+			"device":      "bacchusd1:" + testCredEnvelopeBody,
+			"issuer_cert": "bacchusi1:issuer",
+			"admission":   "bacchusc1:admission",
+		})
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
+	}
+	mux.HandleFunc("/v1/enroll", func(w http.ResponseWriter, r *http.Request) {
+		s.enrolls++
+		if s.enrollCode != "" {
+			b, _ := json.Marshal(map[string]any{"error": map[string]any{"code": s.enrollCode}})
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(403)
+			_, _ = w.Write(b)
+			return
+		}
+		issue(w, r)
+	})
+	mux.HandleFunc("/v1/credential", func(w http.ResponseWriter, r *http.Request) {
+		b, _ := json.Marshal(map[string]any{"error": map[string]any{"code": "bad_assertion"}})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(403)
+		_, _ = w.Write(b)
+	})
+	s.srv = httptest.NewTLSServer(mux)
+	t.Cleanup(s.srv.Close)
+
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.ca = ca
+	return s
+}
+
+// testCredEnvelopeBody is an opaque credential body: this client never decodes
+// one and neither does anything under test here.
+const testCredEnvelopeBody = "b3BhcXVl"
+
+func (s *enrollmentTestService) config(t *testing.T, claim string) Config {
+	t.Helper()
+	return Config{
+		Coordinators:           []string{"127.0.0.1:1"},
+		AccountServiceURL:      s.srv.URL,
+		AccountServiceAudience: "account.test",
+		AccountServiceCA:       s.ca,
+		DeviceCredDir:          t.TempDir(),
+		ClaimCode:              claim,
+	}
+}
+
+// TestEnrollmentRedeemsAClaimCodeAndErasesIt: the code is a bearer secret that
+// is spent exactly once, and the service erases its own copy on redemption
+// rather than flagging it — so a client that kept a spent one would hold the
+// only remaining record that it ever existed.
+func TestEnrollmentRedeemsAClaimCodeAndErasesIt(t *testing.T) {
+	s := newEnrollmentTestService(t)
+	cleared := false
+	restore := appstateClearClaimCode
+	appstateClearClaimCode = func() error { cleared = true; return nil }
+	t.Cleanup(func() { appstateClearClaimCode = restore })
+
+	ctrl := newProxyOnlyController(s.config(t, "BC1-GOODCODE"))
+	dc, err := ctrl.openDeviceCredential()
+	if err != nil {
+		t.Fatalf("openDeviceCredential: %v", err)
+	}
+	if abandon := ctrl.enrollIfNeeded(context.Background(), dc); abandon != nil {
+		t.Fatalf("enrollment abandoned the connect: %v", abandon)
+	}
+	if !dc.dev.Enrolled() {
+		t.Fatal("the device holds no credential after a successful enrollment")
+	}
+	if !cleared {
+		t.Fatal("the spent claim code was left in the config file")
+	}
+	if got := accountclient.LoadAdmission(dc.dir); got != "bacchusc1:admission" {
+		t.Fatalf("admission credential = %q; the account service minted one and it was dropped", got)
+	}
+}
+
+// TestEnrollmentSpendsNothingWhenTheDeviceAlreadyHasOne.
+func TestEnrollmentSpendsNothingWhenTheDeviceAlreadyHasOne(t *testing.T) {
+	s := newEnrollmentTestService(t)
+	ctrl := newProxyOnlyController(s.config(t, "BC1-GOODCODE"))
+	dc, err := ctrl.openDeviceCredential()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dc.dev.Put("bacchusd1:already", "bacchusi1:already"); err != nil {
+		t.Fatal(err)
+	}
+	if abandon := ctrl.enrollIfNeeded(context.Background(), dc); abandon != nil {
+		t.Fatalf("abandoned: %v", abandon)
+	}
+	if s.enrolls != 0 {
+		t.Fatalf("/v1/enroll was called %d times for a device that already held a credential", s.enrolls)
+	}
+}
+
+// TestAServiceRefusalAbandonsTheConnectAndSaysWhy: a refusal about the claim
+// code will be identical in ten hours and the user has something to do about it,
+// so continuing to a coordinator that refuses for a reason two layers away is
+// strictly worse than stopping here.
+func TestAServiceRefusalAbandonsTheConnectAndSaysWhy(t *testing.T) {
+	for _, tc := range []struct {
+		code string
+		want string
+	}{
+		{"claim_rejected", "not accepted"},
+		{"malformed_secret", "does not look like"},
+		{"entitlement_expired", "subscription has expired"},
+		{"no_slots", "no device slots left"},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			s := newEnrollmentTestService(t)
+			s.enrollCode = tc.code
+			ctrl := newProxyOnlyController(s.config(t, "BC1-BADCODE"))
+			dc, err := ctrl.openDeviceCredential()
+			if err != nil {
+				t.Fatal(err)
+			}
+			abandon := ctrl.enrollIfNeeded(context.Background(), dc)
+			if abandon == nil {
+				t.Fatal("a terminal refusal did not abandon the connect")
+			}
+			if !strings.Contains(abandon.Error(), tc.want) {
+				t.Fatalf("message %q does not contain %q", abandon.Error(), tc.want)
+			}
+			// And the sentence must not be the protocol token.
+			if strings.Contains(abandon.Error(), tc.code) {
+				t.Fatalf("the user is shown the wire code: %q", abandon.Error())
+			}
+		})
+	}
+}
+
+// TestAnUnreachableAccountServiceDoesNotBlockConnecting is the other half of the
+// ruling, and the more important one. A coordinator's device gate is off unless
+// an operator turned it on, so making the account service's reachability a
+// precondition for connecting would put the one service the deployment model
+// allows to be blockable onto the critical path of connecting.
+func TestAnUnreachableAccountServiceDoesNotBlockConnecting(t *testing.T) {
+	s := newEnrollmentTestService(t)
+	cfg := s.config(t, "BC1-GOODCODE")
+	s.srv.Close() // nothing is listening now
+
+	var details []Detail
+	ctrl := newProxyOnlyController(cfg)
+	ctrl.OnDetail = func(d Detail) { details = append(details, d) }
+
+	dc, err := ctrl.openDeviceCredential()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if abandon := ctrl.enrollIfNeeded(context.Background(), dc); abandon != nil {
+		t.Fatalf("an unreachable account service abandoned the connect: %v", abandon)
+	}
+	if len(details) == 0 || !strings.Contains(details[0].Text, "Could not reach") {
+		t.Fatalf("the user was told nothing about the failed registration: %+v", details)
+	}
+}
+
+// TestABrokenAccountServiceConfigIsRefusedRatherThanSkipped: every one of
+// accountclient.New's refusals is a value that cannot be defaulted, so a typo
+// has to stop the connect and name itself rather than leave the user silently
+// unenrolled — or, worse, enrolled against whoever answered.
+func TestABrokenAccountServiceConfigIsRefusedRatherThanSkipped(t *testing.T) {
+	s := newEnrollmentTestService(t)
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"no audience", func(c *Config) { c.AccountServiceAudience = "" }},
+		{"no pinned CA", func(c *Config) { c.AccountServiceCA = "" }},
+		{"plain http", func(c *Config) { c.AccountServiceURL = "http://127.0.0.1:9" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := s.config(t, "BC1-GOODCODE")
+			tc.mutate(&cfg)
+			if _, err := newProxyOnlyController(cfg).openDeviceCredential(); err == nil {
+				t.Fatal("a broken account-service configuration was accepted")
+			}
+		})
+	}
+}
+
+// TestNoAccountServiceIsACompleteConfiguration: leaving all of it empty must be
+// a supported deployment, not a degraded one — the same posture AdmissionPubKey
+// already has.
+func TestNoAccountServiceIsACompleteConfiguration(t *testing.T) {
+	ctrl := newProxyOnlyController(Config{Coordinators: []string{"127.0.0.1:1"}, DeviceCredDir: t.TempDir()})
+	dc, err := ctrl.openDeviceCredential()
+	if err != nil {
+		t.Fatalf("openDeviceCredential with no account service: %v", err)
+	}
+	if dc.client != nil {
+		t.Fatal("a client was built for a deployment that names no account service")
+	}
+	if dc.dev == nil {
+		t.Fatal("no device enrollment was opened; a credential provisioned by other means would be ignored")
+	}
+	if ctrl.deviceRenewHook(dc) != nil {
+		t.Fatal("core.Config.DeviceRenew was set without an account service to renew against")
+	}
+	if abandon := ctrl.enrollIfNeeded(context.Background(), dc); abandon != nil {
+		t.Fatalf("abandoned: %v", abandon)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A failed renewal is a user-visible state, not a log line. This is ADR-0046's
+// fourth question and the one it named as most likely to be skipped.
+// ---------------------------------------------------------------------------
+
+func TestRenewalFailureBecomesAUserVisibleState(t *testing.T) {
+	s := newEnrollmentTestService(t)
+	cfg := s.config(t, "")
+	ctrl := newProxyOnlyController(cfg)
+	var details []Detail
+	ctrl.OnDetail = func(d Detail) { details = append(details, d) }
+
+	dc, err := ctrl.openDeviceCredential()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook := ctrl.deviceRenewHook(dc)
+	if hook == nil {
+		t.Fatal("no renewal hook was built")
+	}
+
+	// A credential with plenty of life left: a warning, not an alarm.
+	_, _, farOff, key := mintAppstateChain(t, 40*time.Hour)
+	if _, _, err := hook(context.Background(), core.DeviceRenewRequest{
+		DevicePub:   key.Public().(ed25519.PublicKey),
+		CurrentCred: farOff,
+		Sign:        func(a string, ch []byte) ([]byte, error) { return make([]byte, 64), nil },
+	}); err == nil {
+		t.Fatal("the fake service refuses /v1/credential; renewal should have failed")
+	}
+	st := ctrl.CredentialState()
+	if !st.RenewalFailing {
+		t.Fatal("a failed renewal left no state behind")
+	}
+	if st.Attention {
+		t.Fatal("a failure with 40 hours of credential left raised an attention flag")
+	}
+	if len(details) == 0 || strings.Contains(details[len(details)-1].Text, "bad_assertion") {
+		t.Fatalf("the user was shown a protocol token rather than a sentence: %+v", details)
+	}
+
+	// The same failure with the credential nearly gone: now it is the user's
+	// problem, and the sentence has to say so before the window closes.
+	_, _, nearlyGone, key2 := mintAppstateChain(t, 30*time.Minute)
+	_, _, _ = hook(context.Background(), core.DeviceRenewRequest{
+		DevicePub:   key2.Public().(ed25519.PublicKey),
+		CurrentCred: nearlyGone,
+		Sign:        func(a string, ch []byte) ([]byte, error) { return make([]byte, 64), nil },
+	})
+	st = ctrl.CredentialState()
+	if !st.Attention {
+		t.Fatal("a failure inside the last hours of a credential's life did not raise attention")
+	}
+	last := details[len(details)-1].Text
+	if !strings.Contains(last, "needs attention") {
+		t.Fatalf("the escalated sentence does not escalate: %q", last)
+	}
+	if !strings.Contains(last, "minutes") {
+		t.Fatalf("the escalated sentence does not say how long is left: %q", last)
+	}
+}
+
+// TestRenewalFailureTextIsAboutTheClockExceptWhenItIsAboutTheAccount.
+func TestRenewalFailureTextIsAboutTheClockExceptWhenItIsAboutTheAccount(t *testing.T) {
+	expired := &accountclient.Error{Code: accountclient.CodeEntitlementExpired, Recognized: true}
+	// Plenty of time left, but no amount of waiting fixes a lapsed subscription.
+	got := renewalFailureText(expired, time.Now().Add(40*time.Hour), 40*time.Hour)
+	if !strings.Contains(got, "subscription has expired") {
+		t.Fatalf("an expired entitlement with time on the clock said %q", got)
+	}
+	revoked := &accountclient.Error{Code: accountclient.CodeDeviceRevoked, Recognized: true}
+	if got := renewalFailureText(revoked, time.Now().Add(40*time.Hour), 40*time.Hour); !strings.Contains(got, "withdrawn") {
+		t.Fatalf("a revoked device said %q", got)
+	}
+	// An unreadable expiry is treated as "cannot tell", never as "fine".
+	if got := renewalFailureText(errors.New("boom"), time.Time{}, 0); !strings.Contains(got, "cannot tell") {
+		t.Fatalf("an unknown expiry said %q", got)
+	}
+}
+
+// TestASuccessfulRenewalClearsTheWarningAndSaysSoOnlyIfThereWasOne: announcing
+// every success would make the detail line flicker with news that nothing is
+// wrong, which is how a line that also carries real warnings stops being read.
+func TestASuccessfulRenewalClearsTheWarningAndSaysSoOnlyIfThereWasOne(t *testing.T) {
+	ctrl := newProxyOnlyController(Config{})
+	var details []Detail
+	ctrl.OnDetail = func(d Detail) { details = append(details, d) }
+
+	_, _, cred, _ := mintAppstateChain(t, 40*time.Hour)
+
+	ctrl.recordRenewalSuccess(cred)
+	if len(details) != 0 {
+		t.Fatalf("a routine renewal announced itself: %+v", details)
+	}
+	if st := ctrl.CredentialState(); !st.Enrolled || st.ExpiresAt.IsZero() {
+		t.Fatalf("state after a renewal = %+v", st)
+	}
+
+	ctrl.recordRenewalFailure(cred, errors.New("boom"))
+	before := len(details)
+	ctrl.recordRenewalSuccess(cred)
+	if len(details) != before+1 || !strings.Contains(details[len(details)-1].Text, "up to date") {
+		t.Fatalf("recovery from a failure was not announced: %+v", details)
+	}
+	if st := ctrl.CredentialState(); st.RenewalFailing || st.Attention {
+		t.Fatalf("state after recovery = %+v", st)
+	}
+}
+
+func TestRoughDurationIsCoarse(t *testing.T) {
+	for _, tc := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{5 * time.Hour, "5 hours"},
+		{90 * time.Minute, "an hour"},
+		{25 * time.Minute, "25 minutes"},
+		{30 * time.Second, "a moment"},
+	} {
+		if got := roughDuration(tc.d); got != tc.want {
+			t.Fatalf("roughDuration(%v) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+}
+
+// mintAppstateChain mints a throwaway device credential whose claimed expiry is
+// ttl away, using only devicecred's exported API — the same shape core's own
+// tests use, reproduced here because this package cannot reach into core's.
+func mintAppstateChain(t *testing.T, ttl time.Duration) (rootPub ed25519.PublicKey, issuerCertEnc, credEnc string, devicePriv ed25519.PrivateKey) {
+	t.Helper()
+	now := time.Now()
+	rootPub, rootPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerPub, issuerPriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	devicePub, devicePriv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certBody, err := json.Marshal(devicecred.IssuerCert{
+		Version: devicecred.Version, Serial: "t", IssuerPub: issuerPub,
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(365 * 24 * time.Hour), MaxCredTTL: 72 * time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerCertEnc = devicecred.EncodeIssuerCert(signAppstateBody(t, rootPriv, delegation.TagIssuerCert, certBody))
+	credBody, err := json.Marshal(devicecred.DeviceCredential{
+		Version: devicecred.Version, Serial: "t", DevicePub: devicePub,
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(ttl),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credEnc = devicecred.EncodeDeviceCredential(signAppstateBody(t, issuerPriv, delegation.TagDeviceCred, credBody))
+	return rootPub, issuerCertEnc, credEnc, devicePriv
+}
+
+func signAppstateBody(t *testing.T, priv ed25519.PrivateKey, tag string, body []byte) []byte {
+	t.Helper()
+	msg := append([]byte(tag), 0x00)
+	msg = append(msg, body...)
+	return append(append([]byte{}, body...), ed25519.Sign(priv, msg)...)
 }

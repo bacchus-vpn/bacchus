@@ -508,12 +508,19 @@ type Config struct {
 	// Appended after RelayDirectoryPath to keep the struct tail a stable seam.
 	//
 	// This is a DIFFERENT credential from AdmissionCred - see core/devicecred's
-	// package doc - and the engine does not obtain the first one for a device
-	// (enrollment, by claim code, is out of this feature's scope). What it does:
-	// generate and keep the on-device key that never leaves it, hold whatever
-	// credential + issuer cert something else provisioned into DeviceCredDir,
-	// present that chain on every connect (core/devicecred_connect.go), and keep
-	// it fresh by renewal when DeviceRenew is set.
+	// package doc - and the ENGINE still does not obtain the first one for a
+	// device. What it does: generate and keep the on-device key that never leaves
+	// it, hold whatever credential + issuer cert something else provisioned into
+	// DeviceCredDir, present that chain on every connect
+	// (core/devicecred_connect.go), and keep it fresh by renewal when DeviceRenew
+	// is set.
+	//
+	// "Something else" is no longer necessarily out of this repository: as of
+	// bacchus#163 core/accountclient enrolls a device by claim code and writes the
+	// result into a DeviceCredDir, and clients/fyne calls it. That is an embedder
+	// reaching the same directory through core.OpenDeviceEnrollment, not a
+	// capability of the engine, and this package still imports nothing that dials
+	// an account service.
 
 	// DeviceCredDir is where the on-device keypair and the device credential +
 	// issuer cert (core/devicestore) persist across restarts. Empty means both
@@ -532,16 +539,24 @@ type Config struct {
 	// runs on whatever core/devicestore already holds until it expires.
 	//
 	// This is a seam rather than a built-in HTTP client on purpose, and the
-	// purpose is no longer that the endpoint is unspecified - it is specified and
-	// served now (ADR-0046's 2026-08-04 update, which re-took the decision once
-	// that stopped being true). What keeps it a seam: nothing in this repository
-	// ENROLLS a device, so a built-in client could renew a credential it has no
-	// way to obtain; the renewal proof is challenge-bound, so a built-in client
-	// would still have to guess where its challenge and audience come from; and
-	// nothing here dials the account service at all. Whatever ships enrollment
-	// ships renewal with it. Only the client role reads this field, and only when
-	// DeviceCredDir (or an out-of-band Put into its store) has given this device
-	// something to renew in the first place.
+	// purpose has been re-taken twice: once when the endpoint stopped being
+	// unspecified (ADR-0046's 2026-08-04 update), and again when this repository
+	// grew the enrollment path that update named as its reopening trigger
+	// (ADR-0056, bacchus#163). It survives both. What keeps it a seam now is not
+	// that nothing here can renew - core/accountclient can, and clients/fyne wires
+	// it in through exactly this field - but that CORE must not: this package's
+	// import graph is what makes an operator running Bacchus with no account
+	// service configure nothing, and what leaves a downstream AGPL deployment free
+	// to substitute its own issuer without forking core. Only the client role
+	// reads this field, and only when DeviceCredDir (or an out-of-band Put into
+	// its store) has given this device something to renew in the first place.
+	//
+	// What it does NOT carry, stated because a caller will look for it: the
+	// admission credential. The account service mints one beside every device
+	// credential, over the same window, and returns both from the same response -
+	// but this seam returns two strings and neither is that one, so a renewal
+	// through it refreshes the entitlement and lets network membership lapse on
+	// the same instant it would have expired anyway. See ADR-0056 §7.
 	DeviceRenew func(ctx context.Context, req DeviceRenewRequest) (cred, issuerCert string, err error)
 
 	// DeviceRenewMargin is how far before its claimed expiry a stored device

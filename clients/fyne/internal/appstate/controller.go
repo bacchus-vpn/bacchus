@@ -2,6 +2,7 @@ package appstate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/bacchus-vpn/bacchus/clients/internal/enforcement"
 	"github.com/bacchus-vpn/bacchus/core"
+	"github.com/bacchus-vpn/bacchus/core/accountclient"
+	"github.com/bacchus-vpn/bacchus/core/devicestore"
 )
 
 // Controller drives one core.Engine across a connect/disconnect lifecycle and
@@ -92,6 +95,64 @@ type Controller struct {
 	// stale worker touches nothing.
 	countries CountryListState
 	listGen   uint64
+
+	// cred is what this client currently knows about its own device credential
+	// (bacchus#163, ADR-0056). Unlike everything above it, it OUTLIVES a connect
+	// attempt and is deliberately not reset by Disconnect: a credential that
+	// could not be renewed is still un-renewed after the user disconnects, and a
+	// warning that vanished when they pressed the button would vanish exactly
+	// when they had time to act on it.
+	cred CredentialState
+}
+
+// CredentialState is what this client knows about its own device credential, and
+// it exists because a failed renewal has to be something a user can be shown
+// rather than a line in a log.
+//
+// The distinction matters more here than it looks. Renewal failing is not an
+// error at the moment it happens — the device keeps connecting on the credential
+// it already holds, and everything works. It becomes a failure hours later, all
+// at once, when that credential expires and a gate-enabled coordinator starts
+// refusing every connect for a reason the user has no way to connect back to a
+// service outage they never saw. The whole point of surfacing this is that the
+// warning has to arrive during the window where it is still only a warning.
+type CredentialState struct {
+	// Enrolled is whether this device holds a device credential at all.
+	Enrolled bool
+	// ExpiresAt is the stored credential's own claimed expiry, zero when there is
+	// no credential or its expiry could not be read. It is READ, never verified —
+	// a liveness question, not a trust one, and nothing admits or refuses on it.
+	ExpiresAt time.Time
+	// RenewalFailing is true from the first failed renewal until one succeeds.
+	RenewalFailing bool
+	// Attention is true when the user has something to do about it: the stored
+	// credential is close enough to expiry that the next failure is the last one
+	// with any slack left. It is what a UI should raise a badge on.
+	Attention bool
+	// Detail is the sentence to show, zero-valued when there is nothing to say.
+	Detail Detail
+}
+
+// credentialWarnAt is how much life must be left in a credential before a failed
+// renewal is merely noted rather than escalated to the user.
+//
+// It is deliberately much larger than core's own renewal margin. That margin is
+// when a client STARTS trying; at the defaults a credential lives 48 hours and
+// renewal begins 6 hours out, so a device that cannot reach the service has
+// about six hours of retries before it goes dark. Waiting until the last of
+// those to say anything would put the warning inside the window where the user
+// can no longer do anything useful with it — reaching a support channel, moving
+// to a network that is not being interfered with, paying an invoice — so this
+// escalates at half the remaining slack rather than at its end.
+const credentialWarnAt = 3 * time.Hour
+
+// CredentialState returns what this client knows about its own device
+// credential. Safe to call from any goroutine, including from inside an OnState
+// callback.
+func (c *Controller) CredentialState() CredentialState {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cred
 }
 
 func NewController(cfg Config) *Controller {
@@ -601,7 +662,44 @@ func (c *Controller) connectAsync(gen uint64) {
 		c.logf("volunteer: %s", w)
 	}
 
+	// This device's own identity and entitlement (bacchus#163, ADR-0056). Read
+	// before the engine is built, for the same reason the relay directory is: a
+	// device-credential directory that cannot be opened, or an account-service
+	// URL that is not a URL, is the user's to fix and is named here rather than
+	// surfacing as one of core's construction errors about a field they never
+	// set.
+	dc, err := c.openDeviceCredential()
+	if err != nil {
+		c.abort(gen, err)
+		return
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Enrollment, if a claim code is waiting and this device holds nothing.
+	// Inside the connect rather than at startup because this is the moment the
+	// user asked for the network, and because it is bounded by the same context
+	// the connect is: a Disconnect pressed during an enrollment cancels it.
+	if abandon := c.enrollIfNeeded(ctx, dc); abandon != nil {
+		cancel()
+		c.abort(gen, abandon)
+		return
+	}
+	c.publishCredentialFromStore(dc)
+
+	// The admission credential the account service minted alongside the device
+	// credential, if there is one. It is read fresh on every connect rather than
+	// held, because renewal rewrites it underneath a running engine — see
+	// ADR-0056 §7 on why a long-lived engine can still end up presenting a stale
+	// one, which is a gap in the seam rather than in this line.
+	//
+	// Empty is the pre-#163 posture exactly: present none, which a coordinator
+	// with admission disabled accepts and one that enforces it refuses. Nothing
+	// is lost by setting it — a client presenting none was already refused by an
+	// enforcing coordinator — and what is gained is that a client which enrolled
+	// against an account service can now satisfy one.
+	admissionCred := accountclient.LoadAdmission(dc.dir)
+
 	eng, err := core.New(core.Config{
 		Coordinators: c.cfg.Coordinators,
 		// The client role, plus whichever serve roles were volunteered (issue
@@ -642,6 +740,23 @@ func (c *Controller) connectAsync(gen uint64) {
 		// coordinator unless these actually reach the engine. See Config's doc.
 		AdmissionPubKey:  c.cfg.AdmissionPubKey,
 		AdmissionCRLPath: c.cfg.AdmissionCRLPath,
+		// This node's OWN admission credential — a different thing from the two
+		// fields above, which are the anchor and revocation list it verifies an
+		// EXIT with. Attached to every list/connect so an admission-enforcing
+		// coordinator admits this client.
+		AdmissionCred: admissionCred,
+		// The device credential (bacchus#163, ADR-0056). Set here for the first
+		// time: before this, clients/fyne set no DeviceCredDir under any
+		// configuration, so the 1.0 desktop client generated a fresh device key
+		// every launch, held no credential, and presented nothing to a
+		// coordinator's device gate whether or not that gate was on.
+		//
+		// DeviceRenew is nil without an account service, which core reads as
+		// renewal off — the client then runs on whatever it already holds until
+		// that expires, which is what a deployment with no entitlement authority
+		// should do.
+		DeviceCredDir: dc.dir,
+		DeviceRenew:   c.deviceRenewHook(dc),
 		// Transport pool (issue #93). Empty reproduces the pre-#93
 		// single-transport Connect exactly, so the default path is unchanged.
 		TransportPool: pool,
@@ -758,6 +873,323 @@ func (c *Controller) connectAsync(gen uint64) {
 	c.publishLocked(Protected)
 	c.mu.Unlock()
 }
+
+// deviceCredential is everything the account service half of a connect needs:
+// the on-device key and credential store (core.DeviceEnrollment), a client for
+// the service's three verbs, and the directory both share.
+//
+// All three are nil/empty for a deployment that names no account service, which
+// is a complete configuration and not a degraded one. openDeviceCredential
+// returns that shape without error, so every caller's "is there one" test is a
+// nil check rather than a config read repeated in four places.
+type deviceCredential struct {
+	dev    *core.DeviceEnrollment
+	client *accountclient.Client
+	dir    string
+}
+
+// openDeviceCredential loads this device's identity and, when the config names
+// an account service, builds a client for it.
+//
+// The device enrollment is opened even with NO account service configured. That
+// is deliberate: DeviceCredDir is where a credential provisioned by any other
+// means already lives, core reads it whether or not anything here can renew it,
+// and a client that only looked when it had a service to ask would ignore a
+// credential sitting on disk. It is also what makes the device key stable across
+// launches, which is what an enrollment is bound to.
+//
+// A malformed account-service configuration is a hard error rather than a
+// silently skipped feature. Every one of accountclient.New's refusals is a value
+// that cannot be defaulted — an empty audience binds assertions to nothing, an
+// absent CA silently falls back to the public root pool — so a typo here has to
+// stop the connect and name itself, not leave the user enrolled against
+// whoever answered.
+func (c *Controller) openDeviceCredential() (deviceCredential, error) {
+	dir := c.cfg.EffectiveDeviceCredDir()
+	dev, err := core.OpenDeviceEnrollment(dir)
+	if err != nil {
+		return deviceCredential{}, err
+	}
+	out := deviceCredential{dev: dev, dir: dir}
+	if !c.cfg.AccountServiceConfigured() {
+		return out, nil
+	}
+	cl, err := accountclient.New(accountclient.Config{
+		BaseURL:      strings.TrimSpace(c.cfg.AccountServiceURL),
+		Audience:     strings.TrimSpace(c.cfg.AccountServiceAudience),
+		ServerCAFile: strings.TrimSpace(c.cfg.AccountServiceCA),
+		Logf:         c.logf,
+	})
+	if err != nil {
+		return deviceCredential{}, err
+	}
+	out.client = cl
+	return out, nil
+}
+
+// enrollIfNeeded redeems a configured claim code, once, for a device that holds
+// no credential yet. It reports whether the connect should be ABANDONED.
+//
+// The two answers are not the same failure, and telling them apart is the whole
+// content of this function:
+//
+//   - The service REFUSED — a wrong claim code, a lapsed entitlement, no device
+//     slots left. That answer will be identical in ten seconds and in ten hours,
+//     the user has something to do about it, and continuing would take them to a
+//     coordinator that refuses them for a reason two layers away from the one
+//     that actually applies. So the connect is abandoned and the refusal is what
+//     they are told.
+//   - The service was UNREACHABLE. Then the connect continues, and that is not
+//     leniency. A coordinator's device gate is off unless an operator turned it
+//     on, so a client with no credential may well connect perfectly; making the
+//     account service's reachability a precondition for connecting would put the
+//     one service the deployment model allows to be blockable onto the critical
+//     path of the thing it is allowed to be blockable because it is NOT on.
+func (c *Controller) enrollIfNeeded(ctx context.Context, dc deviceCredential) (abandon error) {
+	claim := strings.TrimSpace(c.cfg.ClaimCode)
+	if dc.client == nil || claim == "" || dc.dev.Enrolled() {
+		return nil
+	}
+
+	_, err := dc.client.Enroll(ctx, dc.dev, claim, c.cfg.EffectiveDeviceLabel())
+	switch {
+	case err == nil, errors.Is(err, accountclient.ErrAlreadyHaveCredential):
+		// Erased before the connect proceeds, not after it succeeds: the code is
+		// spent either way, and a client that kept it until the tunnel came up
+		// would leave a spent bearer secret on disk for every connect that
+		// failed for an unrelated reason.
+		if cerr := appstateClearClaimCode(); cerr != nil {
+			c.logf("enrollment: could not clear the spent claim code from the config file: %v", cerr)
+		}
+		c.logf("enrollment: this device now holds a device credential")
+		c.notifyDetail(Detail{Text: "This device is now registered to your account."})
+		return nil
+
+	case accountclient.Terminal(err):
+		return fmt.Errorf("%s", enrollmentRefusalText(err))
+
+	default:
+		// Unreachable, rate limited, or the service failed. Say so and keep
+		// going: whatever this device already holds is what it will present.
+		c.logf("enrollment: %v", err)
+		c.notifyDetail(Detail{Text: "Could not reach your account service to register this device — connecting with what this device already has."})
+		return nil
+	}
+}
+
+// enrollmentRefusalText turns a coded refusal into the sentence a user reads.
+//
+// The mapping is small on purpose. Only three of these are things a user can act
+// on, and the rest collapse into one honest sentence rather than being narrated
+// individually — a code the user cannot do anything about is a code that should
+// not become vocabulary they have to learn. bad_assertion in particular is NOT
+// broken out: it means the signature failed or this device is not enrolled, the
+// service refuses to say which, and inventing a client-side guess would tell the
+// user the wrong one half the time.
+func enrollmentRefusalText(err error) string {
+	code, ok := accountclient.CodeOf(err)
+	if !ok {
+		return "Could not register this device: " + err.Error()
+	}
+	switch code {
+	case accountclient.CodeMalformedSecret:
+		return "That does not look like a Bacchus claim code — check what you entered."
+	case accountclient.CodeClaimRejected:
+		return "That claim code was not accepted. It may have been mistyped, or already used."
+	case accountclient.CodeEntitlementExpired:
+		return "Your subscription has expired, so this device cannot be registered."
+	case accountclient.CodeNoSlots:
+		return "Your plan has no device slots left. Remove a device, or add slots, and try again."
+	default:
+		return "Your account service refused to register this device."
+	}
+}
+
+// deviceRenewHook is what fills core.Config.DeviceRenew — the seam ADR-0046 left
+// open and nothing has ever filled.
+//
+// It wraps the account client's own renewal rather than passing it through, and
+// the wrapper is the answer to the question ADR-0046 asked and nobody had:
+// what a failed renewal looks like to a user rather than to a log line. core
+// emits an event on failure and retries at the next tick, which is correct
+// engine behaviour and invisible: the connection is fine, so nothing changes on
+// screen, and it stays fine right up until the credential expires and every
+// connect starts being refused. This records the failure as STATE, with the
+// remaining life of the credential attached, so a UI can escalate on the way
+// down rather than announce the arrival.
+//
+// nil when there is no account service, which core reads as renewal off — the
+// pre-#163 posture exactly.
+func (c *Controller) deviceRenewHook(dc deviceCredential) func(context.Context, core.DeviceRenewRequest) (string, string, error) {
+	if dc.client == nil {
+		return nil
+	}
+	renew := dc.client.RenewInto(dc.dir)
+	return func(ctx context.Context, req core.DeviceRenewRequest) (string, string, error) {
+		cred, issuerCert, err := renew(ctx, req)
+		// The expiry read is of the credential being REPLACED on failure and of
+		// the fresh one on success, which is what makes the failure sentence
+		// able to say how long is left.
+		if err != nil {
+			c.recordRenewalFailure(req.CurrentCred, err)
+		} else {
+			c.recordRenewalSuccess(cred)
+		}
+		return cred, issuerCert, err
+	}
+}
+
+// recordRenewalFailure updates the credential state after a renewal that did not
+// work, and tells the user when there is a reason to.
+func (c *Controller) recordRenewalFailure(currentCred string, err error) {
+	exp, _ := devicestore.Expiry(currentCred)
+	left := time.Until(exp)
+	attention := exp.IsZero() || left <= credentialWarnAt
+
+	d := Detail{Text: renewalFailureText(err, exp, left)}
+
+	c.mu.Lock()
+	c.cred.Enrolled = currentCred != ""
+	c.cred.ExpiresAt = exp
+	c.cred.RenewalFailing = true
+	c.cred.Attention = attention
+	c.cred.Detail = d
+	c.mu.Unlock()
+
+	c.logf("device credential: renewal failed: %v", err)
+	c.notifyDetail(d)
+}
+
+// recordRenewalSuccess clears a previously recorded failure.
+//
+// It notifies only when there was something to clear. A renewal succeeding is
+// the normal case and happens every few hours forever; announcing it would make
+// the detail line flicker with news that nothing is wrong, which is how a line
+// that also carries real warnings stops being read.
+func (c *Controller) recordRenewalSuccess(cred string) {
+	exp, _ := devicestore.Expiry(cred)
+
+	c.mu.Lock()
+	wasFailing := c.cred.RenewalFailing
+	c.cred = CredentialState{Enrolled: cred != "", ExpiresAt: exp}
+	c.mu.Unlock()
+
+	if wasFailing {
+		c.logf("device credential: renewed")
+		c.notifyDetail(Detail{Text: "Your subscription is up to date again."})
+	}
+}
+
+// renewalFailureText is the sentence a user reads when renewal fails, and it
+// escalates rather than repeating.
+//
+// Three sentences, chosen by how much slack is left rather than by what went
+// wrong, because what went wrong is mostly not actionable and how much time is
+// left always is. The one exception is a refusal about the ACCOUNT — an expired
+// subscription or a revoked device — which no amount of waiting fixes and which
+// therefore says so immediately whatever the clock says.
+func renewalFailureText(err error, exp time.Time, left time.Duration) string {
+	if code, ok := accountclient.CodeOf(err); ok {
+		switch code {
+		case accountclient.CodeEntitlementExpired:
+			return "Your subscription has expired. This device will stop connecting when its current access runs out."
+		case accountclient.CodeDeviceRevoked:
+			return "This device's access was withdrawn. It will stop connecting when its current access runs out."
+		}
+	}
+	switch {
+	case exp.IsZero():
+		return "Bacchus could not refresh this device's access, and cannot tell how long the current one lasts. If connecting starts failing, this is why."
+	case left <= 0:
+		return "This device's access has run out and could not be refreshed. Connecting will be refused until it is."
+	case left <= credentialWarnAt:
+		return fmt.Sprintf("Your subscription needs attention: Bacchus could not refresh this device's access, which runs out in about %s.", roughDuration(left))
+	default:
+		return "Bacchus could not refresh this device's access and will keep trying. Your connection is unaffected for now."
+	}
+}
+
+// roughDuration renders a remaining lifetime the way a person would say it.
+//
+// Deliberately coarse. The precise number is a moving target the user cannot act
+// on to the minute, and a countdown that reads "2h58m12s" invites watching it
+// rather than doing the thing it is asking for.
+func roughDuration(d time.Duration) string {
+	switch {
+	case d >= 2*time.Hour:
+		return fmt.Sprintf("%d hours", int(d.Round(time.Hour)/time.Hour))
+	case d >= time.Hour:
+		return "an hour"
+	case d >= 2*time.Minute:
+		return fmt.Sprintf("%d minutes", int(d.Round(time.Minute)/time.Minute))
+	default:
+		return "a moment"
+	}
+}
+
+// Enroll redeems a claim code for this device on demand, outside a connect.
+//
+// It is the seam a claim-code dialog would call, and it is here rather than in
+// the outer Fyne package for the same reason every other decision in this
+// package is: this one is testable without a display driver, and the dialog that
+// will eventually call it is not. ADR-0056 §3 records that the dialog is the
+// intended shape and Config.ClaimCode is the interim; this method is what makes
+// the two the same code path rather than two implementations of one exchange.
+func (c *Controller) Enroll(ctx context.Context, claim, label string) error {
+	dc, err := c.openDeviceCredential()
+	if err != nil {
+		return err
+	}
+	if dc.client == nil {
+		return errors.New("no account service is configured, so this device cannot be registered")
+	}
+	if label == "" {
+		label = c.cfg.EffectiveDeviceLabel()
+	}
+	if _, err := dc.client.Enroll(ctx, dc.dev, claim, label); err != nil {
+		if errors.Is(err, accountclient.ErrAlreadyHaveCredential) {
+			return nil
+		}
+		if accountclient.Terminal(err) {
+			return fmt.Errorf("%s", enrollmentRefusalText(err))
+		}
+		return err
+	}
+	if cerr := appstateClearClaimCode(); cerr != nil {
+		c.logf("enrollment: could not clear the spent claim code from the config file: %v", cerr)
+	}
+	c.publishCredentialFromStore(dc)
+	return nil
+}
+
+// publishCredentialFromStore refreshes CredentialState from what is on disk,
+// with no network call. Called after enrollment and at the start of every
+// connect, so the state a UI reads describes this device rather than the last
+// thing that happened to it.
+func (c *Controller) publishCredentialFromStore(dc deviceCredential) {
+	cred, _, ok := dc.dev.Current()
+	exp, _ := devicestore.Expiry(cred)
+
+	c.mu.Lock()
+	c.cred.Enrolled = ok
+	c.cred.ExpiresAt = exp
+	if ok {
+		// A stored credential says nothing about whether renewal is currently
+		// working, so a previously recorded failure is left standing. It is
+		// cleared by a renewal that succeeds and by nothing else.
+		c.cred.Attention = c.cred.RenewalFailing && (exp.IsZero() || time.Until(exp) <= credentialWarnAt)
+	} else {
+		c.cred.Attention = false
+		c.cred.Detail = Detail{}
+		c.cred.RenewalFailing = false
+	}
+	c.mu.Unlock()
+}
+
+// appstateClearClaimCode is ClearClaimCode behind a variable so a test can drive
+// enrollment without writing to the real user's config file. Production never
+// replaces it.
+var appstateClearClaimCode = ClearClaimCode
 
 // underlayDialHook returns the OnUnderlayDial callback, or nil when this
 // platform has no Enforcer — core reads a nil hook as "no hook", and handing
