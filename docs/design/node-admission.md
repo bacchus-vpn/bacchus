@@ -143,6 +143,30 @@ rotated credential without a restart. A missing file means "nothing revoked
 yet"; any other read/parse error keeps the last-known-good list rather than
 failing open (a malformed file must never silently un-revoke everyone).
 
+**Those two rules are not the same rule at startup, and the difference is what
+makes the WRITE side load-bearing** (issue #168). Keeping the last-known-good
+list needs a last-known-good list to keep. At startup there is none, so the
+missing-file rule is the one that applies to an unparseable file too, and it
+reads as *nothing is revoked*.
+
+`admission-issue -revoke` writes by default to the coordinator's own
+`-admission-revocations` path, so the tool and the process it exists to inform
+are pointed at one file with no coordination between them. Two failure shapes
+follow, and only the first is benign:
+
+- a **reload** that catches a half-written file is fail-safe — it keeps the
+  previous in-memory list, and the next tick repairs it;
+- a **restart** afterwards is not. A file left truncated by a writer that died
+  mid-write is a delayed failure that detonates whenever the coordinator is next
+  restarted — hours or weeks later, with nothing connecting it to the revocation
+  that caused it.
+
+So `RevocationList.SaveFile` writes a complete file to a temporary name in the
+same directory, flushes it, and renames it over the target. The live file is
+never opened for writing, and there is no moment at which the path holds
+anything but a whole list. A save killed between staging and rename leaves the
+previous list in place and a `.<name>.tmp*` file beside it, which is inert.
+
 ## Enforcement toggle & rollout
 
 Admission is **on when the coordinator is configured with `-admission-pubkey` or

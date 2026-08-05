@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -337,17 +338,104 @@ func (r *RevocationList) Serials() []string {
 	return serials
 }
 
-// SaveFile writes the list to path as the revocationFile JSON shape, creating
-// or truncating it. Serials are written in a stable sorted order so the file is
-// diff-friendly across issuer runs.
+// SaveFile writes the list to path as the revocationFile JSON shape. Serials
+// are written in a stable sorted order so the file is diff-friendly across
+// issuer runs.
+//
+// The write is ATOMIC: a complete file is renamed over the target, and the file
+// the coordinator reads is never opened for writing at all (issue #168). That is
+// a correctness requirement rather than tidiness, because the two ways a torn
+// file can be observed are NOT symmetric and the second one is silent.
+//
+// cmd/coordinator hot-reloads this file (reloadRevocationsLoop) on its own
+// timer, with no coordination with whatever wrote it, and cmd/admission-issue
+// -revoke writes by default to secrets/admission-revocations.json — the
+// coordinator's own -admission-revocations default. os.WriteFile, which this
+// used to be, opens that live file with O_TRUNC and refills it, so between the
+// truncate and the last byte the file on disk is empty or short, and a writer
+// that dies in that window leaves it that way permanently.
+//
+//   - A RELOAD that lands in the window is fail-safe. The loop keeps its
+//     previous in-memory list when a read or parse fails, so a torn read
+//     over-refuses at worst and the next tick repairs it.
+//   - A RESTART afterwards is not. At startup there is no previous list, and
+//     -admission-revocations says in as many words that a missing or
+//     unparseable file means nothing is revoked. So a torn write plants a
+//     DELAYED failure that detonates at the next coordinator restart — hours or
+//     weeks later, with nothing connecting it to the revocation that caused it.
+//
+// The temporary file is created IN THE TARGET'S DIRECTORY, which is load-bearing
+// rather than tidy: os.Rename is atomic only within one filesystem, and a rename
+// across one degrades to copy-then-delete, which is exactly the half-written file
+// this exists to prevent.
+//
+// The bytes are flushed before the rename rather than after. A rename that
+// becomes visible ahead of the data it points at is a file the coordinator can
+// read as empty, and an empty revocation file does not mean "unchanged" — it
+// means "nothing is revoked".
+//
+// Three consequences of replacing the file instead of rewriting it, named here
+// because each is a real change from os.WriteFile rather than an implementation
+// detail:
+//
+//   - The result is mode 0600 every time. os.WriteFile applied its perm only
+//     when creating, so an existing file kept whatever mode it had; a rename
+//     installs this one's. That only ever narrows.
+//   - A path that is a SYMLINK is replaced rather than written through.
+//   - A writer killed mid-save leaves its staged file behind, which os.WriteFile
+//     never did. They are named ".<target>.tmp*" so they sort beside the file
+//     they were staged for, are hidden from a plain ls, and can never be
+//     mistaken for the list itself.
+//
+// What this deliberately does NOT do is fsync the directory, so a machine that
+// loses power immediately after the rename can come back holding the PREVIOUS
+// file. That is a different property — whether the rename is durable, not
+// whether the bytes are whole — and its failure restores a complete older list
+// rather than a torn one. Every atomic writer in this repository stops at the
+// same line (core/policy/cache.go, core/accountclient/admission.go,
+// core/devicestore/store.go, core/selection/store.go); moving it is a repo-wide
+// change rather than this function's.
 func (r *RevocationList) SaveFile(path string) error {
 	serials := r.Serials()
 	b, err := json.MarshalIndent(revocationFile{Version: revocationFileVersion, Revoked: serials}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("admission: marshal revocation list: %w", err)
 	}
-	if err := os.WriteFile(path, b, 0o600); err != nil {
-		return fmt.Errorf("admission: write revocation list %s: %w", path, err)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp")
+	if err != nil {
+		return fmt.Errorf("admission: stage revocation list in %s: %w", dir, err)
+	}
+	staged := tmp.Name()
+	// Removed on every path that does not rename it away, so a failure leaves
+	// the live file untouched AND nothing beside it for the next operator to
+	// wonder about. A no-op once the rename has succeeded.
+	defer func() { _ = os.Remove(staged) }()
+	if err := writeStagedList(tmp, b); err != nil {
+		tmp.Close()
+		return fmt.Errorf("admission: write revocation list %s: %w", staged, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("admission: write revocation list %s: %w", staged, err)
+	}
+	if err := os.Rename(staged, path); err != nil {
+		return fmt.Errorf("admission: install revocation list %s: %w", path, err)
 	}
 	return nil
+}
+
+// writeStagedList fills a staged revocation file and flushes it to stable
+// storage, so everything that can fail has failed before anything is renamed
+// over the file the coordinator reads.
+func writeStagedList(f *os.File, b []byte) error {
+	// 0600 explicitly rather than whatever os.CreateTemp's mode survived the
+	// umask. This file replaces one the previous os.WriteFile named 0600, and it
+	// is staged in the coordinator's secrets directory beside its signing keys.
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		return err
+	}
+	return f.Sync()
 }
