@@ -286,6 +286,154 @@ was still running beside it.`, path, needs)
 	}
 }
 
+// TestReleaseWorkflowChecksTagAncestry is the other half of the same belt, for
+// the other gate in the same job (issue #172).
+//
+// #151 added a step to verify-version that refuses a tag on a commit main does
+// not contain, and the argument the whole release rests on runs through it:
+// release.yml re-asserts only what expires with the calendar — the age of the
+// shipped table — because every other assertion here is a function of the tree,
+// and ci.yml's run on the pull request that merged those bytes is durable
+// evidence about them. That is sound exactly to the extent that the tagged
+// commit went through a pull request. A tag on a branch head or a local commit
+// went through none, so no such run exists, and the tree being shipped has been
+// tested by nothing at all.
+//
+// THE ASYMMETRY IS WHY THIS TEST EXISTS. Half of that step self-defends:
+// removing fetch-depth: 0 makes it fail loudly, with a message naming
+// fetch-depth: 0 as the fix, which was deliberate. DELETING THE STEP OUTRIGHT is
+// the silent edit — releases keep working, nothing goes red, and the provenance
+// guarantee is gone with no signal anywhere. Same shape as
+// TestReleaseWorkflowGatesTheTable above and the same reason for living in Go
+// rather than in a workflow: ci.yml gates merges, so the workflow that gates
+// merges is what guards the workflow that gates releases.
+//
+// This package rather than a new one because the machinery is already here.
+// core/asn does not own release.yml's tag rules, and it is a slightly odd
+// address for them — but a second copy of workflowJob somewhere tidier is a
+// second thing to keep in step with the file's layout, and the alternative of
+// moving all of it is a change to a passing test that guards a shipped
+// guarantee. If a third caller ever appears, that is the moment to move the
+// three helpers into their own package and not before.
+//
+// fetch-depth is asserted here even though the step defends itself against its
+// removal, because that defence fires DURING A RELEASE — the one moment nothing
+// should be discovered — and this fires on every pull request. It costs one line
+// and moves the discovery months earlier.
+func TestReleaseWorkflowChecksTagAncestry(t *testing.T) {
+	const path = "../../.github/workflows/release.yml"
+	b, err := os.ReadFile(path)
+	if err != nil {
+		// Not a skip, for the reason the test above gives: a gate that opens when
+		// its input disappears is not a gate.
+		t.Fatalf("cannot read %s: %v\n\nThis test asserts the release workflow still refuses a tag on a commit main does not contain; without the file there is nothing to assert and reporting green would be reporting over nothing.", path, err)
+	}
+	src := string(b)
+
+	gate := workflowJob(t, src, "verify-version")
+
+	// The refusal itself, named by the one thing only it does: comparing the
+	// TAGGED commit against main. The job runs merge-base twice more as a
+	// self-test of merge-base itself, both against main's own parent, so a bare
+	// search for "merge-base --is-ancestor" would survive deleting exactly the
+	// assertion that matters.
+	if !workflowRuns(gate, `merge-base --is-ancestor "$sha"`) {
+		t.Errorf(`the verify-version job in %s no longer compares the tagged commit against main.
+
+This is #151's step, and losing it is silent: releases keep building, every job
+in the workflow stays green, and a tag pushed onto a branch head or a local
+commit will build a bundle and draft a release from a tree ci.yml never saw. The
+release-time argument for re-running ONE test rather than the suite depends on
+the tagged commit having gone through a pull request, and this step is the only
+thing that makes that so.
+
+If the shell variable was renamed rather than the step deleted, rename it here
+too — this test is what notices when the check goes away.`, path)
+	}
+
+	// What it is compared AGAINST. A step that still runs merge-base but against
+	// the tag's own branch, or against HEAD, answers a question nobody asked and
+	// passes for every tag. The full ref rather than the bare "origin/main" is
+	// the workflow's own choice, and it is the one comparison in that file where
+	// resolving to something else would be silent.
+	if !workflowRuns(gate, "refs/remotes/origin/main") {
+		t.Errorf(`the verify-version job in %s no longer names refs/remotes/origin/main.
+
+The ancestry check is only a gate if main is what it checks against: a release is
+cut from main or it is not cut (#151). A comparison against anything else — the
+tag's own branch, HEAD — is satisfied by every tag and refuses nothing.`, path)
+	}
+
+	// The checkout that makes the answer meaningful. Asserted as a KEY, not as a
+	// substring: this job's error text contains the string "fetch-depth: 0" in a
+	// non-comment echo line, so a loose search is satisfied by the message that
+	// tells you it is missing. Same trap workflowSetsEnv below was written for.
+	if !workflowHasKey(gate, "fetch-depth: 0") {
+		t.Errorf(`the verify-version job in %s no longer sets fetch-depth: 0 on its checkout.
+
+actions/checkout defaults to depth 1 and on a tag push fetches only the tagged
+commit — no branches, so no origin/main. The step catches that and fails with a
+message naming this fix, so nothing ships wrongly; but it catches it during a
+RELEASE, which is the one moment to discover nothing. This assertion catches it
+on the pull request that removed it.`, path)
+	}
+
+	// And that the gate is a PRECONDITION rather than a bystander. The table gate
+	// above learned this the hard way (issue #66): a check that runs beside the
+	// build cannot stop it, and windows-bundle is where a bundle is compiled, an
+	// artifact uploaded, and on a tag push a draft release created.
+	bundle := workflowJob(t, src, "windows-bundle")
+	needs, ok := workflowNeeds(bundle)
+	switch {
+	case !ok:
+		t.Errorf(`the windows-bundle job in %s has no needs:.
+
+It must name verify-version, or the ancestry check runs in parallel with the
+build it is meant to prevent.`, path)
+	case !strings.Contains(needs, "verify-version"):
+		t.Errorf(`the windows-bundle job in %s needs %q, which does not include verify-version.
+
+A check that finishes after the artifacts exist gates nothing: the bundle would
+be compiled, the artifact uploaded and on a tag push the draft release created,
+all while the question of whether the tag is even on main was still being
+answered beside it.`, path, needs)
+	}
+}
+
+// workflowRuns reports whether a job actually RUNS something containing want, as
+// opposed to mentioning it in a comment.
+//
+// These workflow files carry more prose than YAML — verify-version's two steps
+// are wrapped in about seventy lines of comment explaining why each exists — so
+// a plain substring search over a job is satisfied by the explanation of a step
+// that has been deleted. workflowSetsEnv's doc records the same trap being hit
+// for real.
+func workflowRuns(job, want string) bool {
+	for _, ln := range strings.Split(job, "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		if strings.Contains(ln, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// workflowHasKey reports whether a job carries a line that is EXACTLY key once
+// trimmed — for settings whose text also appears inside the error messages that
+// talk about them, where workflowRuns' substring match would find the message
+// rather than the setting.
+func workflowHasKey(job, key string) bool {
+	for _, ln := range strings.Split(job, "\n") {
+		if strings.TrimSpace(ln) == key {
+			return true
+		}
+	}
+	return false
+}
+
 // workflowJob returns the lines of one top-level job from a workflow file.
 //
 // Textual rather than parsed: a YAML library is a dependency this module does not carry
