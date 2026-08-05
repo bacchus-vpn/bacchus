@@ -392,7 +392,7 @@ func (r *RevocationList) Serials() []string {
 // file. That is a different property — whether the rename is durable, not
 // whether the bytes are whole — and its failure restores a complete older list
 // rather than a torn one. Every atomic writer in this repository stops at the
-// same line (core/policy/cache.go, core/accountclient/admission.go,
+// same line (core/policy/cache.go, core/capacity/quota.go,
 // core/devicestore/store.go, core/selection/store.go); moving it is a repo-wide
 // change rather than this function's.
 func (r *RevocationList) SaveFile(path string) error {
