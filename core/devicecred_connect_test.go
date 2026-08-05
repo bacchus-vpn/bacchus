@@ -954,12 +954,11 @@ func TestRegisterCarriesTheRenewedAdmissionCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	if err := eng.Start(ctx); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	t.Cleanup(eng.Stop)
+	// Seeded BEFORE Start, and this ordering is load-bearing. registerLoop
+	// sends its first register the instant it is entered, from its own
+	// goroutine, so a store seeded afterwards races it: the engine is a third
+	// sender this test does not drive, and asserting on fixed indices of what
+	// the coordinator received made this test fail about one run in ten.
 	eng.deviceKey = devicePriv
 	if err := eng.deviceStore.Put(devicestore.Credential{
 		Device:     oldCred,
@@ -968,6 +967,12 @@ func TestRegisterCarriesTheRenewedAdmissionCredential(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(eng.Stop)
 
 	regs := []wire{{Type: "register", Role: "relay", ID: eng.cfg.ID}}
 	eng.sendRegisters(regs, now)
@@ -976,22 +981,43 @@ func TestRegisterCarriesTheRenewedAdmissionCredential(t *testing.T) {
 
 	// The registers are UDP to a loopback listener the fixture is already
 	// draining; give the second one a moment to land rather than racing it.
+	// The assertions below are on the SET rather than on positions, because
+	// registerLoop can interleave a register of its own at any point — and
+	// with the store seeded first, every register it sends is one of the same
+	// two values, so an interleaving cannot make a passing run look like a
+	// failing one or the reverse.
 	deadline := time.Now().Add(2 * time.Second)
 	var sent []string
+	renewed := func() bool {
+		for _, c := range sent {
+			if c == "bacchusc1:renewed" {
+				return true
+			}
+		}
+		return false
+	}
 	for time.Now().Before(deadline) {
-		if _, sent = coord.creds(); len(sent) >= 2 {
+		if _, sent = coord.creds(); len(sent) >= 2 && renewed() {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	if len(sent) < 2 {
-		t.Fatalf("the coordinator saw %d registers, want 2", len(sent))
+		t.Fatalf("the coordinator saw %d registers, want at least 2", len(sent))
+	}
+	if !renewed() {
+		// The whole of bacchus#166: before the fix the stamp came from
+		// Config.AdmissionCred, a construction-time copy, so the freshly
+		// minted credential never reached a coordinator at all.
+		t.Fatalf("no register carried the freshly minted credential after a renewal; the coordinator saw %q — this is bacchus#166", sent)
 	}
 	if sent[0] != "bacchusc1:enrolled" {
 		t.Fatalf("the first register carried %q, want the credential this device held at the time", sent[0])
 	}
-	if sent[1] != "bacchusc1:renewed" {
-		t.Fatalf("the register AFTER a renewal carried %q, want the freshly minted credential — this is bacchus#166", sent[1])
+	for i, c := range sent {
+		if c != "bacchusc1:enrolled" && c != "bacchusc1:renewed" {
+			t.Fatalf("register %d carried %q, want one of the two credentials this device has held; an empty one would mean the stamp did not read the store at all", i, c)
+		}
 	}
 	if regs[0].Cred != "" {
 		t.Fatal("sendRegisters mutated the caller's template; the stamp must be on a copy")
