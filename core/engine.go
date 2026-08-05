@@ -207,6 +207,15 @@ type Config struct {
 	// disabled, rejected by one that enforces it. The engine does not verify its
 	// own credential locally — it is opaque here and only meaningful to the peer
 	// that holds the matching public key.
+	//
+	// Empty is ALSO where a device's own admission credential gets in. The
+	// account service mints one beside every device credential over the same
+	// window (bacchus#166), core/devicestore holds it, and a renewal refreshes
+	// it — so when this field is empty and that store has one, that is what goes
+	// on the wire, re-read on every send rather than snapshotted here. A
+	// non-empty value always wins, so an operator who configured a credential
+	// gets exactly the one they configured. See admissionCred in
+	// core/devicecred_connect.go.
 	AdmissionCred string
 
 	// AdmissionPubKey is the admission authority's ed25519 public key (64 hex
@@ -551,13 +560,19 @@ type Config struct {
 	// reads this field, and only when DeviceCredDir (or an out-of-band Put into
 	// its store) has given this device something to renew in the first place.
 	//
-	// What it does NOT carry, stated because a caller will look for it: the
-	// admission credential. The account service mints one beside every device
-	// credential, over the same window, and returns both from the same response -
-	// but this seam returns two strings and neither is that one, so a renewal
-	// through it refreshes the entitlement and lets network membership lapse on
-	// the same instant it would have expired anyway. See ADR-0056 §7.
-	DeviceRenew func(ctx context.Context, req DeviceRenewRequest) (cred, issuerCert string, err error)
+	// It returns everything one issuing response carries, in one value
+	// (bacchus#166). It used to return two strings, and the account service mints
+	// THREE things over one window - so the admission credential had nowhere to
+	// go, a renewal refreshed the entitlement while network membership lapsed on
+	// the original schedule, and the embedder that noticed had to work around the
+	// seam to stay on the network. A struct is what makes the next such value
+	// additive instead of another workaround. See ADR-0056 §7.
+	//
+	// A returned Credential whose Device or IssuerCert is empty is refused rather
+	// than stored, and an empty Admission is carried forward rather than clearing
+	// a stored one - see maybeRenewDeviceCred for both, and note that neither is
+	// something a filler has to think about.
+	DeviceRenew func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error)
 
 	// DeviceRenewMargin is how far before its claimed expiry a stored device
 	// credential is treated as due for renewal. Zero uses a 6h default -
@@ -1427,18 +1442,22 @@ func (e *Engine) Start(ctx context.Context) error {
 	// declaredQuota is the configured cap, not the counter: it is read once from the
 	// config here and never from the live Quota, which is what keeps a usage series
 	// off this wire by construction rather than by care (ADR-0040 amendment, #49).
+	//
+	// The admission credential is NOT on the template either, for the quota bit's
+	// reason applied to a different value: renewal rewrites it under a running
+	// engine (bacchus#166), so registerLoop stamps it per send.
 	speedCap := uint64(e.cfg.Limits.SpeedCap)
 	declaredQuota := uint64(e.cfg.Limits.MonthlyQuota)
 	var regs []wire
 	if e.roles[RoleExit] {
-		regs = append(regs, wire{Type: "register", Role: "exit", ID: e.cfg.ID, Country: e.cfg.Country, Addr: e.cfg.Advertise, Cred: e.cfg.AdmissionCred, Release: release, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota})
+		regs = append(regs, wire{Type: "register", Role: "exit", ID: e.cfg.ID, Country: e.cfg.Country, Addr: e.cfg.Advertise, Release: release, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota})
 	}
 	if e.roles[RoleRelay] {
 		// IngressPort is this relay's onion-forward listener port (issue #142). The
 		// coordinator joins it to the source ip it OBSERVES on this register to form
 		// the ingress it advertises, so only the port is ours to state. Zero when this
 		// relay serves no ingress, which leaves it simply not relay-eligible as a hop.
-		regs = append(regs, wire{Type: "register", Role: "relay", ID: e.cfg.ID, Country: e.cfg.Country, Cred: e.cfg.AdmissionCred, Release: release, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota, IngressPort: ingressPort})
+		regs = append(regs, wire{Type: "register", Role: "relay", ID: e.cfg.ID, Country: e.cfg.Country, Release: release, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota, IngressPort: ingressPort})
 	}
 
 	// One read loop per pool member: a forwarder can be assigned a session by
@@ -1890,21 +1909,40 @@ func (e *Engine) registerLoop(regs []wire) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	for {
-		// Stamp the volatile fields per send. QuotaState (issue #143) is the only one
-		// today, and it MUST be re-stamped rather than baked into regs: a node that
-		// exhausts its quota mid-cycle has to stop being assigned work within one
-		// heartbeat, and the coordinator replaces its whole registry entry on each
-		// register, so a state carried only in the first one would be forgotten.
-		qs := e.quotaState(time.Now())
-		for _, r := range regs {
-			r.QuotaState = qs // r is a copy: mutating it does not touch the template
-			e.broadcast(r)
-		}
+		e.sendRegisters(regs, time.Now())
 		select {
 		case <-e.stop:
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// sendRegisters broadcasts one round of registers, stamping the fields that are
+// volatile rather than template-shaped. Split out of registerLoop so a test can
+// drive one round deterministically without a ticker, matching maybeRenewDeviceCred
+// and reloadCRL elsewhere in this package.
+//
+// Two fields are stamped, and both MUST be re-stamped rather than baked into
+// regs — for the same reason, arrived at from opposite ends:
+//
+//   - QuotaState (issue #143). A node that exhausts its quota mid-cycle has to
+//     stop being assigned work within one heartbeat, and the coordinator replaces
+//     its whole registry entry on each register, so a state carried only in the
+//     first one would be forgotten.
+//   - Cred, the admission credential (bacchus#166). A device that renews mid-run
+//     gets a fresh one on the same schedule as its device credential, and a
+//     template built at Start would go on presenting the expiring copy until the
+//     process restarted — which is precisely the lapse this stamp exists to
+//     prevent.
+func (e *Engine) sendRegisters(regs []wire, now time.Time) {
+	qs := e.quotaState(now)
+	cred := e.admissionCred()
+	for _, r := range regs {
+		// r is a copy: mutating it does not touch the template.
+		r.QuotaState = qs
+		r.Cred = cred
+		e.broadcast(r)
 	}
 }
 

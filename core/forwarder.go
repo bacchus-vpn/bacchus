@@ -148,9 +148,11 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 	defer raw.Close()
 	// The exit presents its admission credential (issue #60) in the handshake so
 	// the client can verify end-to-end that this exit is admission-authorized.
-	// Empty AdmissionCred presents none — unchanged behavior for an exit that has
-	// no credential, against a client that doesn't require one.
-	nc, target, err := exitHandshake(raw, e.exitKey, []byte(e.cfg.AdmissionCred))
+	// Holding none presents none — unchanged behavior for an exit that has no
+	// credential, against a client that doesn't require one. Read per handshake
+	// (admissionCred), so a volunteering client that renewed mid-run presents the
+	// credential it holds NOW rather than the one it started with (bacchus#166).
+	nc, target, err := exitHandshake(raw, e.exitKey, []byte(e.admissionCred()))
 	if err != nil {
 		return
 	}

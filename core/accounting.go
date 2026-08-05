@@ -211,7 +211,7 @@ func (e *Engine) sendCapacityReport(r accounting.Receipt, key ed25519.PrivateKey
 		Type:      "capacity-report",
 		Receipt:   &r,
 		ReportSig: accounting.SignReport(key, r),
-		Cred:      e.cfg.AdmissionCred,
+		Cred:      e.admissionCred(),
 	})
 }
 

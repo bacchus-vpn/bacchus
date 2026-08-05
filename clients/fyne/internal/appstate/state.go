@@ -13,6 +13,7 @@ package appstate
 
 import (
 	"strings"
+	"time"
 
 	"github.com/bacchus-vpn/bacchus/core"
 )
@@ -96,6 +97,49 @@ const (
 	// carries the offending value verbatim, which is the whole point of showing
 	// it — the user has to recognise what they typed.
 	DetailCountryConfig
+
+	// The renewal ladder (bacchus#171). These seven are the sentences
+	// recordRenewalFailure and recordRenewalSuccess put on the detail line, and
+	// they had no kinds until now — so the one class of message a user reads
+	// while everything still looks fine went out through DetailVerbatim, the
+	// path meant for core's own error text. That path exists because core's
+	// errors are not fixed sentences and have no translation to look up; these
+	// ARE fixed sentences this client wrote, and rendering them as though they
+	// were not is what left a Russian-speaking user reading English at the one
+	// moment they have something to act on.
+	//
+	// One kind per rung rather than one kind for "renewal": the ladder escalates
+	// on the CLOCK (ADR-0056 §6), each rung is a different sentence, and a UI
+	// that wanted to raise a badge on the urgent ones needs to be able to tell
+	// them apart without parsing prose.
+
+	// DetailRenewalFailing: a renewal failed while the stored credential still
+	// has comfortable life left. Nothing is wrong yet and the sentence says so —
+	// this is the rung that exists so the later ones are not the first news.
+	DetailRenewalFailing
+	// DetailRenewalUrgent: a renewal failed with the credential close enough to
+	// expiry that the user has something to do about it and a shrinking window
+	// to do it in. Remaining carries how long is left.
+	DetailRenewalUrgent
+	// DetailRenewalExpired: the credential has run out and could not be
+	// refreshed. Connecting is refused from here until renewal works.
+	DetailRenewalExpired
+	// DetailRenewalUnknownExpiry: a renewal failed and the stored credential's
+	// own claimed expiry could not be read, so no rung of the clock ladder can be
+	// chosen honestly. Said plainly rather than guessed at.
+	DetailRenewalUnknownExpiry
+	// DetailSubscriptionExpired: the account service refused the renewal because
+	// the subscription has lapsed. Ignores the clock — no amount of waiting fixes
+	// it — and is therefore said immediately whatever the remaining life is.
+	DetailSubscriptionExpired
+	// DetailDeviceRevoked: the account service refused the renewal because this
+	// device's access was withdrawn. The clock is ignored for the same reason.
+	DetailDeviceRevoked
+	// DetailRenewalRecovered: a renewal succeeded after one had failed. Published
+	// only when there was a failure to clear — announcing every success would
+	// make the line flicker with news that nothing is wrong, which is how a line
+	// that also carries real warnings stops being read.
+	DetailRenewalRecovered
 )
 
 // Detail is one detail-line message: what to say, and enough structure for the
@@ -107,16 +151,18 @@ type Detail struct {
 	// Country is the country tag the message is about, for the three country
 	// kinds. Empty otherwise.
 	Country string
+	// Remaining is how much life the stored device credential has left, for
+	// DetailRenewalUrgent — the one renewal rung whose sentence carries a
+	// number. Zero for every other kind.
+	//
+	// It is a Duration rather than a rendered phrase because the phrase is a UI
+	// string like any other: handing the outer package "3 hours" would put an
+	// English fragment inside a translated sentence, which is the exact failure
+	// this whole type exists to prevent. Text still carries the English rendering
+	// for a caller that does not translate.
+	Remaining time.Duration
 }
 
-// DetailFor decides whether ev should update the small secondary detail line
-// beneath the headline state, and with what text. Mirrors eventStatus's own
-// show/suppress rules (the retired Windows client's main.go): an error always surfaces,
-// since no client-role error source fires once a session is protected; info
-// narrates the connect attempt and only matters pre-protected; ICE detail is
-// redundant with the headline state itself once protected, so it is never
-// separately shown. EventSession/EventConnected are plumbing, logged
-// elsewhere, never surfaced here.
 // relayChainFailedPrefix mirrors the retired Windows client's main.go's constant of the
 // same name: core's one genuinely diagnostic signal for a relay chain that
 // failed to build (docs/design/relay-chaining.md §10.4; core/relaychain.go's
@@ -132,9 +178,57 @@ type Detail struct {
 // generic connection error they would retry into the same directory gap.
 const relayChainFailedPrefix = "[relay] chain not built: "
 
+// deviceRenewFailedPrefix is core's own event for a renewal that did not work
+// (core/devicecred_connect.go's maybeRenewDeviceCred). It is recognised here in
+// order to be SUPPRESSED, which is the opposite of what the two prefixes above
+// are for, and the reason is that this client has already said something better
+// about the same outcome by the time core says this.
+//
+// The ordering is worth stating because it is what makes the suppression
+// necessary rather than tidy. core calls Config.DeviceRenew; the closure this
+// client wires publishes its own escalating sentence from the failure; the
+// closure returns the error; and only THEN does core emit this event. So the
+// last thing to reach the detail line was core's diagnostic — "device
+// credential: renewal failed, will retry at the next check: accountclient:
+// /v1/credential: HTTP 403" — landing on top of the one calm sentence written
+// for exactly this moment, with a subscription warning replaced by an HTTP
+// status.
+//
+// ADR-0056 §6 refused to PRODUCE the warning by matching on core's text, and
+// that refusal stands: the warning is produced from the closure's own return
+// value and does not depend on this constant at all. What this does is drop a
+// duplicate. If the prefix ever drifts, the duplicate comes back — visibly, in
+// English, the way it looked before — rather than the warning going missing,
+// and controller_test.go drives a real core.Engine through a failing renewal so
+// a reword in core goes red here instead of quietly reverting a user-facing
+// sentence to protocol vocabulary.
+const deviceRenewFailedPrefix = "device credential: renewal failed"
+
+// DetailFor decides whether ev should update the small secondary detail line
+// beneath the headline state, and with what text. Mirrors eventStatus's own
+// show/suppress rules (the retired Windows client's main.go): an error
+// surfaces; info narrates the connect attempt and only matters pre-protected;
+// ICE detail is redundant with the headline state itself once protected, so it
+// is never separately shown. EventSession/EventConnected are plumbing, logged
+// elsewhere, never surfaced here.
+//
+// This used to justify surfacing every error with "no client-role error source
+// fires once a session is protected". That was true when it was written and is
+// not true now: deviceRenewLoop (bacchus#163) runs on a ticker for the life of
+// the engine and can fail at any point, mid-session included — which is
+// precisely the case the renewal warning exists for, since at the moment it
+// happens nothing is wrong and the user's window to act is closing. A false
+// claim beside a switch on error sources is the kind of thing the next person
+// adding a case trusts, so it is replaced rather than repaired: an error
+// surfaces because an error is what the user needs to see, whatever the
+// headline state says, and the one error source that DOES fire mid-session is
+// handled explicitly below rather than by an assumption that it cannot.
 func DetailFor(ev core.Event, cur ConnState) (d Detail, show bool) {
 	switch ev.Kind {
 	case core.EventError:
+		if strings.HasPrefix(ev.Message, deviceRenewFailedPrefix) {
+			return Detail{}, false
+		}
 		if reason, ok := strings.CutPrefix(ev.Message, relayChainFailedPrefix); ok {
 			// Left verbatim, unlike the two country refusals below: the half of
 			// this sentence that carries the information is core's own reason

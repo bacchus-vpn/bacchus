@@ -62,7 +62,7 @@ func (e *Engine) presentDeviceCredential(ctx context.Context, l *coordLink, time
 	if e.deviceStore == nil {
 		return deviceConnectFields{}, false
 	}
-	cred, issuerCert, ok := e.deviceStore.Get()
+	held, ok := e.deviceStore.Get()
 	if !ok {
 		return deviceConnectFields{}, false
 	}
@@ -78,7 +78,7 @@ func (e *Engine) presentDeviceCredential(ctx context.Context, l *coordLink, time
 	// request would race against itself. Loss of this one datagram is instead
 	// handled the same way any other silent leg is: the deadline below expires and
 	// the caller falls back to a plain connect.
-	l.send(wire{Type: "challenge", Cred: e.cfg.AdmissionCred})
+	l.send(wire{Type: "challenge", Cred: e.admissionCred()})
 
 	budget := deviceChallengeTimeout
 	if budget > timeout {
@@ -100,10 +100,47 @@ func (e *Engine) presentDeviceCredential(ctx context.Context, l *coordLink, time
 
 	return deviceConnectFields{
 		challenge:  base64.StdEncoding.EncodeToString(challenge),
-		cred:       cred,
-		issuerCert: issuerCert,
+		cred:       held.Device,
+		issuerCert: held.IssuerCert,
 		assert:     base64.StdEncoding.EncodeToString(sig),
 	}, true
+}
+
+// admissionCred is the admission credential this node presents — on a client's
+// list/connect/challenge, on a forwarder's register, and inside an exit's msg2.
+//
+// Config.AdmissionCred is the answer whenever it is set, so nothing an operator
+// configured changes meaning: cmd/node's -admission-cred still wins, and a
+// deployment with no account service is byte-identical to one predating
+// bacchus#166. What is new is the fallback: when that field is empty and the
+// account service minted an admission credential for this DEVICE alongside its
+// device credential, the device store is holding it, and this is where it
+// reaches the wire.
+//
+// It is a function rather than a field read for the reason bacchus#166 exists:
+// renewal rewrites the stored value underneath a running engine, and every
+// caller of this must see the fresh one. A value snapshotted at construction —
+// which is what an embedder reading the file itself and setting
+// Config.AdmissionCred could only ever produce — is stale from the first renewal
+// onward, and stale in the specific way that expires exactly when membership was
+// supposed to be extended.
+//
+// Nothing here verifies it. This node holds no admission anchor for its own
+// credential and has no business holding one; the credential is opaque to its
+// bearer and meaningful only to the peer that checks it.
+func (e *Engine) admissionCred() string {
+	if e.cfg.AdmissionCred != "" {
+		return e.cfg.AdmissionCred
+	}
+	if e.deviceStore == nil {
+		return ""
+	}
+	held, _ := e.deviceStore.Get()
+	// Deliberately not gated on ok. A device holding an admission credential but
+	// no presentable device credential is an odd state, and refusing to present
+	// the one it does hold would answer that oddity by disconnecting the node
+	// from a network it is still admitted to.
+	return held.Admission
 }
 
 // awaitChallenge waits for member l to answer a "challenge" request. ok is
@@ -236,13 +273,13 @@ func (d *DeviceEnrollment) Dir() string { return d.dir }
 // exactly once and the second spend does not fail safely, it fails
 // unrecoverably.
 func (d *DeviceEnrollment) Enrolled() bool {
-	_, _, ok := d.store.Get()
+	_, ok := d.store.Get()
 	return ok
 }
 
-// Current returns the stored credential and issuer cert, matching
-// devicestore.Store.Get. It is what a caller renews FROM.
-func (d *DeviceEnrollment) Current() (cred, issuerCert string, ok bool) {
+// Current returns everything this device holds, matching devicestore.Store.Get.
+// It is what a caller renews FROM.
+func (d *DeviceEnrollment) Current() (devicestore.Credential, bool) {
 	return d.store.Get()
 }
 
@@ -267,11 +304,11 @@ func (d *DeviceEnrollment) SignRenew(audience string, challenge []byte) ([]byte,
 	return devicecred.SignAssertion(d.key, purposeRenew, audience, challenge)
 }
 
-// Put persists a freshly issued credential and the issuer cert it chains to,
-// exactly as devicestore.Store.Put does — both together, because a client that
-// wrote them in two steps could persist a fresh credential against a stale cert.
-func (d *DeviceEnrollment) Put(cred, issuerCert string) error {
-	return d.store.Put(cred, issuerCert)
+// Put persists what an issuing verb returned, exactly as devicestore.Store.Put
+// does — all of it in one write, because a client that wrote the parts in
+// separate steps could persist a fresh credential against a stale companion.
+func (d *DeviceEnrollment) Put(c devicestore.Credential) error {
+	return d.store.Put(c)
 }
 
 // DeviceRenewRequest is what Config.DeviceRenew is called with: enough to renew
@@ -283,10 +320,14 @@ func (d *DeviceEnrollment) Put(cred, issuerCert string) error {
 // it (ADR-0046's 2026-08-04 update). So the caller supplies both and gets back
 // only the signature.
 type DeviceRenewRequest struct {
-	DevicePub         ed25519.PublicKey
-	CurrentCred       string // the "bacchusd1:" envelope about to expire
-	CurrentIssuerCert string
-	Sign              func(audience string, challenge []byte) ([]byte, error)
+	DevicePub ed25519.PublicKey
+	// Current is what this device holds right now — what it is renewing FROM.
+	// Not sent to the account service by anything that speaks the specified
+	// exchange (the service resolves the account by public key and has no
+	// parameter for it); it is here because the seam's CALLER needs it, for the
+	// renewal-due check that decided to call at all.
+	Current devicestore.Credential
+	Sign    func(audience string, challenge []byte) ([]byte, error)
 }
 
 // deviceRenewCallTimeout bounds a single Config.DeviceRenew invocation, so a
@@ -340,28 +381,44 @@ func (e *Engine) maybeRenewDeviceCred(ctx context.Context, now time.Time) {
 	if e.cfg.DeviceRenew == nil || e.deviceStore == nil {
 		return
 	}
-	cred, issuerCert, ok := e.deviceStore.Get()
+	current, ok := e.deviceStore.Get()
 	if !ok {
 		return // nothing enrolled yet — out of this lane's scope; see ADR-0046
 	}
-	if !devicestore.NeedsRenewal(cred, now, e.deviceRenewMargin()) {
+	if !devicestore.NeedsRenewal(current.Device, now, e.deviceRenewMargin()) {
 		return
 	}
 
 	req := DeviceRenewRequest{
-		DevicePub:         e.deviceKey.Public().(ed25519.PublicKey),
-		CurrentCred:       cred,
-		CurrentIssuerCert: issuerCert,
+		DevicePub: e.deviceKey.Public().(ed25519.PublicKey),
+		Current:   current,
 		Sign: func(audience string, challenge []byte) ([]byte, error) {
 			return devicecred.SignAssertion(e.deviceKey, purposeRenew, audience, challenge)
 		},
 	}
-	newCred, newIssuerCert, err := e.cfg.DeviceRenew(ctx, req)
+	fresh, err := e.cfg.DeviceRenew(ctx, req)
 	if err != nil {
 		e.emit(EventError, "", "device credential: renewal failed, will retry at the next check: %v", err)
 		return
 	}
-	if err := e.deviceStore.Put(newCred, newIssuerCert); err != nil {
+	if !fresh.Presentable() {
+		// A seam that answers with no error and half a credential is a seam that
+		// would otherwise ERASE a working one. Refusing here keeps a filler's bug
+		// from costing this device its access, and the retry at the next check
+		// costs nothing.
+		e.emit(EventError, "", "device credential: renewal returned an incomplete credential; keeping the one this device already holds")
+		return
+	}
+	if fresh.Admission == "" {
+		// Carried forward rather than cleared. A deployment with no admission
+		// authority mints none, and a response that omitted it is not evidence
+		// that the credential this device already holds has been withdrawn —
+		// withdrawal is what the revocation list is for. Clearing here would take
+		// a client off an admission-enforcing network on the strength of a field
+		// that was never populated in the first place.
+		fresh.Admission = current.Admission
+	}
+	if err := e.deviceStore.Put(fresh); err != nil {
 		e.emit(EventError, "", "device credential: renewed but could not persist the fresh credential: %v", err)
 		return
 	}

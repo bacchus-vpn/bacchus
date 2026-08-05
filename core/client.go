@@ -88,7 +88,7 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 		e.drainMsgCh(l)
 		e.greet(l)
 		mark := l.unroutableMark()
-		l.sendN(wire{Type: "list", Cred: e.cfg.AdmissionCred}, 3)
+		l.sendN(wire{Type: "list", Cred: e.admissionCred()}, 3)
 		if countries, ok := e.awaitCountries(ctx, l, per); ok {
 			// The reply advertised the network's release; if this client is too
 			// old (force-major) surface that rather than a stale country list (#36).
@@ -857,7 +857,7 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 		FirstHop:        req.plan.firstHopID(),
 		Mode:            req.mode,
 		Nonce:           nonce,
-		Cred:            e.cfg.AdmissionCred,
+		Cred:            e.admissionCred(),
 		ExcludeSessions: req.exclude,
 		Challenge:       fields.challenge,
 		DeviceCred:      fields.cred,

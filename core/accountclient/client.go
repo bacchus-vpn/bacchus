@@ -14,30 +14,9 @@ import (
 	"os"
 	"strings"
 	"time"
-)
 
-// Result is what both issuing verbs return: a device credential, the issuer cert
-// it chains to, and — when the deployment has an admission authority — the
-// admission credential minted beside it over the same window.
-//
-// The device credential and the issuer cert arrive together because a client
-// forced into a second call could persist a fresh credential against a stale
-// cert, and core/devicestore.Put writes them as a pair for that reason.
-type Result struct {
-	// Device is the "bacchusd1:" envelope, verbatim. Never re-encoded: a signed
-	// object that is unwrapped and re-marshaled risks disagreeing with the signer
-	// over bytes neither was supposed to have an opinion on.
-	Device string
-	// IssuerCert is the "bacchusi1:" envelope the device credential chains to.
-	IssuerCert string
-	// Admission is the "bacchusc1:" envelope, or empty.
-	//
-	// EMPTY IS A REAL DEPLOYMENT, NOT AN ERROR. A service configured with no
-	// admission key mints no admission credential, and that configuration is
-	// supported rather than degraded. A client that treated absence as a failure
-	// would refuse to enroll against a perfectly good deployment.
-	Admission string
-}
+	"github.com/bacchus-vpn/bacchus/core/devicestore"
+)
 
 // Config builds a Client.
 type Config struct {
@@ -227,10 +206,22 @@ type challengeResponse struct {
 
 // credentialsResponse is the shape BOTH issuing verbs answer with. One struct,
 // because they are one shape and two would be two places to notice a field.
+//
+// It stays a wire type of this package's own rather than decoding straight into
+// devicestore.Credential, which happens to hold the same three strings: the
+// on-disk record and the response body are two formats that agree today and are
+// versioned by two different documents, and a shared struct would make the next
+// field this service adds a change to what a device persists.
 type credentialsResponse struct {
 	Device     string `json:"device"`
 	Admission  string `json:"admission"`
 	IssuerCert string `json:"issuer_cert"`
+}
+
+// credential is what the caller gets: the wire response as the thing a device
+// stores. Nothing is re-encoded on the way — see devicestore's record doc.
+func (r credentialsResponse) credential() devicestore.Credential {
+	return devicestore.Credential{Device: r.Device, IssuerCert: r.IssuerCert, Admission: r.Admission}
 }
 
 type enrollRequest struct {

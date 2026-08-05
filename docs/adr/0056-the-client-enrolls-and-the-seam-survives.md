@@ -81,6 +81,13 @@ embedder filling it correctly. `cmd/node` does not (see §3), so a node-role
 client holding a credential still cannot renew it. That is a real gap and it is
 named here rather than left to be discovered.
 
+> **Update (2026-08-05, `#166`):** the seam's SHAPE changed and the ruling did
+> not. `Config.DeviceRenew` now returns a `devicestore.Credential` rather than two
+> strings (§7). `core` still imports nothing that dials an account service, and
+> `go list -deps ./core` is byte-identical to what it was before that change —
+> which is the check this section's argument actually rests on, so it is the check
+> that was run.
+
 ### 3. Where the claim code is entered — ADR-0046's first question
 
 **`clients/fyne`'s config file, as a one-shot field, plus a `Controller` method
@@ -298,6 +305,67 @@ a regression — such a client presented nothing at all before this change, and
 nothing is refused too — but it means the volunteer path still needs an
 operator-minted node credential, which no `clients/fyne` field can supply today.
 
+> **Update (2026-08-05): the proposal was taken, and the gap is closed
+> (`#166`).** Everything above stands as the record of what was found and what
+> was deliberately left; what follows replaces the mitigation, not the finding.
+>
+> **The seam and the store now carry what one response carries.**
+> `Config.DeviceRenew` returns a `devicestore.Credential` — device credential,
+> issuer cert, admission credential — instead of two strings, and
+> `devicestore.Store.Put` takes the same value. The three go in through one
+> write, which is not tidiness: it is the same argument §3.3.1 of the transport
+> specification makes for returning the credential and the issuer cert together,
+> applied to the third value it was already returning. A caller forced into
+> separate writes can persist a fresh credential against a stale companion, and
+> here the companion is what keeps the device on the network at all.
+>
+> **A struct rather than a third return value**, argued rather than assumed. Two
+> positional strings became three, and three is where a signature stops being
+> readable at the call site — but the deciding reason is the next one: a struct
+> field is additive and a positional return is not. This seam has now been
+> widened once, by a value the account service was already minting and this
+> repository had simply never had anywhere to put; the honest expectation is that
+> it happens again, and the shape should make the next one a field rather than
+> another change to every filler's signature. The cost is that an embedder
+> implementing the seam imports `core/devicestore`, which it was already reading
+> through `core` to know what to renew from.
+>
+> **`Config.AdmissionCred` becomes a fallback rather than the only source.** The
+> engine reads its effective admission credential per send (`admissionCred`,
+> `core/devicecred_connect.go`): the configured value when there is one,
+> otherwise whatever the device store holds. `registerLoop` stamps it on each
+> register exactly as it already stamps the quota bit, for the same reason — a
+> value baked into a template built at `Start` goes stale silently. A configured
+> value always wins, so no existing deployment changes behaviour: `cmd/node`'s
+> `-admission-cred` still decides, and a node with neither presents none.
+>
+> **`clients/fyne` stops compensating.** It no longer reads the admission
+> credential off disk on every connect, no longer sets `Config.AdmissionCred`,
+> and wires `Client.Renew` rather than `Client.RenewInto(dir)` — which is deleted
+> along with the separate `admission.cred` file, because the reason both existed
+> was that the seam could not carry the value. That was the point of fixing it
+> rather than mitigating it again: the mitigation lived in the embedder, so every
+> other embedder had the defect.
+>
+> **The residual named above is gone.** A single engine that stays up past a
+> credential lifetime now presents the admission credential it holds *now*, on
+> every register, list, connect, challenge and exit handshake.
+>
+> **One upgrade path exists and is deliberately narrow.** A device enrolled
+> between `#163` and this change keeps its admission credential in the separate
+> file, and reading only the JSON record would leave it presenting none until its
+> next renewal — reproducing the exact lapse this change removes, on the machines
+> most likely to be running `#167`. `devicestore.Open` therefore adopts such a
+> file once, and the next `Put` folds it into the record. No release ever shipped
+> the separate file, so this can be deleted when no such directory remains.
+>
+> **The role note above is unchanged and still true.** The credential the account
+> service mints carries the client role only; a volunteering client presenting it
+> on an exit or relay registration is still refused by an admission-enforcing
+> coordinator, and the volunteer path still needs an operator-minted node
+> credential. What changed is only *which* copy of that credential is presented,
+> not what it authorises.
+
 ### 8. The package lives at `core/accountclient`
 
 The candidates were `core/accountclient` and `clients/internal/accountclient`.
@@ -375,6 +443,8 @@ service produces a new serial and a refreshed admission credential.
   what ADR-0046 predicted would happen and had never happened.
 - **The admission credential's missing return path is now a known gap with a
   written proposal** rather than a latent failure nobody had met (§7).
+  **Closed 2026-08-05 by `#166`** — the seam and the store carry all three, and
+  `clients/fyne`'s mitigation is gone. See §7's update.
 - **`cmd/node` still cannot enroll or renew.** A node-role client presents what
   is in its `-device-cred-dir` and lets it expire. Named rather than implied.
 - **The claim code lives in a config file until a dialog exists.** It is erased

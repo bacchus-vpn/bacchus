@@ -239,6 +239,41 @@ expires. A CRL path without a public key is a startup error, not a silent no-op.
 Since #93 both are settable in Settings too — the config file is still read, so an
 operator scripting a deployment need not open a dialog.
 
+### The account service (bacchus#163, ADR-0056)
+
+Six optional keys. **Leaving all six empty is a complete deployment, not a degraded
+one** — the same posture `admissionPubKey` has. A coordinator's device-credential
+gate is off unless its operator turned it on, and a Bacchus network with no
+entitlement authority is a supported shape. None of these is in Settings; like
+`coordinators`, they are operator configuration rather than user preference.
+
+| key | what it is |
+| --- | --- |
+| `accountServiceUrl` | `https://host:port` — scheme and host only, no path. Plain `http` is refused at startup, not downgraded: the assertions this client signs authenticate it *to* the service and cover no response byte, so the credential travelling back is unprotected without TLS. |
+| `accountServiceAudience` | The service's own identity, bound into every assertion this device signs. It is deliberately never in any response, so it has to arrive out of band — a client that read it from the reply it was about to sign against would let the responder choose the binding. |
+| `accountServiceCa` | Path to a PEM file authenticating the service's TLS identity. Required whenever the URL is set, and the public root pool is never consulted even as a fallback: the service is reached under a name chosen for camouflage, so a publicly-trusted certificate for that name authenticates the decoy. |
+| `deviceCredDir` | Where this device's keypair, device credential, issuer cert and admission credential live across restarts. **Empty is not "off"** — it defaults to a `device/` directory beside the per-user config file (mode 0700). Pointing it somewhere unwritable is a hard failure at Connect, not a silent fresh identity. |
+| `claimCode` | **One-shot.** The code an operator hands a user so this device can enroll; redeemed at the next Connect and **erased from this file** the moment enrollment succeeds, because the service erases its own copy on redemption rather than flagging it. A code that is *refused* is left in place — a user who mistyped needs to see what they typed. It lives here rather than in a dialog only until there is a dialog (ADR-0056 §3). |
+| `deviceLabel` | What the account's owner sees this device called in their own device list. It travels to the service in the clear and is stored there. This client **never** derives it from the machine — a hostname is a username on most desktops and a real name on many. Empty uses `desktop`, and every device sharing that label is the intended outcome. |
+
+The three `accountService*` keys are one group an operator hands over together:
+setting the URL without the audience or the CA is refused at Connect, naming the
+missing one, rather than falling back to something that would appear to work.
+
+Enrollment happens **inside** the connect, at the moment the user asked for the
+network, and never blocks it on the account service being reachable: an
+unreachable service logs and carries on with whatever this device already holds,
+while a *coded refusal about the claim code* — mistyped, already used, no device
+slots, subscription expired — stops the connect and says which, because that
+answer will be identical in ten hours and the user has something to do about it.
+
+Renewal then runs on a timer for the life of the connection and is
+**user-visible state, not a log line** (ADR-0056 §6): a failure that still has
+comfortable credential life left says so calmly, and the sentence escalates on the
+clock as the remaining life shrinks, so the warning arrives while it is still only
+a warning. Both the device credential and the admission credential are refreshed
+together and stored together (bacchus#166).
+
 ## Settings (`old #152`, then #93)
 
 The `File` menu's `Settings…` opens one window over every field below, all persisted

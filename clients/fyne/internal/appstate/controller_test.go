@@ -26,6 +26,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/accountclient"
 	"github.com/bacchus-vpn/bacchus/core/delegation"
 	"github.com/bacchus-vpn/bacchus/core/devicecred"
+	"github.com/bacchus-vpn/bacchus/core/devicestore"
 	"github.com/pion/turn/v4"
 )
 
@@ -1553,8 +1554,9 @@ func TestEnrollmentRedeemsAClaimCodeAndErasesIt(t *testing.T) {
 	if !cleared {
 		t.Fatal("the spent claim code was left in the config file")
 	}
-	if got := accountclient.LoadAdmission(dc.dir); got != "bacchusc1:admission" {
-		t.Fatalf("admission credential = %q; the account service minted one and it was dropped", got)
+	held, _ := dc.dev.Current()
+	if held.Admission != "bacchusc1:admission" {
+		t.Fatalf("admission credential = %q; the account service minted one and it was dropped", held.Admission)
 	}
 }
 
@@ -1566,7 +1568,7 @@ func TestEnrollmentSpendsNothingWhenTheDeviceAlreadyHasOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := dc.dev.Put("bacchusd1:already", "bacchusi1:already"); err != nil {
+	if err := dc.dev.Put(devicestore.Credential{Device: "bacchusd1:already", IssuerCert: "bacchusi1:already"}); err != nil {
 		t.Fatal(err)
 	}
 	if abandon := ctrl.enrollIfNeeded(context.Background(), dc); abandon != nil {
@@ -1710,10 +1712,10 @@ func TestRenewalFailureBecomesAUserVisibleState(t *testing.T) {
 
 	// A credential with plenty of life left: a warning, not an alarm.
 	_, _, farOff, key := mintAppstateChain(t, 40*time.Hour)
-	if _, _, err := hook(context.Background(), core.DeviceRenewRequest{
-		DevicePub:   key.Public().(ed25519.PublicKey),
-		CurrentCred: farOff,
-		Sign:        func(a string, ch []byte) ([]byte, error) { return make([]byte, 64), nil },
+	if _, err := hook(context.Background(), core.DeviceRenewRequest{
+		DevicePub: key.Public().(ed25519.PublicKey),
+		Current:   devicestore.Credential{Device: farOff},
+		Sign:      func(a string, ch []byte) ([]byte, error) { return make([]byte, 64), nil },
 	}); err == nil {
 		t.Fatal("the fake service refuses /v1/credential; renewal should have failed")
 	}
@@ -1731,39 +1733,111 @@ func TestRenewalFailureBecomesAUserVisibleState(t *testing.T) {
 	// The same failure with the credential nearly gone: now it is the user's
 	// problem, and the sentence has to say so before the window closes.
 	_, _, nearlyGone, key2 := mintAppstateChain(t, 30*time.Minute)
-	_, _, _ = hook(context.Background(), core.DeviceRenewRequest{
-		DevicePub:   key2.Public().(ed25519.PublicKey),
-		CurrentCred: nearlyGone,
-		Sign:        func(a string, ch []byte) ([]byte, error) { return make([]byte, 64), nil },
+	_, _ = hook(context.Background(), core.DeviceRenewRequest{
+		DevicePub: key2.Public().(ed25519.PublicKey),
+		Current:   devicestore.Credential{Device: nearlyGone},
+		Sign:      func(a string, ch []byte) ([]byte, error) { return make([]byte, 64), nil },
 	})
 	st = ctrl.CredentialState()
 	if !st.Attention {
 		t.Fatal("a failure inside the last hours of a credential's life did not raise attention")
 	}
-	last := details[len(details)-1].Text
-	if !strings.Contains(last, "needs attention") {
-		t.Fatalf("the escalated sentence does not escalate: %q", last)
+	last := details[len(details)-1]
+	if !strings.Contains(last.Text, "needs attention") {
+		t.Fatalf("the escalated sentence does not escalate: %q", last.Text)
 	}
-	if !strings.Contains(last, "minutes") {
-		t.Fatalf("the escalated sentence does not say how long is left: %q", last)
+	if !strings.Contains(last.Text, "minutes") {
+		t.Fatalf("the escalated sentence does not say how long is left: %q", last.Text)
+	}
+	if last.Kind != DetailRenewalUrgent {
+		t.Fatalf("the escalated sentence went out as kind %d, not DetailRenewalUrgent — it renders through the verbatim path and is never translated", last.Kind)
+	}
+
+	// And core's own diagnostic, which arrives AFTER the closure returned, must
+	// not land on top of it. This is the whole sequence bacchus#171 part 2 is
+	// about: the closure publishes, core emits, last writer wins.
+	ctrl.onEvent(0, core.Event{
+		Kind:    core.EventError,
+		Message: "device credential: renewal failed, will retry at the next check: accountclient: /v1/credential: HTTP 403",
+	})
+	if got := details[len(details)-1]; got != last {
+		t.Fatalf("core's diagnostic replaced the user-facing warning with %q", got.Text)
 	}
 }
 
-// TestRenewalFailureTextIsAboutTheClockExceptWhenItIsAboutTheAccount.
+// TestRenewalFailureTextIsAboutTheClockExceptWhenItIsAboutTheAccount, and every
+// rung of the ladder carries a kind of its own (bacchus#171). The kind is what
+// the assertions are on: the English text is the fallback copy, and asserting
+// only on it would pass just as well if every rung went out as DetailVerbatim,
+// which is exactly the state this card was filed about.
 func TestRenewalFailureTextIsAboutTheClockExceptWhenItIsAboutTheAccount(t *testing.T) {
+	future := time.Now().Add(40 * time.Hour)
+
 	expired := &accountclient.Error{Code: accountclient.CodeEntitlementExpired, Recognized: true}
 	// Plenty of time left, but no amount of waiting fixes a lapsed subscription.
-	got := renewalFailureText(expired, time.Now().Add(40*time.Hour), 40*time.Hour)
-	if !strings.Contains(got, "subscription has expired") {
-		t.Fatalf("an expired entitlement with time on the clock said %q", got)
+	got := renewalFailureDetail(expired, future, 40*time.Hour)
+	if got.Kind != DetailSubscriptionExpired || !strings.Contains(got.Text, "subscription has expired") {
+		t.Fatalf("an expired entitlement with time on the clock gave %+v", got)
 	}
 	revoked := &accountclient.Error{Code: accountclient.CodeDeviceRevoked, Recognized: true}
-	if got := renewalFailureText(revoked, time.Now().Add(40*time.Hour), 40*time.Hour); !strings.Contains(got, "withdrawn") {
-		t.Fatalf("a revoked device said %q", got)
+	if got := renewalFailureDetail(revoked, future, 40*time.Hour); got.Kind != DetailDeviceRevoked || !strings.Contains(got.Text, "withdrawn") {
+		t.Fatalf("a revoked device gave %+v", got)
 	}
 	// An unreadable expiry is treated as "cannot tell", never as "fine".
-	if got := renewalFailureText(errors.New("boom"), time.Time{}, 0); !strings.Contains(got, "cannot tell") {
-		t.Fatalf("an unknown expiry said %q", got)
+	if got := renewalFailureDetail(errors.New("boom"), time.Time{}, 0); got.Kind != DetailRenewalUnknownExpiry || !strings.Contains(got.Text, "cannot tell") {
+		t.Fatalf("an unknown expiry gave %+v", got)
+	}
+	// The three clock rungs.
+	if got := renewalFailureDetail(errors.New("boom"), future, 40*time.Hour); got.Kind != DetailRenewalFailing {
+		t.Fatalf("a failure with 40 hours left gave %+v", got)
+	}
+	if got := renewalFailureDetail(errors.New("boom"), time.Now().Add(-time.Hour), -time.Hour); got.Kind != DetailRenewalExpired {
+		t.Fatalf("a failure past expiry gave %+v", got)
+	}
+	urgent := renewalFailureDetail(errors.New("boom"), time.Now().Add(30*time.Minute), 30*time.Minute)
+	if urgent.Kind != DetailRenewalUrgent {
+		t.Fatalf("a failure inside the warning window gave %+v", urgent)
+	}
+	// The variable part travels as a Duration, so the layer that owns the user's
+	// language renders the phrase. Handing over "30 minutes" would put English
+	// inside a translated sentence.
+	if urgent.Remaining != 30*time.Minute {
+		t.Fatalf("Remaining = %v, want the credential's remaining life", urgent.Remaining)
+	}
+	// And no other kind carries one, so a UI reading it never renders a number
+	// about a sentence that has none.
+	for _, d := range []Detail{got, renewalFailureDetail(errors.New("boom"), future, 40*time.Hour)} {
+		if d.Remaining != 0 {
+			t.Fatalf("kind %d carried Remaining=%v", d.Kind, d.Remaining)
+		}
+	}
+}
+
+// TestRoughDurationAndRoughRemainingAgree: the outer package renders the
+// remaining lifetime through RoughRemaining and this package renders the same
+// value through RoughDuration. They may differ in wording and must never differ
+// in what they claim, so both read one rounding.
+func TestRoughDurationAndRoughRemainingAgree(t *testing.T) {
+	for _, tc := range []struct {
+		in    time.Duration
+		count int
+		unit  DurationUnit
+		text  string
+	}{
+		{5 * time.Hour, 5, DurationHours, "5 hours"},
+		{2 * time.Hour, 2, DurationHours, "2 hours"},
+		{90 * time.Minute, 1, DurationAnHour, "an hour"},
+		{45 * time.Minute, 45, DurationMinutes, "45 minutes"},
+		{30 * time.Second, 0, DurationAMoment, "a moment"},
+		{-time.Hour, 0, DurationAMoment, "a moment"},
+	} {
+		count, unit := RoughRemaining(tc.in)
+		if count != tc.count || unit != tc.unit {
+			t.Errorf("RoughRemaining(%v) = (%d, %d), want (%d, %d)", tc.in, count, unit, tc.count, tc.unit)
+		}
+		if got := RoughDuration(tc.in); got != tc.text {
+			t.Errorf("RoughDuration(%v) = %q, want %q", tc.in, got, tc.text)
+		}
 	}
 }
 
@@ -1793,22 +1867,6 @@ func TestASuccessfulRenewalClearsTheWarningAndSaysSoOnlyIfThereWasOne(t *testing
 	}
 	if st := ctrl.CredentialState(); st.RenewalFailing || st.Attention {
 		t.Fatalf("state after recovery = %+v", st)
-	}
-}
-
-func TestRoughDurationIsCoarse(t *testing.T) {
-	for _, tc := range []struct {
-		d    time.Duration
-		want string
-	}{
-		{5 * time.Hour, "5 hours"},
-		{90 * time.Minute, "an hour"},
-		{25 * time.Minute, "25 minutes"},
-		{30 * time.Second, "a moment"},
-	} {
-		if got := roughDuration(tc.d); got != tc.want {
-			t.Fatalf("roughDuration(%v) = %q, want %q", tc.d, got, tc.want)
-		}
 	}
 }
 
