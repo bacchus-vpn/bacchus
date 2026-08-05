@@ -23,6 +23,7 @@ import (
 
 	"github.com/bacchus-vpn/bacchus/core"
 	"github.com/bacchus-vpn/bacchus/core/devicecred"
+	"github.com/bacchus-vpn/bacchus/core/devicestore"
 )
 
 // ---------------------------------------------------------------------------
@@ -312,7 +313,7 @@ func TestClientDoesNotTrustThePublicRootPool(t *testing.T) {
 // so a pass means the account service would have admitted these exact bytes.
 func TestEnrollProducesAnAssertionTheServiceVerifierAccepts(t *testing.T) {
 	f := newFakeService(t)
-	dev, dir := newDevice(t)
+	dev, _ := newDevice(t)
 
 	res, err := f.client(t).Enroll(context.Background(), dev, "BC1-TESTCODE", "desktop")
 	if err != nil {
@@ -358,12 +359,10 @@ func TestEnrollProducesAnAssertionTheServiceVerifierAccepts(t *testing.T) {
 	if res.Device != f.device || res.IssuerCert != f.issuerCert || res.Admission != f.admission {
 		t.Fatalf("Enroll returned %+v", res)
 	}
-	cred, cert, ok := dev.Current()
-	if !ok || cred != f.device || cert != f.issuerCert {
-		t.Fatalf("the credential and issuer cert were not persisted together: %q %q %v", cred, cert, ok)
-	}
-	if got := LoadAdmission(dir); got != f.admission {
-		t.Fatalf("admission credential = %q, want %q", got, f.admission)
+	held, ok := dev.Current()
+	want := devicestore.Credential{Device: f.device, IssuerCert: f.issuerCert, Admission: f.admission}
+	if !ok || held != want {
+		t.Fatalf("the three were not persisted together: got %+v (ok=%v), want %+v", held, ok, want)
 	}
 }
 
@@ -408,7 +407,7 @@ func TestEnrollSendsTheEnrollVerbExactlyOnce(t *testing.T) {
 			if n := f.count("/v1/enroll"); n != 1 {
 				t.Fatalf("/v1/enroll was sent %d times; a claim code is spent by the first one", n)
 			}
-			if _, _, ok := dev.Current(); ok {
+			if _, ok := dev.Current(); ok {
 				t.Fatal("a failed enrollment stored a credential")
 			}
 		})
@@ -451,7 +450,7 @@ func TestEnrollRecoversFromAnUnreadResponse(t *testing.T) {
 			conn.Close()
 		}
 	}
-	dev, dir := newDevice(t)
+	dev, _ := newDevice(t)
 
 	res, err := f.client(t).Enroll(context.Background(), dev, "BC1-TESTCODE", "desktop")
 	if err != nil {
@@ -466,8 +465,8 @@ func TestEnrollRecoversFromAnUnreadResponse(t *testing.T) {
 	if n := f.count("/v1/credential"); n != 1 {
 		t.Fatalf("/v1/credential sent %d times during recovery, want 1", n)
 	}
-	if got := LoadAdmission(dir); got != f.admission {
-		t.Fatalf("recovery did not persist the admission credential")
+	if held, _ := dev.Current(); held.Admission != f.admission {
+		t.Fatalf("recovery did not persist the admission credential: %q", held.Admission)
 	}
 }
 
@@ -488,7 +487,7 @@ func TestEnrollCollectsWhenAlreadyEnrolled(t *testing.T) {
 func TestEnrollRefusesToSpendAClaimCodeForADeviceThatHasOne(t *testing.T) {
 	f := newFakeService(t)
 	dev, _ := newDevice(t)
-	if err := dev.Put("bacchusd1:existing", "bacchusi1:existing"); err != nil {
+	if err := dev.Put(devicestore.Credential{Device: "bacchusd1:existing", IssuerCert: "bacchusi1:existing"}); err != nil {
 		t.Fatal(err)
 	}
 	_, err := f.client(t).Enroll(context.Background(), dev, "BC1-TESTCODE", "desktop")
@@ -506,7 +505,7 @@ func TestEnrollRefusesToSpendAClaimCodeForADeviceThatHasOne(t *testing.T) {
 func TestAdmissionAbsentIsNotAnError(t *testing.T) {
 	f := newFakeService(t)
 	f.admission = ""
-	dev, dir := newDevice(t)
+	dev, _ := newDevice(t)
 
 	res, err := f.client(t).Enroll(context.Background(), dev, "BC1-TESTCODE", "desktop")
 	if err != nil {
@@ -515,11 +514,12 @@ func TestAdmissionAbsentIsNotAnError(t *testing.T) {
 	if res.Admission != "" {
 		t.Fatalf("Admission = %q, want empty", res.Admission)
 	}
-	if _, _, ok := dev.Current(); !ok {
+	held, ok := dev.Current()
+	if !ok {
 		t.Fatal("the device credential was not stored")
 	}
-	if got := LoadAdmission(dir); got != "" {
-		t.Fatalf("LoadAdmission = %q on a deployment that mints none", got)
+	if held.Admission != "" {
+		t.Fatalf("stored Admission = %q on a deployment that mints none", held.Admission)
 	}
 }
 
@@ -528,7 +528,7 @@ func TestAdmissionAbsentIsNotAnError(t *testing.T) {
 // evidence that what this device already holds has been withdrawn.
 func TestAnEmptyAdmissionDoesNotClearAStoredOne(t *testing.T) {
 	f := newFakeService(t)
-	dev, dir := newDevice(t)
+	dev, _ := newDevice(t)
 	if _, err := f.client(t).Enroll(context.Background(), dev, "BC1-TESTCODE", "desktop"); err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -536,7 +536,7 @@ func TestAnEmptyAdmissionDoesNotClearAStoredOne(t *testing.T) {
 	if _, err := f.client(t).Collect(context.Background(), dev); err != nil {
 		t.Fatalf("Collect: %v", err)
 	}
-	if got := LoadAdmission(dir); got == "" {
+	if held, _ := dev.Current(); held.Admission == "" {
 		t.Fatal("a response with no admission field erased the stored admission credential")
 	}
 }
@@ -586,27 +586,28 @@ func TestCollectDoesNotRetryForever(t *testing.T) {
 // The renewal seam.
 // ---------------------------------------------------------------------------
 
-func TestRenewSatisfiesTheSeamAndRefreshesAdmission(t *testing.T) {
+func TestRenewSatisfiesTheSeamAndCarriesAdmission(t *testing.T) {
 	f := newFakeService(t)
-	dev, dir := newDevice(t)
+	dev, _ := newDevice(t)
 
 	// Assigning to the seam's own type is what proves the shape matches; a
 	// mismatch is a compile error here rather than a discovery at an embedder.
-	var seam func(context.Context, core.DeviceRenewRequest) (string, string, error) = f.client(t).RenewInto(dir)
+	// It is also the whole of bacchus#166: this used to be RenewInto(dir), a
+	// second entry point that existed only because the seam could not carry the
+	// admission credential and something had to write it out of band.
+	var seam func(context.Context, core.DeviceRenewRequest) (devicestore.Credential, error) = f.client(t).Renew
 
 	f.admission = "bacchusc1:fresh-admission"
-	cred, cert, err := seam(context.Background(), core.DeviceRenewRequest{
+	got, err := seam(context.Background(), core.DeviceRenewRequest{
 		DevicePub: dev.DevicePub(),
 		Sign:      dev.SignRenew,
 	})
 	if err != nil {
 		t.Fatalf("renew: %v", err)
 	}
-	if cred != f.device || cert != f.issuerCert {
-		t.Fatalf("renew returned %q %q", cred, cert)
-	}
-	if got := LoadAdmission(dir); got != "bacchusc1:fresh-admission" {
-		t.Fatalf("renewal did not refresh the admission credential: %q", got)
+	want := devicestore.Credential{Device: f.device, IssuerCert: f.issuerCert, Admission: "bacchusc1:fresh-admission"}
+	if got != want {
+		t.Fatalf("renew returned %+v, want %+v — all three, from one response", got, want)
 	}
 
 	// The renewal assertion carries the renewal purpose, not the enrollment one.
@@ -628,6 +629,58 @@ func TestRenewSatisfiesTheSeamAndRefreshesAdmission(t *testing.T) {
 	}
 }
 
+// TestRenewDoesNotPersist pins the division of labour the widened seam settles.
+// Renew hands everything back and writes nothing: the caller (core's
+// maybeRenewDeviceCred) owns the store and writes all three together. A second
+// writer here is how a fresh credential ends up persisted against a stale
+// companion, which is the failure the whole shape exists to make impossible.
+func TestRenewDoesNotPersist(t *testing.T) {
+	f := newFakeService(t)
+	dev, _ := newDevice(t)
+
+	if _, err := f.client(t).Renew(context.Background(), core.DeviceRenewRequest{
+		DevicePub: dev.DevicePub(),
+		Sign:      dev.SignRenew,
+	}); err != nil {
+		t.Fatalf("Renew: %v", err)
+	}
+	if _, ok := dev.Current(); ok {
+		t.Fatal("Renew wrote to the device store; the seam's caller owns that write")
+	}
+}
+
+// TestRenewRefusesAnIncompleteCredential: a 200 carrying half a credential is
+// not a renewal. Returning it would hand core something to store in place of a
+// working credential — core refuses it too, and both refusals are cheap.
+func TestRenewRefusesAnIncompleteCredential(t *testing.T) {
+	f := newFakeService(t)
+	f.credentialHandler = func(w http.ResponseWriter, _ []byte) {
+		writeJSON(w, map[string]any{"device": "bacchusd1:orphan"})
+	}
+	dev, _ := newDevice(t)
+
+	if _, err := f.client(t).Renew(context.Background(), core.DeviceRenewRequest{
+		DevicePub: dev.DevicePub(),
+		Sign:      dev.SignRenew,
+	}); err == nil {
+		t.Fatal("a credential with no issuer cert was returned as a renewal")
+	}
+}
+
+// TestRenewRefusesWithoutASigner: the seam is a signing contract, and a request
+// with no signer is a caller bug rather than a service failure.
+func TestRenewRefusesWithoutASigner(t *testing.T) {
+	f := newFakeService(t)
+	dev, _ := newDevice(t)
+
+	if _, err := f.client(t).Renew(context.Background(), core.DeviceRenewRequest{DevicePub: dev.DevicePub()}); err == nil {
+		t.Fatal("Renew accepted a request carrying no signer")
+	}
+	if n := f.count("/v1/challenge"); n != 0 {
+		t.Fatalf("a request with no signer still spent %d challenges", n)
+	}
+}
+
 // TestRenewNeverSendsTheCurrentCredential: the service resolves the account by
 // public key and has no parameter for these, and a field the service ignores is
 // a field that will eventually be trusted by mistake.
@@ -635,56 +688,22 @@ func TestRenewNeverSendsTheCurrentCredential(t *testing.T) {
 	f := newFakeService(t)
 	dev, _ := newDevice(t)
 
-	if _, _, err := f.client(t).Renew(context.Background(), core.DeviceRenewRequest{
-		DevicePub:         dev.DevicePub(),
-		CurrentCred:       "bacchusd1:SECRET-CURRENT",
-		CurrentIssuerCert: "bacchusi1:SECRET-CERT",
-		Sign:              dev.SignRenew,
+	if _, err := f.client(t).Renew(context.Background(), core.DeviceRenewRequest{
+		DevicePub: dev.DevicePub(),
+		Current: devicestore.Credential{
+			Device:     "bacchusd1:SECRET-CURRENT",
+			IssuerCert: "bacchusi1:SECRET-CERT",
+			Admission:  "bacchusc1:SECRET-ADMISSION",
+		},
+		Sign: dev.SignRenew,
 	}); err != nil {
 		t.Fatalf("Renew: %v", err)
 	}
 	body := string(f.bodyFor("/v1/credential"))
-	for _, forbidden := range []string{"SECRET-CURRENT", "SECRET-CERT", "current_cred", "issuer_cert"} {
+	for _, forbidden := range []string{"SECRET-CURRENT", "SECRET-CERT", "SECRET-ADMISSION", "current_cred", "issuer_cert", "admission"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("/v1/credential request carried %q: %s", forbidden, body)
 		}
-	}
-}
-
-// TestRenewIntoKeepsTheCredentialWhenTheAdmissionFileCannotBeWritten: core reads
-// a non-nil error from the seam as "renewal failed, retry later" and discards
-// both return values, so failing here would throw away a good credential over a
-// file this client could not write.
-func TestRenewIntoKeepsTheCredentialWhenTheAdmissionFileCannotBeWritten(t *testing.T) {
-	f := newFakeService(t)
-	dev, _ := newDevice(t)
-	var logged []string
-	c, err := New(Config{
-		BaseURL: f.srv.URL, Audience: testAudience, ServerCAFile: f.ca,
-		Logf: func(format string, args ...any) { logged = append(logged, format) },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// A path that is a FILE, so MkdirAll fails.
-	blocked := filepath.Join(t.TempDir(), "blocked")
-	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	cred, cert, err := c.RenewInto(blocked)(context.Background(), core.DeviceRenewRequest{
-		DevicePub: dev.DevicePub(),
-		Sign:      dev.SignRenew,
-	})
-	if err != nil {
-		t.Fatalf("renewal failed over an admission file: %v", err)
-	}
-	if cred == "" || cert == "" {
-		t.Fatal("the device credential was discarded")
-	}
-	if len(logged) == 0 {
-		t.Fatal("the admission failure was silent")
 	}
 }
 
@@ -801,56 +820,7 @@ func TestAnIncompleteCredentialIsRefused(t *testing.T) {
 	if _, err := f.client(t).Enroll(context.Background(), dev, "BC1-TESTCODE", "desktop"); err == nil {
 		t.Fatal("a credential with no issuer cert was accepted")
 	}
-	if _, _, ok := dev.Current(); ok {
+	if _, ok := dev.Current(); ok {
 		t.Fatal("half a credential was persisted")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// The admission file.
-// ---------------------------------------------------------------------------
-
-func TestLoadAdmissionSoftFails(t *testing.T) {
-	dir := t.TempDir()
-	if got := LoadAdmission(dir); got != "" {
-		t.Fatalf("LoadAdmission on an empty dir = %q", got)
-	}
-	if got := LoadAdmission(""); got != "" {
-		t.Fatalf("LoadAdmission(\"\") = %q", got)
-	}
-	if err := os.WriteFile(AdmissionPath(dir), []byte("half a file\nand another line\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := LoadAdmission(dir); got != "" {
-		t.Fatalf("LoadAdmission on a multi-line file = %q, want empty", got)
-	}
-}
-
-func TestSaveAdmissionIsAtomicAndPrivate(t *testing.T) {
-	dir := t.TempDir()
-	if err := saveAdmission(dir, "bacchusc1:one"); err != nil {
-		t.Fatal(err)
-	}
-	if err := saveAdmission(dir, "bacchusc1:two"); err != nil {
-		t.Fatal(err)
-	}
-	if got := LoadAdmission(dir); got != "bacchusc1:two" {
-		t.Fatalf("LoadAdmission = %q", got)
-	}
-	fi, err := os.Stat(AdmissionPath(dir))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("admission file mode = %v, want 0600 (it sits next to this device's private key)", fi.Mode().Perm())
-	}
-	// No temporary files left behind: a directory that accumulates them is a
-	// directory whose contents stop being a reliable statement about the device.
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("saveAdmission left %d files behind", len(entries))
 	}
 }

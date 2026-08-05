@@ -10,12 +10,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core/delegation"
 	"github.com/bacchus-vpn/bacchus/core/devicecred"
+	"github.com/bacchus-vpn/bacchus/core/devicestore"
 )
 
 // ---------------------------------------------------------------------------
@@ -105,7 +107,9 @@ type fakeDeviceCoordinator struct {
 
 	mu              sync.Mutex
 	challengeReqs   int
+	challenges      []wire
 	connects        []wire
+	registers       []wire
 	answerChallenge bool
 	emptyChallenge  bool
 }
@@ -136,6 +140,21 @@ func (f *fakeDeviceCoordinator) snapshot() (challengeReqs int, connects []wire) 
 	return f.challengeReqs, append([]wire(nil), f.connects...)
 }
 
+// creds returns the admission credential carried by every "challenge" and
+// "register" this coordinator has seen, in arrival order. It is what a peer
+// actually received, as opposed to what the engine believes it holds.
+func (f *fakeDeviceCoordinator) creds() (challenges, registers []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.challenges {
+		challenges = append(challenges, m.Cred)
+	}
+	for _, m := range f.registers {
+		registers = append(registers, m.Cred)
+	}
+	return challenges, registers
+}
+
 func (f *fakeDeviceCoordinator) serve() {
 	buf := make([]byte, 65535)
 	for {
@@ -151,6 +170,7 @@ func (f *fakeDeviceCoordinator) serve() {
 		case "challenge":
 			f.mu.Lock()
 			f.challengeReqs++
+			f.challenges = append(f.challenges, m)
 			answer, empty := f.answerChallenge, f.emptyChallenge
 			f.mu.Unlock()
 			if !answer {
@@ -166,6 +186,10 @@ func (f *fakeDeviceCoordinator) serve() {
 		case "connect":
 			f.mu.Lock()
 			f.connects = append(f.connects, m)
+			f.mu.Unlock()
+		case "register":
+			f.mu.Lock()
+			f.registers = append(f.registers, m)
 			f.mu.Unlock()
 		}
 	}
@@ -260,7 +284,7 @@ func TestPresentDeviceCredential_FullExchangeAcceptedByRealVerifier(t *testing.T
 	now := time.Now()
 	rootPub, issuerCertEnc, credEnc, devicePriv := mintTestChain(t, now, 48*time.Hour)
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(credEnc, issuerCertEnc); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: issuerCertEnc}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 
@@ -303,7 +327,7 @@ func TestPresentDeviceCredential_AudienceBindsToDialledAddress(t *testing.T) {
 	now := time.Now()
 	rootPub, issuerCertEnc, credEnc, devicePriv := mintTestChain(t, now, 48*time.Hour)
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(credEnc, issuerCertEnc); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: issuerCertEnc}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 
@@ -375,7 +399,7 @@ func TestPresentDeviceCredential_FreshChallengePerCoordinatorOnRotation(t *testi
 
 	_, _, credEnc, devicePriv := mintTestChain(t, time.Now(), 48*time.Hour)
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(credEnc, "bacchusi1:whatever"); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: "bacchusi1:whatever"}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 
@@ -411,7 +435,7 @@ func TestPresentDeviceCredential_NoChallengeReplyDegradesGracefully(t *testing.T
 
 	_, _, credEnc, devicePriv := mintTestChain(t, time.Now(), 48*time.Hour)
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(credEnc, "bacchusi1:whatever"); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: "bacchusi1:whatever"}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 
@@ -432,7 +456,7 @@ func TestPresentDeviceCredential_EmptyChallengeDegradesGracefully(t *testing.T) 
 
 	_, _, credEnc, devicePriv := mintTestChain(t, time.Now(), 48*time.Hour)
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(credEnc, "bacchusi1:whatever"); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: "bacchusi1:whatever"}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 
@@ -451,7 +475,7 @@ func TestPresentDeviceCredential_FreshChallengePerCall(t *testing.T) {
 
 	_, _, credEnc, devicePriv := mintTestChain(t, time.Now(), 48*time.Hour)
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(credEnc, "bacchusi1:whatever"); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: "bacchusi1:whatever"}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 
@@ -486,7 +510,7 @@ func TestAttemptWith_ConnectCarriesSameChallengeAcrossRetransmissions(t *testing
 
 	_, _, credEnc, devicePriv := mintTestChain(t, time.Now(), 48*time.Hour)
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(credEnc, "bacchusi1:whatever"); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: "bacchusi1:whatever"}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 
@@ -552,11 +576,12 @@ func TestMaybeRenewDeviceCred_NoSeamConfigured(t *testing.T) {
 	}
 	_, _, credEnc, devicePriv := mintTestChain(t, time.Now(), time.Minute) // already due
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(credEnc, "bacchusi1:whatever"); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: "bacchusi1:whatever"}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 	eng.maybeRenewDeviceCred(context.Background(), time.Now()) // must not panic with DeviceRenew == nil
-	gotCred, _, _ := eng.deviceStore.Get()
+	held, _ := eng.deviceStore.Get()
+	gotCred := held.Device
 	if gotCred != credEnc {
 		t.Fatal("store must be unchanged when no renewal seam is configured")
 	}
@@ -567,9 +592,9 @@ func TestMaybeRenewDeviceCred_NothingStoredYet(t *testing.T) {
 	eng, err := New(Config{
 		Coordinators: []string{"127.0.0.1:1"},
 		Roles:        []string{RoleClient},
-		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (string, string, error) {
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
 			called = true
-			return "", "", nil
+			return devicestore.Credential{}, nil
 		},
 	})
 	if err != nil {
@@ -586,9 +611,9 @@ func TestMaybeRenewDeviceCred_NotDueYet(t *testing.T) {
 	eng, err := New(Config{
 		Coordinators: []string{"127.0.0.1:1"},
 		Roles:        []string{RoleClient},
-		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (string, string, error) {
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
 			called = true
-			return "", "", nil
+			return devicestore.Credential{}, nil
 		},
 	})
 	if err != nil {
@@ -597,7 +622,7 @@ func TestMaybeRenewDeviceCred_NotDueYet(t *testing.T) {
 	now := time.Now()
 	_, _, credEnc, devicePriv := mintTestChain(t, now, 48*time.Hour) // well past the default 6h margin
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(credEnc, "bacchusi1:whatever"); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: "bacchusi1:whatever"}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 	eng.maybeRenewDeviceCred(context.Background(), now)
@@ -610,35 +635,37 @@ func TestMaybeRenewDeviceCred_RenewsWhenDue(t *testing.T) {
 	now := time.Now()
 	_, _, oldCred, devicePriv := mintTestChain(t, now, time.Hour) // inside the default 6h margin
 	_, newIssuerCert, newCred, _ := mintTestChain(t, now, 48*time.Hour)
+	const newAdmission = "bacchusc1:renewed-admission"
 
 	var gotReq DeviceRenewRequest
 	eng, err := New(Config{
 		Coordinators: []string{"127.0.0.1:1"},
 		Roles:        []string{RoleClient},
-		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (string, string, error) {
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
 			gotReq = req
-			return newCred, newIssuerCert, nil
+			return devicestore.Credential{Device: newCred, IssuerCert: newIssuerCert, Admission: newAdmission}, nil
 		},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(oldCred, "bacchusi1:old-issuer"); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: oldCred, IssuerCert: "bacchusi1:old-issuer"}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 
 	eng.maybeRenewDeviceCred(context.Background(), now)
 
-	gotCred, gotIssuerCert, ok := eng.deviceStore.Get()
-	if !ok || gotCred != newCred || gotIssuerCert != newIssuerCert {
-		t.Fatalf("store after renewal = (%q, %q, %v), want the renewed pair", gotCred, gotIssuerCert, ok)
+	got, ok := eng.deviceStore.Get()
+	want := devicestore.Credential{Device: newCred, IssuerCert: newIssuerCert, Admission: newAdmission}
+	if !ok || got != want {
+		t.Fatalf("store after renewal = (%+v, %v), want %+v — all three, written together", got, ok, want)
 	}
 	if string(gotReq.DevicePub) != string(devicePriv.Public().(ed25519.PublicKey)) {
 		t.Fatal("DeviceRenewRequest.DevicePub did not match this device's own public key")
 	}
-	if gotReq.CurrentCred != oldCred {
-		t.Fatalf("DeviceRenewRequest.CurrentCred = %q, want the credential about to expire", gotReq.CurrentCred)
+	if gotReq.Current.Device != oldCred {
+		t.Fatalf("DeviceRenewRequest.Current.Device = %q, want the credential about to expire", gotReq.Current.Device)
 	}
 	// Sign must produce a genuine PurposeRenew assertion under whatever
 	// audience/challenge the account service's own protocol asks for — proven by
@@ -664,23 +691,24 @@ func TestMaybeRenewDeviceCred_FailurePreservesOldCredential(t *testing.T) {
 	eng, err := New(Config{
 		Coordinators: []string{"127.0.0.1:1"},
 		Roles:        []string{RoleClient},
-		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (string, string, error) {
-			return "", "", errBoom
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+			return devicestore.Credential{}, errBoom
 		},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	eng.deviceKey = devicePriv
-	if err := eng.deviceStore.Put(oldCred, oldIssuerCert); err != nil {
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: oldCred, IssuerCert: oldIssuerCert}); err != nil {
 		t.Fatalf("seed device store: %v", err)
 	}
 
 	eng.maybeRenewDeviceCred(context.Background(), now)
 
-	gotCred, gotIssuerCert, ok := eng.deviceStore.Get()
-	if !ok || gotCred != oldCred || gotIssuerCert != oldIssuerCert {
-		t.Fatalf("a failed renewal must leave the store untouched, got (%q, %q, %v)", gotCred, gotIssuerCert, ok)
+	got, ok := eng.deviceStore.Get()
+	want := devicestore.Credential{Device: oldCred, IssuerCert: oldIssuerCert}
+	if !ok || got != want {
+		t.Fatalf("a failed renewal must leave the store untouched, got (%+v, %v)", got, ok)
 	}
 }
 
@@ -706,7 +734,7 @@ func TestSetupDeviceCredential_EmptyDirIsEphemeralAndInMemory(t *testing.T) {
 	if key == nil || store == nil {
 		t.Fatal("expected a usable key and store even with DeviceCredDir empty")
 	}
-	if _, _, ok := store.Get(); ok {
+	if _, ok := store.Get(); ok {
 		t.Fatal("expected an empty store with nothing provisioned")
 	}
 }
@@ -726,6 +754,343 @@ var errBoom = &testError{"renewal transport failed"}
 type testError struct{ s string }
 
 func (e *testError) Error() string { return e.s }
+
+// TestRenewalFailureEventTextIsPinned holds one end of a coupling the other end
+// cannot hold on its own.
+//
+// An embedder that fills Config.DeviceRenew sees a failure through its own
+// closure and says something useful about it to its user — clients/fyne turns it
+// into an escalating sentence with the credential's remaining life in it. This
+// event is emitted AFTERWARDS, carrying the transport's own diagnostic, and it
+// lands on the same detail line: last writer wins, so a subscription warning
+// gets replaced by an HTTP status unless the embedder recognises and drops it.
+// clients/fyne does exactly that (its deviceRenewFailedPrefix), which makes this
+// message text part of a contract rather than a log line.
+//
+// Pinning it here is what turns a reword into a red test in the package doing
+// the rewording, instead of a silent regression in a user-facing warning.
+func TestRenewalFailureEventTextIsPinned(t *testing.T) {
+	const pinned = "device credential: renewal failed"
+
+	now := time.Now()
+	_, oldIssuerCert, oldCred, devicePriv := mintTestChain(t, now, time.Hour)
+
+	var events []Event
+	eng, err := New(Config{
+		Coordinators: []string{"127.0.0.1:1"},
+		Roles:        []string{RoleClient},
+		OnEvent:      func(ev Event) { events = append(events, ev) },
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+			return devicestore.Credential{}, errBoom
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	eng.deviceKey = devicePriv
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: oldCred, IssuerCert: oldIssuerCert}); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+
+	eng.maybeRenewDeviceCred(context.Background(), now)
+
+	var got string
+	for _, ev := range events {
+		if ev.Kind == EventError {
+			got = ev.Message
+		}
+	}
+	if got == "" {
+		t.Fatal("a failed renewal emitted no error event")
+	}
+	if !strings.HasPrefix(got, pinned) {
+		t.Fatalf("the renewal-failure event now reads %q; it must start with %q, which clients/fyne matches on to keep this diagnostic from overwriting the user-facing warning it already showed", got, pinned)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The admission credential rides with the device credential (bacchus#166)
+//
+// The defect these cover is invisible from either side alone: renewal succeeded,
+// the device credential was fresh, the store looked healthy, and network
+// membership expired on the ORIGINAL schedule because the admission credential
+// minted in the same response over the same window had nowhere to go. Every
+// assertion below is therefore about what a PEER received, not about what the
+// engine believes it holds.
+// ---------------------------------------------------------------------------
+
+// TestRenewalPersistsTheAdmissionCredential is the store half: all three arrive
+// in one response and all three are written by one Put.
+func TestRenewalPersistsTheAdmissionCredential(t *testing.T) {
+	now := time.Now()
+	_, _, oldCred, devicePriv := mintTestChain(t, now, time.Hour) // inside the default 6h margin
+	_, newIssuerCert, newCred, _ := mintTestChain(t, now, 48*time.Hour)
+
+	eng, err := New(Config{
+		Coordinators: []string{"127.0.0.1:1"},
+		Roles:        []string{RoleClient},
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+			// What the seam is handed is what the device holds, including the
+			// admission credential it is about to replace.
+			if req.Current.Admission != "bacchusc1:old-admission" {
+				t.Errorf("DeviceRenewRequest.Current.Admission = %q, want the one being replaced", req.Current.Admission)
+			}
+			return devicestore.Credential{Device: newCred, IssuerCert: newIssuerCert, Admission: "bacchusc1:new-admission"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	eng.deviceKey = devicePriv
+	if err := eng.deviceStore.Put(devicestore.Credential{
+		Device:     oldCred,
+		IssuerCert: "bacchusi1:old-issuer",
+		Admission:  "bacchusc1:old-admission",
+	}); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+
+	eng.maybeRenewDeviceCred(context.Background(), now)
+
+	got, ok := eng.deviceStore.Get()
+	if !ok || got.Admission != "bacchusc1:new-admission" {
+		t.Fatalf("store after renewal = %+v, want the renewed admission credential", got)
+	}
+	if eng.admissionCred() != "bacchusc1:new-admission" {
+		t.Fatalf("admissionCred() = %q after renewal, want the fresh one", eng.admissionCred())
+	}
+}
+
+// TestRenewalWithNoAdmissionKeepsTheStoredOne: a deployment can gain an
+// admission authority between two renewals, but a response that omitted the
+// field is not evidence that what this device already holds was withdrawn —
+// withdrawal is what the revocation list is for. Clearing it here would take a
+// working client off an admission-enforcing network on the strength of a field
+// that was never populated.
+func TestRenewalWithNoAdmissionKeepsTheStoredOne(t *testing.T) {
+	now := time.Now()
+	_, _, oldCred, devicePriv := mintTestChain(t, now, time.Hour)
+	_, newIssuerCert, newCred, _ := mintTestChain(t, now, 48*time.Hour)
+
+	eng, err := New(Config{
+		Coordinators: []string{"127.0.0.1:1"},
+		Roles:        []string{RoleClient},
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+			return devicestore.Credential{Device: newCred, IssuerCert: newIssuerCert}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	eng.deviceKey = devicePriv
+	if err := eng.deviceStore.Put(devicestore.Credential{
+		Device:     oldCred,
+		IssuerCert: "bacchusi1:old-issuer",
+		Admission:  "bacchusc1:kept",
+	}); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+
+	eng.maybeRenewDeviceCred(context.Background(), now)
+
+	got, _ := eng.deviceStore.Get()
+	if got.Device != newCred {
+		t.Fatal("the device credential was not renewed")
+	}
+	if got.Admission != "bacchusc1:kept" {
+		t.Fatalf("Admission = %q after a response that carried none, want the stored one kept", got.Admission)
+	}
+}
+
+// TestRenewalRefusesAnIncompleteCredential: a seam that answers with no error
+// and half a credential would otherwise ERASE a working one.
+func TestRenewalRefusesAnIncompleteCredential(t *testing.T) {
+	now := time.Now()
+	_, oldIssuerCert, oldCred, devicePriv := mintTestChain(t, now, time.Hour)
+
+	eng, err := New(Config{
+		Coordinators: []string{"127.0.0.1:1"},
+		Roles:        []string{RoleClient},
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+			return devicestore.Credential{Device: "bacchusd1:orphan"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	eng.deviceKey = devicePriv
+	want := devicestore.Credential{Device: oldCred, IssuerCert: oldIssuerCert, Admission: "bacchusc1:old"}
+	if err := eng.deviceStore.Put(want); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+
+	eng.maybeRenewDeviceCred(context.Background(), now)
+
+	if got, _ := eng.deviceStore.Get(); got != want {
+		t.Fatalf("store = %+v after a half-credential renewal, want it untouched (%+v)", got, want)
+	}
+}
+
+// TestRegisterCarriesTheRenewedAdmissionCredential is the wire half, and the
+// one that pins the actual defect: a volunteering client that renews mid-run
+// must register with the credential it holds NOW, not the copy its register
+// template was built with. registerLoop's template is built once at Start and
+// re-sent every ten seconds, so a value baked into it goes stale silently.
+func TestRegisterCarriesTheRenewedAdmissionCredential(t *testing.T) {
+	coord := newFakeDeviceCoordinator(t)
+	now := time.Now()
+	_, _, oldCred, devicePriv := mintTestChain(t, now, time.Hour)
+	_, newIssuerCert, newCred, _ := mintTestChain(t, now, 48*time.Hour)
+
+	// A volunteering desktop client: the client role (which owns the device
+	// store) plus a serve role (which registers).
+	eng, err := New(Config{
+		Coordinators: []string{coord.addr()},
+		Roles:        []string{RoleClient, RoleRelay},
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+			return devicestore.Credential{Device: newCred, IssuerCert: newIssuerCert, Admission: "bacchusc1:renewed"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(eng.Stop)
+	eng.deviceKey = devicePriv
+	if err := eng.deviceStore.Put(devicestore.Credential{
+		Device:     oldCred,
+		IssuerCert: "bacchusi1:old-issuer",
+		Admission:  "bacchusc1:enrolled",
+	}); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+
+	regs := []wire{{Type: "register", Role: "relay", ID: eng.cfg.ID}}
+	eng.sendRegisters(regs, now)
+	eng.maybeRenewDeviceCred(context.Background(), now)
+	eng.sendRegisters(regs, now)
+
+	// The registers are UDP to a loopback listener the fixture is already
+	// draining; give the second one a moment to land rather than racing it.
+	deadline := time.Now().Add(2 * time.Second)
+	var sent []string
+	for time.Now().Before(deadline) {
+		if _, sent = coord.creds(); len(sent) >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(sent) < 2 {
+		t.Fatalf("the coordinator saw %d registers, want 2", len(sent))
+	}
+	if sent[0] != "bacchusc1:enrolled" {
+		t.Fatalf("the first register carried %q, want the credential this device held at the time", sent[0])
+	}
+	if sent[1] != "bacchusc1:renewed" {
+		t.Fatalf("the register AFTER a renewal carried %q, want the freshly minted credential — this is bacchus#166", sent[1])
+	}
+	if regs[0].Cred != "" {
+		t.Fatal("sendRegisters mutated the caller's template; the stamp must be on a copy")
+	}
+}
+
+// TestConnectPathCarriesTheRenewedAdmissionCredential is the same property on
+// the client's own path: a "challenge" request precedes every gated connect and
+// carries this node's admission credential, so it is where an
+// admission-enforcing coordinator meets a renewed client first.
+func TestConnectPathCarriesTheRenewedAdmissionCredential(t *testing.T) {
+	coord := newFakeDeviceCoordinator(t)
+	eng, link := newTestClientEngine(t, coord.addr())
+
+	now := time.Now()
+	_, issuerCertEnc, credEnc, devicePriv := mintTestChain(t, now, 48*time.Hour)
+	eng.deviceKey = devicePriv
+	if err := eng.deviceStore.Put(devicestore.Credential{
+		Device:     credEnc,
+		IssuerCert: issuerCertEnc,
+		Admission:  "bacchusc1:enrolled",
+	}); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+	if _, ok := eng.presentDeviceCredential(context.Background(), link, 5*time.Second); !ok {
+		t.Fatal("presentDeviceCredential failed with a stored credential and a live coordinator")
+	}
+
+	// Renewal, out of band: exactly what deviceRenewLoop does under a running
+	// engine, which is the case the old code could not survive.
+	if err := eng.deviceStore.Put(devicestore.Credential{
+		Device:     credEnc,
+		IssuerCert: issuerCertEnc,
+		Admission:  "bacchusc1:renewed",
+	}); err != nil {
+		t.Fatalf("re-Put: %v", err)
+	}
+	if _, ok := eng.presentDeviceCredential(context.Background(), link, 5*time.Second); !ok {
+		t.Fatal("presentDeviceCredential failed after renewal")
+	}
+
+	got, _ := coord.creds()
+	if len(got) != 2 {
+		t.Fatalf("the coordinator saw %d challenge requests, want 2", len(got))
+	}
+	if got[0] != "bacchusc1:enrolled" || got[1] != "bacchusc1:renewed" {
+		t.Fatalf("challenge requests carried %q then %q, want the enrolled then the renewed credential", got[0], got[1])
+	}
+}
+
+// TestConfiguredAdmissionCredWinsOverTheStore keeps this change additive for
+// every deployment that already had one: an operator who set Config.AdmissionCred
+// gets exactly the credential they set, and the store is a fallback rather than
+// an override.
+func TestConfiguredAdmissionCredWinsOverTheStore(t *testing.T) {
+	eng, err := New(Config{
+		Coordinators:  []string{"127.0.0.1:1"},
+		Roles:         []string{RoleClient},
+		AdmissionCred: "bacchusc1:operator-minted",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := eng.deviceStore.Put(devicestore.Credential{
+		Device:     "bacchusd1:d",
+		IssuerCert: "bacchusi1:i",
+		Admission:  "bacchusc1:from-the-account-service",
+	}); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+	if got := eng.admissionCred(); got != "bacchusc1:operator-minted" {
+		t.Fatalf("admissionCred() = %q, want the configured value to win", got)
+	}
+}
+
+// TestAdmissionCredIsEmptyWithNothingConfiguredAndNothingStored is the
+// pre-bacchus#166 posture, byte for byte: a node with no account service and no
+// -admission-cred presents none.
+func TestAdmissionCredIsEmptyWithNothingConfiguredAndNothingStored(t *testing.T) {
+	client, err := New(Config{Coordinators: []string{"127.0.0.1:1"}, Roles: []string{RoleClient}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := client.admissionCred(); got != "" {
+		t.Fatalf("admissionCred() = %q on a fresh client, want empty", got)
+	}
+	// And a pure forwarder, which has no device store at all, must not
+	// dereference one.
+	fwd, err := New(Config{Coordinators: []string{"127.0.0.1:1"}, Roles: []string{RoleRelay}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if fwd.deviceStore != nil {
+		t.Fatal("a pure forwarder was given a device store")
+	}
+	if got := fwd.admissionCred(); got != "" {
+		t.Fatalf("admissionCred() = %q on a pure forwarder, want empty", got)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Enrollment primitives (bacchus#163, ADR-0056)
@@ -754,7 +1119,7 @@ func TestDeviceEnrollmentAndTheEngineUseTheSameFilesIsTheWholePoint(t *testing.T
 		t.Fatalf("Dir() = %q, want %q", dev.Dir(), dir)
 	}
 
-	if err := dev.Put("bacchusd1:enrolled-out-of-band", "bacchusi1:its-issuer"); err != nil {
+	if err := dev.Put(devicestore.Credential{Device: "bacchusd1:enrolled-out-of-band", IssuerCert: "bacchusi1:its-issuer"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 	if !dev.Enrolled() {
@@ -766,12 +1131,12 @@ func TestDeviceEnrollmentAndTheEngineUseTheSameFilesIsTheWholePoint(t *testing.T
 	if err != nil {
 		t.Fatalf("setupDeviceCredential: %v", err)
 	}
-	cred, issuerCert, ok := store.Get()
+	held, ok := store.Get()
 	if !ok {
 		t.Fatal("the engine found no credential where enrollment wrote one — the two disagree about the path")
 	}
-	if cred != "bacchusd1:enrolled-out-of-band" || issuerCert != "bacchusi1:its-issuer" {
-		t.Fatalf("the engine read back %q / %q", cred, issuerCert)
+	if held.Device != "bacchusd1:enrolled-out-of-band" || held.IssuerCert != "bacchusi1:its-issuer" {
+		t.Fatalf("the engine read back %q / %q", held.Device, held.IssuerCert)
 	}
 	// And the same key: a credential bound to one key and presented under
 	// another is refused by the coordinator with no local sign of why.

@@ -15,6 +15,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bacchus-vpn/bacchus/clients/fyne/internal/appstate"
 	"github.com/bacchus-vpn/bacchus/core"
@@ -258,5 +259,53 @@ func TestDetailTextNamesTheCountry(t *testing.T) {
 	verbatim := "listen tcp 127.0.0.1:1080: bind: address already in use"
 	if got := detailText(appstate.Detail{Text: verbatim}); got != verbatim {
 		t.Errorf("detailText(%q) = %q, want it relayed unchanged", verbatim, got)
+	}
+}
+
+// TestRenewalDetailsAreRenderedHereNotRelayed is bacchus#171's first part.
+//
+// Every rung of the renewal ladder is a fixed sentence this app wrote, so every
+// rung has to be rendered here — through lang.L, where TestEveryUIStringIsTranslated's
+// AST walk can see it — rather than relayed from appstate as English. A kind
+// with no case falls through to Detail.Text, which compiles, passes every other
+// check, and hands a Russian-speaking user an English warning at the one moment
+// they have something to act on. This is the check that fails instead.
+func TestRenewalDetailsAreRenderedHereNotRelayed(t *testing.T) {
+	const fallback = "the English copy appstate always fills in"
+	for _, kind := range []appstate.DetailKind{
+		appstate.DetailRenewalFailing,
+		appstate.DetailRenewalUrgent,
+		appstate.DetailRenewalExpired,
+		appstate.DetailRenewalUnknownExpiry,
+		appstate.DetailSubscriptionExpired,
+		appstate.DetailDeviceRevoked,
+		appstate.DetailRenewalRecovered,
+	} {
+		got := detailText(appstate.Detail{Kind: kind, Text: fallback, Remaining: 30 * time.Minute})
+		if got == fallback {
+			t.Errorf("kind %d fell through to Detail.Text; it needs a lang.L case in detailText", kind)
+		}
+		if got == "" {
+			t.Errorf("kind %d rendered nothing", kind)
+		}
+	}
+
+	// The urgent rung is the only one carrying a number, and it has to say it:
+	// "runs out soon" without a quantity is a warning a user cannot plan around.
+	urgent := detailText(appstate.Detail{Kind: appstate.DetailRenewalUrgent, Remaining: 30 * time.Minute})
+	if !strings.Contains(urgent, "30") {
+		t.Errorf("the urgent renewal sentence does not say how long is left: %q", urgent)
+	}
+	// And the phrase itself goes through lang.L rather than arriving pre-rendered
+	// from appstate, so it is translated with the sentence around it.
+	for d, want := range map[time.Duration]string{
+		5 * time.Hour:    "5 hours",
+		90 * time.Minute: "an hour",
+		45 * time.Minute: "45 minutes",
+		30 * time.Second: "a moment",
+	} {
+		if got := roughRemainingText(d); got != want {
+			t.Errorf("roughRemainingText(%v) = %q, want %q", d, got, want)
+		}
 	}
 }

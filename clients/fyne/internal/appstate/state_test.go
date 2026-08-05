@@ -215,3 +215,36 @@ func TestDetailForCountryRefusals(t *testing.T) {
 		})
 	}
 }
+
+// TestDetailForDropsCoresRenewalDiagnostic is bacchus#171's second part, and the
+// defect the false comment above DetailFor was hiding.
+//
+// deviceRenewLoop fires on a ticker for the life of the engine, so a renewal
+// error reaches DetailFor mid-session — the case the old comment said could not
+// happen. When it does, this client has ALREADY published its own escalating
+// sentence from the closure's return value, and core's event arrives afterwards
+// carrying the transport's diagnostic. Surfacing it replaces a subscription
+// warning with an HTTP status, on the one line the user reads.
+//
+// Mutation check: delete the deviceRenewFailedPrefix branch in DetailFor and
+// this names the protocol string the user would have been left looking at.
+func TestDetailForDropsCoresRenewalDiagnostic(t *testing.T) {
+	// The message core actually emits (core/devicecred_connect.go's
+	// maybeRenewDeviceCred); TestRenewalFailureEventTextIsPinned in that package
+	// holds the other end, so a reword there goes red there.
+	const fromCore = "device credential: renewal failed, will retry at the next check: accountclient: /v1/credential: HTTP 403"
+
+	for _, state := range []ConnState{Connecting, Protected, Blocked, Disconnected} {
+		if d, show := DetailFor(core.Event{Kind: core.EventError, Message: fromCore}, state); show {
+			t.Fatalf("core's renewal diagnostic surfaced in state %d as %q, overwriting the sentence this client already showed", state, d.Text)
+		}
+	}
+
+	// Only that one. Every other error still surfaces, whatever the headline
+	// state says — including while protected, which is what the comment above
+	// DetailFor now says outright instead of assuming it cannot happen.
+	other := "device credential: renewed but could not persist the fresh credential: disk full"
+	if _, show := DetailFor(core.Event{Kind: core.EventError, Message: other}, Protected); !show {
+		t.Fatalf("a different device-credential error was suppressed too: %q", other)
+	}
+}

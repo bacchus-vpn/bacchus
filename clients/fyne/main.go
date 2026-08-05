@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -195,11 +196,16 @@ var errCountryConfigUnreadable = errors.New("the settings file could not be read
 // detailText renders one detail-line message in the user's language.
 //
 // internal/appstate cannot import Fyne (ADR-0039's split) and so cannot call
-// lang.L, but the two country refusals it classifies are fixed sentences a user
-// reads at the moment a connect did not happen - which is exactly where an
-// untranslated English line is worst. So appstate hands over a kind and the
-// country, and the literals live here where translations_test.go's AST walk can
-// see them.
+// lang.L, but the sentences it classifies are fixed ones a user reads at the
+// moment something did not work - which is exactly where an untranslated English
+// line is worst. So appstate hands over a kind and its one variable part, and
+// the literals live here where translations_test.go's AST walk can see them.
+//
+// The renewal ladder (bacchus#171) is the second group. It matters more than the
+// country refusals rather than less: a country refusal arrives while the user is
+// watching, and a renewal warning arrives while everything still works, carrying
+// the only notice they will get before their access stops. Reading that in a
+// language they do not speak is reading nothing.
 //
 // Everything else is relayed verbatim. That is not an oversight: core's errors
 // are not fixed sentences, they have no translation to look up, and inventing a
@@ -213,8 +219,42 @@ func detailText(d appstate.Detail) string {
 		return fmt.Sprintf(lang.L("Bacchus has nothing in %s to connect you through. Choose another country from the list."), d.Country)
 	case appstate.DetailCountryConfig:
 		return fmt.Sprintf(lang.L("Your settings file asks for \"%s\", which is not a country. Choose a country above, or put a two-letter code like DE in the \"country\" line of that file."), d.Country)
+	case appstate.DetailRenewalFailing:
+		return lang.L("Bacchus could not refresh this device's access and will keep trying. Your connection is unaffected for now.")
+	case appstate.DetailRenewalUrgent:
+		return fmt.Sprintf(lang.L("Your subscription needs attention: Bacchus could not refresh this device's access, which runs out in about %s."), roughRemainingText(d.Remaining))
+	case appstate.DetailRenewalExpired:
+		return lang.L("This device's access has run out and could not be refreshed. Connecting will be refused until it is.")
+	case appstate.DetailRenewalUnknownExpiry:
+		return lang.L("Bacchus could not refresh this device's access, and cannot tell how long the current one lasts. If connecting starts failing, this is why.")
+	case appstate.DetailSubscriptionExpired:
+		return lang.L("Your subscription has expired. This device will stop connecting when its current access runs out.")
+	case appstate.DetailDeviceRevoked:
+		return lang.L("This device's access was withdrawn. It will stop connecting when its current access runs out.")
+	case appstate.DetailRenewalRecovered:
+		return lang.L("Your subscription is up to date again.")
 	}
 	return d.Text
+}
+
+// roughRemainingText renders how long a device credential has left, in the
+// user's language.
+//
+// The rounding is appstate's (RoughRemaining), so this and the English copy in
+// Detail.Text cannot disagree about what they claim - only about how they say
+// it. Only the phrasing lives here, because only the phrasing is a UI string.
+func roughRemainingText(d time.Duration) string {
+	n, unit := appstate.RoughRemaining(d)
+	switch unit {
+	case appstate.DurationHours:
+		return fmt.Sprintf(lang.L("%d hours"), n)
+	case appstate.DurationAnHour:
+		return lang.L("an hour")
+	case appstate.DurationMinutes:
+		return fmt.Sprintf(lang.L("%d minutes"), n)
+	default:
+		return lang.L("a moment")
+	}
 }
 
 // appName is the window title. Deliberately not run through lang.L: a brand

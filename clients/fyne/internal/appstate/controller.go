@@ -687,19 +687,6 @@ func (c *Controller) connectAsync(gen uint64) {
 	}
 	c.publishCredentialFromStore(dc)
 
-	// The admission credential the account service minted alongside the device
-	// credential, if there is one. It is read fresh on every connect rather than
-	// held, because renewal rewrites it underneath a running engine — see
-	// ADR-0056 §7 on why a long-lived engine can still end up presenting a stale
-	// one, which is a gap in the seam rather than in this line.
-	//
-	// Empty is the pre-#163 posture exactly: present none, which a coordinator
-	// with admission disabled accepts and one that enforces it refuses. Nothing
-	// is lost by setting it — a client presenting none was already refused by an
-	// enforcing coordinator — and what is gained is that a client which enrolled
-	// against an account service can now satisfy one.
-	admissionCred := accountclient.LoadAdmission(dc.dir)
-
 	eng, err := core.New(core.Config{
 		Coordinators: c.cfg.Coordinators,
 		// The client role, plus whichever serve roles were volunteered (issue
@@ -740,11 +727,18 @@ func (c *Controller) connectAsync(gen uint64) {
 		// coordinator unless these actually reach the engine. See Config's doc.
 		AdmissionPubKey:  c.cfg.AdmissionPubKey,
 		AdmissionCRLPath: c.cfg.AdmissionCRLPath,
-		// This node's OWN admission credential — a different thing from the two
-		// fields above, which are the anchor and revocation list it verifies an
-		// EXIT with. Attached to every list/connect so an admission-enforcing
-		// coordinator admits this client.
-		AdmissionCred: admissionCred,
+		// Config.AdmissionCred — this node's OWN admission credential, a
+		// different thing from the two fields above — is deliberately NOT set.
+		//
+		// This client used to set it, reading the account service's admission
+		// credential off disk on every connect, because the renewal seam could not
+		// carry one and a long-lived engine would otherwise present the copy it
+		// started with (ADR-0056 §7). bacchus#166 widened the seam, so core reads
+		// the credential out of the device store it already owns and re-reads it
+		// after every renewal. Setting the field here now would be strictly worse
+		// than leaving it: a non-empty value WINS over the store, so this line
+		// would pin the engine to a connect-time snapshot and reintroduce exactly
+		// the lapse it was added to work around.
 		// The device credential (bacchus#163, ADR-0056). Set here for the first
 		// time: before this, clients/fyne set no DeviceCredDir under any
 		// configuration, so the 1.0 desktop client generated a fresh device key
@@ -1020,22 +1014,30 @@ func enrollmentRefusalText(err error) string {
 //
 // nil when there is no account service, which core reads as renewal off — the
 // pre-#163 posture exactly.
-func (c *Controller) deviceRenewHook(dc deviceCredential) func(context.Context, core.DeviceRenewRequest) (string, string, error) {
+//
+// What it no longer does is compensate for the seam. It used to wrap
+// Client.RenewInto(dir) rather than Client.Renew, because the seam returned two
+// strings and the response carried three, so the admission credential had to be
+// written out of band by something that knew where this client's device
+// directory was. bacchus#166 moved that into the seam, where every embedder gets
+// it — which was the whole argument for fixing it rather than mitigating it
+// again. What is left here is the part that is genuinely this client's: turning
+// an outcome into something a user can see.
+func (c *Controller) deviceRenewHook(dc deviceCredential) func(context.Context, core.DeviceRenewRequest) (devicestore.Credential, error) {
 	if dc.client == nil {
 		return nil
 	}
-	renew := dc.client.RenewInto(dc.dir)
-	return func(ctx context.Context, req core.DeviceRenewRequest) (string, string, error) {
-		cred, issuerCert, err := renew(ctx, req)
+	return func(ctx context.Context, req core.DeviceRenewRequest) (devicestore.Credential, error) {
+		fresh, err := dc.client.Renew(ctx, req)
 		// The expiry read is of the credential being REPLACED on failure and of
 		// the fresh one on success, which is what makes the failure sentence
 		// able to say how long is left.
 		if err != nil {
-			c.recordRenewalFailure(req.CurrentCred, err)
+			c.recordRenewalFailure(req.Current.Device, err)
 		} else {
-			c.recordRenewalSuccess(cred)
+			c.recordRenewalSuccess(fresh.Device)
 		}
-		return cred, issuerCert, err
+		return fresh, err
 	}
 }
 
@@ -1046,7 +1048,7 @@ func (c *Controller) recordRenewalFailure(currentCred string, err error) {
 	left := time.Until(exp)
 	attention := exp.IsZero() || left <= credentialWarnAt
 
-	d := Detail{Text: renewalFailureText(err, exp, left)}
+	d := renewalFailureDetail(err, exp, left)
 
 	c.mu.Lock()
 	c.cred.Enrolled = currentCred != ""
@@ -1076,52 +1078,119 @@ func (c *Controller) recordRenewalSuccess(cred string) {
 
 	if wasFailing {
 		c.logf("device credential: renewed")
-		c.notifyDetail(Detail{Text: "Your subscription is up to date again."})
+		c.notifyDetail(Detail{
+			Kind: DetailRenewalRecovered,
+			Text: "Your subscription is up to date again.",
+		})
 	}
 }
 
-// renewalFailureText is the sentence a user reads when renewal fails, and it
+// renewalFailureDetail is the sentence a user reads when renewal fails, and it
 // escalates rather than repeating.
 //
-// Three sentences, chosen by how much slack is left rather than by what went
-// wrong, because what went wrong is mostly not actionable and how much time is
-// left always is. The one exception is a refusal about the ACCOUNT — an expired
-// subscription or a revoked device — which no amount of waiting fixes and which
-// therefore says so immediately whatever the clock says.
-func renewalFailureText(err error, exp time.Time, left time.Duration) string {
+// Chosen by how much slack is left rather than by what went wrong, because what
+// went wrong is mostly not actionable and how much time is left always is. The
+// one exception is a refusal about the ACCOUNT — an expired subscription or a
+// revoked device — which no amount of waiting fixes and which therefore says so
+// immediately whatever the clock says.
+//
+// It returns a whole Detail rather than a string (bacchus#171): every branch
+// here is a fixed sentence this client wrote, so every branch has a DetailKind
+// the outer package can render in the user's own language. Text is still filled
+// in on all of them — a caller that does not translate, which is every test and
+// anything reading this as a log, gets the whole sentence.
+func renewalFailureDetail(err error, exp time.Time, left time.Duration) Detail {
 	if code, ok := accountclient.CodeOf(err); ok {
 		switch code {
 		case accountclient.CodeEntitlementExpired:
-			return "Your subscription has expired. This device will stop connecting when its current access runs out."
+			return Detail{
+				Kind: DetailSubscriptionExpired,
+				Text: "Your subscription has expired. This device will stop connecting when its current access runs out.",
+			}
 		case accountclient.CodeDeviceRevoked:
-			return "This device's access was withdrawn. It will stop connecting when its current access runs out."
+			return Detail{
+				Kind: DetailDeviceRevoked,
+				Text: "This device's access was withdrawn. It will stop connecting when its current access runs out.",
+			}
 		}
 	}
 	switch {
 	case exp.IsZero():
-		return "Bacchus could not refresh this device's access, and cannot tell how long the current one lasts. If connecting starts failing, this is why."
+		return Detail{
+			Kind: DetailRenewalUnknownExpiry,
+			Text: "Bacchus could not refresh this device's access, and cannot tell how long the current one lasts. If connecting starts failing, this is why.",
+		}
 	case left <= 0:
-		return "This device's access has run out and could not be refreshed. Connecting will be refused until it is."
+		return Detail{
+			Kind: DetailRenewalExpired,
+			Text: "This device's access has run out and could not be refreshed. Connecting will be refused until it is.",
+		}
 	case left <= credentialWarnAt:
-		return fmt.Sprintf("Your subscription needs attention: Bacchus could not refresh this device's access, which runs out in about %s.", roughDuration(left))
+		return Detail{
+			Kind:      DetailRenewalUrgent,
+			Remaining: left,
+			Text:      fmt.Sprintf("Your subscription needs attention: Bacchus could not refresh this device's access, which runs out in about %s.", RoughDuration(left)),
+		}
 	default:
-		return "Bacchus could not refresh this device's access and will keep trying. Your connection is unaffected for now."
+		return Detail{
+			Kind: DetailRenewalFailing,
+			Text: "Bacchus could not refresh this device's access and will keep trying. Your connection is unaffected for now.",
+		}
 	}
 }
 
-// roughDuration renders a remaining lifetime the way a person would say it.
+// DurationUnit is the coarse bucket RoughRemaining rounds a remaining lifetime
+// into. It exists so the layer that owns the user's language can render the
+// phrase itself: this package cannot import Fyne (see the package doc) and so
+// cannot call lang.L, and handing the outer package a finished English fragment
+// like "3 hours" would drop untranslated English into the middle of a
+// translated sentence — the exact failure DetailKind exists to prevent.
+type DurationUnit int
+
+const (
+	// DurationHours: Count is a number of hours, two or more.
+	DurationHours DurationUnit = iota
+	// DurationAnHour: about an hour. Count is 1 and is not worth printing —
+	// "1 hour" reads as a precision this number does not have.
+	DurationAnHour
+	// DurationMinutes: Count is a number of minutes, two or more.
+	DurationMinutes
+	// DurationAMoment: less than a couple of minutes, or already gone. Count is 0.
+	DurationAMoment
+)
+
+// RoughRemaining buckets a remaining lifetime the way a person would say it.
 //
 // Deliberately coarse. The precise number is a moving target the user cannot act
 // on to the minute, and a countdown that reads "2h58m12s" invites watching it
 // rather than doing the thing it is asking for.
-func roughDuration(d time.Duration) string {
+func RoughRemaining(d time.Duration) (count int, unit DurationUnit) {
 	switch {
 	case d >= 2*time.Hour:
-		return fmt.Sprintf("%d hours", int(d.Round(time.Hour)/time.Hour))
+		return int(d.Round(time.Hour) / time.Hour), DurationHours
 	case d >= time.Hour:
-		return "an hour"
+		return 1, DurationAnHour
 	case d >= 2*time.Minute:
-		return fmt.Sprintf("%d minutes", int(d.Round(time.Minute)/time.Minute))
+		return int(d.Round(time.Minute) / time.Minute), DurationMinutes
+	default:
+		return 0, DurationAMoment
+	}
+}
+
+// RoughDuration renders RoughRemaining in English — the copy that goes in
+// Detail.Text, which every kind carries so a caller that does not translate
+// still gets the whole sentence. The outer package renders the same buckets
+// through lang.L; both read the same rounding, so the two can differ in wording
+// and never in what they claim.
+func RoughDuration(d time.Duration) string {
+	n, unit := RoughRemaining(d)
+	switch unit {
+	case DurationHours:
+		return fmt.Sprintf("%d hours", n)
+	case DurationAnHour:
+		return "an hour"
+	case DurationMinutes:
+		return fmt.Sprintf("%d minutes", n)
 	default:
 		return "a moment"
 	}
@@ -1167,8 +1236,8 @@ func (c *Controller) Enroll(ctx context.Context, claim, label string) error {
 // connect, so the state a UI reads describes this device rather than the last
 // thing that happened to it.
 func (c *Controller) publishCredentialFromStore(dc deviceCredential) {
-	cred, _, ok := dc.dev.Current()
-	exp, _ := devicestore.Expiry(cred)
+	held, ok := dc.dev.Current()
+	exp, _ := devicestore.Expiry(held.Device)
 
 	c.mu.Lock()
 	c.cred.Enrolled = ok

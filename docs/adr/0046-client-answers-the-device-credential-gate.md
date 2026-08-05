@@ -147,7 +147,9 @@ Committing an HTTP client in this public, AGPL repository to an endpoint the
 private service does not yet own would bind a contract backwards — the account
 service should define its own API; this client should conform to it, not
 originate it by guesswork. So `Config.DeviceRenew` is a seam
-(`func(ctx, DeviceRenewRequest) (cred, issuerCert string, err error)`), matching
+(`func(ctx, DeviceRenewRequest) (cred, issuerCert string, err error)` as
+accepted; widened to return one `devicestore.Credential` by `#166` — see the
+2026-08-05 update below), matching
 this codebase's existing shape for exactly this situation (`OnUnderlayDial`,
 `OnEvent`): nil is renewal off, and the client runs unrenewed on whatever
 `core/devicestore` already holds until it expires — issue #53's own words, "a
@@ -280,6 +282,21 @@ the seam when due.
 > falseness is the point: that client sets `Config.DeviceCredDir` and fills
 > `Config.DeviceRenew`, so the 1.0 desktop client holds a device credential and
 > keeps it fresh. The seam has been filled by an embedder for the first time.
+
+> **Update (2026-08-05, `#166`): the seam is WIDER and it is still a seam.** The
+> signature quoted above — `func(ctx, DeviceRenewRequest) (cred, issuerCert
+> string, err error)` — is now
+> `func(ctx, DeviceRenewRequest) (devicestore.Credential, error)`, carrying the
+> admission credential the account service mints beside every device credential
+> over the same window. The old shape had nowhere to put it, so a renewal
+> refreshed the entitlement and let network membership lapse on the original
+> schedule; ADR-0056 §7 found it and its update makes it.
+>
+> Nothing in the ruling above changes, and the check it rests on was re-run
+> rather than assumed: `go list -deps ./core` is byte-identical to what it was
+> before. Widening a seam is not removing one — the point of this ruling is which
+> repository originates the exchange and what an operator with no account service
+> has to configure, and both answers are what they were.
 
 ### 7. Config surface: `-device-cred-dir` is proposed, not applied, in this change
 

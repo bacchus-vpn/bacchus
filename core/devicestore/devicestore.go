@@ -1,7 +1,14 @@
 // Package devicestore holds a client's own half of the account service's
 // two-tier entitlement chain (core/devicecred, ADR-0045, ADR-0046): the
-// on-device keypair that never leaves the device, and the device credential +
-// issuer cert the account service issued for it.
+// on-device keypair that never leaves the device, and the device credential,
+// issuer cert and admission credential the account service issued for it.
+//
+// The third of those is under a different authority and answers a different
+// gate (core/admission, ADR-0023) — it is here because the account service mints
+// it in the SAME response over the SAME window as the other two, so keeping it
+// anywhere else means two writes, two files and two expiries that have to be
+// kept in step by care rather than by construction. bacchus#166 is what happens
+// when they are not.
 //
 // It is deliberately not core/devicecred. That package verifies the chain — the
 // coordinator's job — and its doc asks that nobody hold a second implementation

@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/bacchus-vpn/bacchus/core"
+	"github.com/bacchus-vpn/bacchus/core/devicestore"
 )
 
 // signer is the pair every issuing verb needs: the key a credential binds, and
@@ -28,8 +29,8 @@ type signer struct {
 //  2. Sign it with bacchus/assert-enroll/v1 over the pinned audience.
 //  3. POST /v1/enroll — ONCE — with the claim code, this device's public key,
 //     the label, the challenge and the signature.
-//  4. Persist the device credential and issuer cert together, and the admission
-//     credential beside them when the deployment mints one.
+//  4. Persist the device credential, the issuer cert and — when the deployment
+//     mints one — the admission credential, in one write.
 //
 // label is what the account's owner will see this device called. It travels in
 // the clear to the service and is stored there, so it should be something a user
@@ -75,30 +76,30 @@ type signer struct {
 // toward a per-device-key cooldown on the service. Probing after each typo would
 // let a user lock their own device key out for the length of that cooldown while
 // they hunt for the code they mistyped — turning a fixable mistake into a wait.
-func (c *Client) Enroll(ctx context.Context, dev *core.DeviceEnrollment, claim, label string) (Result, error) {
+func (c *Client) Enroll(ctx context.Context, dev *core.DeviceEnrollment, claim, label string) (devicestore.Credential, error) {
 	if dev == nil {
-		return Result{}, errors.New("accountclient: Enroll needs a device enrollment")
+		return devicestore.Credential{}, errors.New("accountclient: Enroll needs a device enrollment")
 	}
 	if claim == "" {
-		return Result{}, errors.New("accountclient: Enroll needs a claim code")
+		return devicestore.Credential{}, errors.New("accountclient: Enroll needs a claim code")
 	}
 	// Asked before anything is spent. A device that already holds a credential
 	// has nothing to buy with a claim code, and enrolling again would either be
 	// refused as already_enrolled or — if the key had somehow changed — spend
 	// the code to bind an identity the engine will not present.
 	if dev.Enrolled() {
-		return Result{}, ErrAlreadyHaveCredential
+		return devicestore.Credential{}, ErrAlreadyHaveCredential
 	}
 
 	s := signer{pub: dev.DevicePub(), sign: dev.SignEnroll}
 
 	challenge, _, err := c.Challenge(ctx)
 	if err != nil {
-		return Result{}, err
+		return devicestore.Credential{}, err
 	}
 	sig, err := s.sign(c.audience, challenge)
 	if err != nil {
-		return Result{}, fmt.Errorf("accountclient: sign enrollment assertion: %w", err)
+		return devicestore.Credential{}, fmt.Errorf("accountclient: sign enrollment assertion: %w", err)
 	}
 
 	var resp credentialsResponse
@@ -120,7 +121,7 @@ func (c *Client) Enroll(ctx context.Context, dev *core.DeviceEnrollment, claim, 
 		if res, rerr := c.Collect(ctx, dev); rerr == nil {
 			return res, nil
 		}
-		return Result{}, fmt.Errorf("%w (the claim code may have been spent; this device holds no credential)", err)
+		return devicestore.Credential{}, fmt.Errorf("%w (the claim code may have been spent; this device holds no credential)", err)
 
 	default:
 		if code, ok := CodeOf(err); ok && code == CodeAlreadyEnrolled {
@@ -128,7 +129,7 @@ func (c *Client) Enroll(ctx context.Context, dev *core.DeviceEnrollment, claim, 
 				return res, nil
 			}
 		}
-		return Result{}, err
+		return devicestore.Credential{}, err
 	}
 }
 
@@ -144,7 +145,8 @@ var ErrAlreadyHaveCredential = errors.New("accountclient: this device already ho
 //
 //   - the recovery path when an enrollment response was lost,
 //   - how a device that was enrolled elsewhere picks up its first credential,
-//   - the renewal itself (see Renew, which is this with the seam's plumbing).
+//   - the recovery half of renewal (see Renew, which is this exchange with the
+//     seam's plumbing and the store left to its caller).
 //
 // It spends nothing but a challenge, so unlike Enroll it is safe to call again,
 // and this function retries itself once on unknown_challenge — the one coded
@@ -155,13 +157,13 @@ var ErrAlreadyHaveCredential = errors.New("accountclient: this device already ho
 // enrolled anywhere. Those are one answer by design and must not be presented to
 // a user as two: telling a caller which one it was would answer "is this public
 // key enrolled" for a caller who has proven nothing.
-func (c *Client) Collect(ctx context.Context, dev *core.DeviceEnrollment) (Result, error) {
+func (c *Client) Collect(ctx context.Context, dev *core.DeviceEnrollment) (devicestore.Credential, error) {
 	if dev == nil {
-		return Result{}, errors.New("accountclient: Collect needs a device enrollment")
+		return devicestore.Credential{}, errors.New("accountclient: Collect needs a device enrollment")
 	}
 	resp, err := c.issueCredential(ctx, signer{pub: dev.DevicePub(), sign: dev.SignRenew})
 	if err != nil {
-		return Result{}, err
+		return devicestore.Credential{}, err
 	}
 	return c.persist(dev, resp)
 }
@@ -198,41 +200,34 @@ func (c *Client) issueCredentialOnce(ctx context.Context, s signer) (credentials
 // persist writes what an issuing verb returned into the device's own storage and
 // returns it.
 //
-// The device credential and the issuer cert go in together through one Put,
-// because a client that wrote them separately could persist a fresh credential
-// against a stale cert. The admission credential goes to a file of this package's
-// own beside them — core/devicestore holds exactly two strings and neither of
-// them is this one. See ADR-0056 §7 for why that gap is real and where it is
-// proposed to be closed.
+// All three values go in through ONE Put, because they are issued together over
+// one window and a client that wrote them separately could persist a fresh
+// credential against a stale companion. That used to be two writes to two
+// places — core/devicestore held exactly two strings, so the admission
+// credential went to a file of this package's own beside them. bacchus#166 gave
+// it a slot, and the invariant is now the store's shape rather than this
+// function's care.
 //
 // An empty Admission is not an error and does not clear a stored one. A service
 // with no admission key mints none, and a deployment can gain an admission
 // authority between two renewals but a single response that omitted it is not
 // evidence the credential this device already holds has been withdrawn.
-func (c *Client) persist(dev *core.DeviceEnrollment, resp credentialsResponse) (Result, error) {
-	if resp.Device == "" || resp.IssuerCert == "" {
+func (c *Client) persist(dev *core.DeviceEnrollment, resp credentialsResponse) (devicestore.Credential, error) {
+	issued := resp.credential()
+	if !issued.Presentable() {
 		// A 200 missing either half is not a credential. Failing here rather
-		// than storing what arrived keeps the store's invariant — the two are
+		// than storing what arrived keeps the store's invariant — the parts are
 		// written together or not at all — true against a service that is
 		// wrong, not merely against one that is right.
-		return Result{}, fmt.Errorf("%w: issuing verb returned an incomplete credential", ErrUnreachable)
+		return devicestore.Credential{}, fmt.Errorf("%w: issuing verb returned an incomplete credential", ErrUnreachable)
 	}
-	if err := dev.Put(resp.Device, resp.IssuerCert); err != nil {
-		return Result{}, fmt.Errorf("accountclient: persist device credential: %w", err)
-	}
-	if resp.Admission != "" {
-		if err := saveAdmission(dev.Dir(), resp.Admission); err != nil {
-			// Not fatal. The device credential — the half a coordinator's
-			// device gate checks — is already safely stored, and losing the
-			// admission credential costs membership against a coordinator that
-			// enforces admission, which is a smaller and later failure than
-			// discarding a freshly issued entitlement over a file write.
-			return Result{
-				Device:     resp.Device,
-				IssuerCert: resp.IssuerCert,
-				Admission:  resp.Admission,
-			}, fmt.Errorf("accountclient: device credential stored, but the admission credential could not be: %w", err)
+	if issued.Admission == "" {
+		if held, _ := dev.Current(); held.Admission != "" {
+			issued.Admission = held.Admission
 		}
 	}
-	return Result{Device: resp.Device, IssuerCert: resp.IssuerCert, Admission: resp.Admission}, nil
+	if err := dev.Put(issued); err != nil {
+		return devicestore.Credential{}, fmt.Errorf("accountclient: persist device credential: %w", err)
+	}
+	return issued, nil
 }
