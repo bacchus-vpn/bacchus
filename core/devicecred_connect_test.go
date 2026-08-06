@@ -105,11 +105,18 @@ func mintTestChain(t *testing.T, now time.Time, credTTL time.Duration) (rootPub 
 type fakeDeviceCoordinator struct {
 	pc *net.UDPConn
 
-	mu              sync.Mutex
-	challengeReqs   int
-	challenges      []wire
-	connects        []wire
-	registers       []wire
+	mu            sync.Mutex
+	challengeReqs int
+	challenges    []wire
+	connects      []wire
+	registers     []wire
+	// sizes are the RAW datagram lengths, per message type, as they arrived on the
+	// wire. Recorded because issue #183 is a fact about bytes on a network and not
+	// about a struct: a size assert that re-marshals a wire the test built itself
+	// proves the test's arithmetic, while this proves what attemptWith actually put
+	// on the socket. That distinction is the whole card — #166's +423 bytes were
+	// invisible to every struct-level check in the repository.
+	sizes           map[string][]int
 	answerChallenge bool
 	emptyChallenge  bool
 }
@@ -121,9 +128,17 @@ func newFakeDeviceCoordinator(t *testing.T) *fakeDeviceCoordinator {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = pc.Close() })
-	f := &fakeDeviceCoordinator{pc: pc, answerChallenge: true}
+	f := &fakeDeviceCoordinator{pc: pc, answerChallenge: true, sizes: map[string][]int{}}
 	go f.serve()
 	return f
+}
+
+// sizesOf returns the raw datagram lengths seen for one message type, in arrival
+// order.
+func (f *fakeDeviceCoordinator) sizesOf(msgType string) []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int(nil), f.sizes[msgType]...)
 }
 
 func (f *fakeDeviceCoordinator) addr() string { return f.pc.LocalAddr().String() }
@@ -166,6 +181,9 @@ func (f *fakeDeviceCoordinator) serve() {
 		if json.Unmarshal(buf[:n], &m) != nil {
 			continue
 		}
+		f.mu.Lock()
+		f.sizes[m.Type] = append(f.sizes[m.Type], n)
+		f.mu.Unlock()
 		switch m.Type {
 		case "challenge":
 			f.mu.Lock()

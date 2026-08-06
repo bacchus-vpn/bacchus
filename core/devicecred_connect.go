@@ -78,7 +78,14 @@ func (e *Engine) presentDeviceCredential(ctx context.Context, l *coordLink, time
 	// request would race against itself. Loss of this one datagram is instead
 	// handled the same way any other silent leg is: the deadline below expires and
 	// the caller falls back to a plain connect.
-	l.send(wire{Type: "challenge", Cred: e.admissionCred()})
+	//
+	// This is also the copy of the admission credential that the connect no longer
+	// carries when this call succeeds (issue #183, ADR-0057). The credential was
+	// already here before that change — it is what gets the request past the
+	// coordinator's client-admission gate, which guards this message like every other
+	// client message — so nothing was added to this datagram; what changed is that the
+	// SECOND copy, on the connect, is now conditional. See connectAdmissionCred.
+	l.send(e, wire{Type: "challenge", Cred: e.admissionCred()})
 
 	budget := deviceChallengeTimeout
 	if budget > timeout {
@@ -141,6 +148,46 @@ func (e *Engine) admissionCred() string {
 	// the one it does hold would answer that oddity by disconnecting the node
 	// from a network it is still admitted to.
 	return held.Admission
+}
+
+// connectAdmissionCred is the admission credential a "connect" carries, given
+// whether presentDeviceCredential already delivered one on a "challenge" that the
+// coordinator ANSWERED (issue #183, ADR-0057).
+//
+// The admission credential is the single largest field on a connect — 437 bytes of a
+// 1443-byte datagram in this repository's own fixture, and 423 of the 1453 measured on
+// the testbed — and before this it was on the wire TWICE per connect attempt: once on
+// the challenge, once on the connect. Neither copy was new in bacchus#166; what that
+// issue added was the device-store fallback that first made admissionCred() return
+// anything at all for a client enrolled through the account service, which is why a
+// field that had always been empty suddenly weighed 423 bytes on both.
+//
+// Dropping the second copy is what puts the connect under maxRendezvousPayload. It is
+// a CONDITIONAL move, not a removal, and the condition is not the one it looks like:
+//
+//   - answered == false, no challenge sent. No device store, or nothing held. The
+//     coordinator has no state for this source at all, so the connect is the only
+//     place the credential can be.
+//   - answered == false, challenge sent but not answered. Two sub-cases the coordinator
+//     can tell apart and this client cannot. Either the gate is DISABLED — in which
+//     case issueDeviceChallenge returns an empty challenge and stores NOTHING, so a
+//     connect without the credential would be refused by admission on a deployment
+//     that runs admission with the entitlement gate off, which is an ordinary
+//     configuration and not an edge case — or the store was at capacity, or the reply
+//     was simply lost. The credential rides the connect in all of them.
+//   - answered == true. The coordinator issued a live nonce for this source, which it
+//     only does with the gate enabled, and stashed the credential beside it
+//     (cmd/coordinator/devicecred.go). This is the only path that omits it, and it is
+//     the path every real connect from an enrolled client takes.
+//
+// So the condition is "a challenge was ANSWERED", not "a challenge was sent". Those
+// differ exactly on the deployment described in the second bullet, and getting it
+// wrong there does not degrade — it refuses every connect.
+func (e *Engine) connectAdmissionCred(answered bool) string {
+	if answered {
+		return ""
+	}
+	return e.admissionCred()
 }
 
 // awaitChallenge waits for member l to answer a "challenge" request. ok is

@@ -109,18 +109,37 @@ const (
 // nonce" is exactly "same request" — which makes it the right thing to bind to and
 // saves keeping a second, parallel notion of sameness next to the one that already
 // exists.
+//
+// cred is the admission credential this source presented on the "challenge" that
+// minted the nonce, held so the connect that answers it does not have to carry a
+// second copy (issue #183, ADR-0057). See challengeStore.stashCred for what may
+// reach this field and why the raw string is kept rather than the decoded result.
 type pendingChallenge struct {
 	value   []byte
 	expires time.Time
 	spentBy string
 	spent   bool
+	cred    string
 }
 
 // challengeStore holds the nonces this coordinator has issued and not yet seen
-// spent. Entries are SINGLE USE: a successful lookup removes the entry, so an
-// assertion cannot be replayed even inside its own TTL. Without that, a captured
-// connect could be replayed at the same coordinator for as long as the challenge
-// lived, and the challenge would be bounding the damage rather than preventing it.
+// spent, together with the admission credential each was issued against. A nonce
+// answers exactly one REQUEST: spend binds it to the connect nonce that first
+// presented it, so the retransmitted copies of that connect are answered and a
+// second request re-presenting it is not. Without that binding a captured connect
+// could be replayed at the same coordinator for as long as the challenge lived, and
+// the challenge would be bounding the damage rather than preventing it.
+//
+// # Memory
+//
+// The credential raises what one entry costs from a 32-byte nonce to that plus a
+// few hundred bytes of credential, so maxPendingChallenges now bounds roughly 30 MB
+// rather than roughly 7. That is affordable because of what it takes to fill: an
+// entry is created only from the "challenge" handler, which admission gates like
+// every other client message, and stashCred stores nothing that was not VERIFIED
+// against the anchored authority. A spoofing attacker with no credential can still
+// fill the store — UDP sources are spoofable and that was always true — but every
+// entry they create holds an empty string.
 type challengeStore struct {
 	mu      sync.Mutex
 	entries map[string]pendingChallenge
@@ -159,15 +178,17 @@ func (s *challengeStore) sweepLocked(now time.Time) {
 	}
 }
 
-// issue mints a fresh challenge for key and stores it, replacing any challenge
-// already outstanding for that key — a client that asks twice is retrying, and
-// honouring only the newest keeps one client from holding several live nonces.
+// issue mints a fresh challenge for key and stores it alongside cred, replacing any
+// challenge already outstanding for that key — a client that asks twice is retrying,
+// and honouring only the newest keeps one client from holding several live nonces.
+// The credential is replaced with the nonce for the same reason: it is the one that
+// came with the request being honoured.
 //
 // It returns nil when the store is at capacity after sweeping, which is a refusal
 // to issue rather than an eviction of someone else's live challenge: evicting
 // would let a spoofing attacker knock honest clients out of the store, turning a
 // memory bound into a denial of service against exactly the traffic it protects.
-func (s *challengeStore) issue(key string, now time.Time) []byte {
+func (s *challengeStore) issue(key, cred string, now time.Time) []byte {
 	v := make([]byte, deviceChallengeLen)
 	if _, err := rand.Read(v); err != nil {
 		log.Printf("device credential: cannot generate a challenge: %v", err)
@@ -198,8 +219,21 @@ func (s *challengeStore) issue(key string, now time.Time) []byte {
 		}
 	}
 	s.atCapacity = false
-	s.entries[key] = pendingChallenge{value: v, expires: now.Add(deviceChallengeTTL)}
+	s.entries[key] = pendingChallenge{value: v, expires: now.Add(deviceChallengeTTL), cred: cred}
 	return v
+}
+
+// stashedCred returns the admission credential held for key, or "" when there is no
+// live entry. It does not spend, drop or otherwise disturb the challenge: this is a
+// read, and the nonce still has its own single-use life to lead.
+func (s *challengeStore) stashedCred(key string, now time.Time) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[key]
+	if !ok || !now.Before(e.expires) {
+		return ""
+	}
+	return e.cred
 }
 
 // spend returns the outstanding challenge for key, binding it to the connect nonce
@@ -316,16 +350,63 @@ func setupDeviceCred(ctx context.Context, rootPubHex, audience, advertised, revo
 func challengeKey(src *net.UDPAddr) string { return src.String() }
 
 // issueDeviceChallenge mints a fresh nonce for src and returns it base64-encoded,
-// or "" when the gate is disabled or the store is at capacity.
-func issueDeviceChallenge(src *net.UDPAddr) string {
+// or "" when the gate is disabled or the store is at capacity. cred is the admission
+// credential the "challenge" carried, stashed for the connect that will answer this
+// nonce (issue #183) — see stashCred for what is actually kept.
+func issueDeviceChallenge(src *net.UDPAddr, cred string) string {
 	if deviceVerifier == nil {
 		return ""
 	}
-	v := challenges.issue(challengeKey(src), time.Now())
+	v := challenges.issue(challengeKey(src), stashCred(cred), time.Now())
 	if v == nil {
 		return ""
 	}
 	return base64.StdEncoding.EncodeToString(v)
+}
+
+// stashCred is what may be kept from a "challenge" request: the credential when this
+// coordinator VERIFIED it, and nothing at all otherwise.
+//
+// The gate is admissionVerifier rather than the value being non-empty, and that is
+// the whole security argument for the stash. main.go's "challenge" handler runs
+// admit() before reaching issueDeviceChallenge, so with an authority anchored, a
+// credential that gets this far is one this coordinator has checked against it. With
+// NO authority anchored, admit() admits everyone and m.Cred is an unverified,
+// unbounded, attacker-chosen string — so nothing is kept, and nothing needs to be:
+// the connect that follows is admitted on the same absent gate.
+//
+// Belt and braces on top of that: an entry can only exist while the DEVICE gate is
+// enabled (issueDeviceChallenge returns early otherwise), and a connect that reads
+// from the stash must still pass admitDevice, which requires an assertion signed
+// over the nonce this coordinator issued to this source. A blind spoofer cannot see
+// the reply, so cannot produce one, so cannot spend a stashed credential — the
+// stash never widens what a connect can get away with, it only saves it 400 bytes.
+func stashCred(cred string) string {
+	if admissionVerifier == nil {
+		return ""
+	}
+	return cred
+}
+
+// admissionCredFor is the admission credential a connect from src should be judged
+// on: the one it carried, or — when it carried none — the one the "challenge" that
+// minted this source's outstanding nonce carried (issue #183, ADR-0057).
+//
+// The client sends only one copy, and which message it rides is decided by whether
+// the challenge exchange completed (core's connectAdmissionCred). This is the other
+// half of that: a coordinator has to accept a connect whose credential arrived a
+// round trip earlier, and it has to do so without loosening anything, which is why
+// the stash is read-only here and why nothing unverified ever reaches it.
+//
+// A connect that carries its own wins outright and is not compared with the stash.
+// Two different credentials from one source across one exchange is not a case worth
+// adjudicating — verifying what was sent is both the simpler rule and the one that
+// cannot be gamed by the stash.
+func admissionCredFor(m wire, src *net.UDPAddr) string {
+	if m.Cred != "" {
+		return m.Cred
+	}
+	return challenges.stashedCred(challengeKey(src), time.Now())
 }
 
 // admitDevice reports whether a connect may proceed on its device credential.
