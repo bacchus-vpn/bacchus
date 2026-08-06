@@ -126,6 +126,14 @@ func TestFirstLine(t *testing.T) {
 // addExclusionRoutes' single-line New-NetRoute, killswitch.go's comma-joined
 // -RemoteAddress allow-list, and plain non-IP command text that must pass
 // through untouched.
+//
+// The bacchus.log premise was briefly untrue and is true again: the file
+// belonged to the Windows tray client retired in bacchus#138, and clients/fyne
+// gained one of its own in bacchus#187. What changed with it is the blast
+// radius of this function. It is no longer only this package's own lines —
+// the client's log sink applies it, through RedactAddresses, to every line
+// any writer sends to the standard logger. So a case added here is a case
+// added for core's relayed errors and the account client too.
 func TestRedactIPs(t *testing.T) {
 	cases := []struct {
 		name string

@@ -1315,46 +1315,72 @@ func (c *Controller) startEnforcement(serving bool) (enforcement.Session, error)
 // goroutine. Safe to call with nothing connected (including mid-Connect, or
 // twice in a row) - each is a harmless no-op past the first.
 func (c *Controller) Disconnect() {
-	go func() {
-		c.mu.Lock()
-		eng, cancel, sess := c.eng, c.cancel, c.sess
-		c.eng, c.cancel, c.sess, c.state = nil, nil, nil, Disconnected
-		// Any connect in flight is now stale and must not install its engine on top
-		// of this: the user asked to be disconnected, and an attempt that finishes a
-		// second later does not get to overrule them.
-		c.gen++
-		// Announced here — under the lock, and BEFORE the teardown below — rather
-		// than after the engine is actually down. Both halves of that are load-bearing.
-		//
-		// Under the lock, because that is what stops a concurrent ICE event from
-		// publishing Protected after this (publishLocked).
-		//
-		// Before the teardown, because Stop() is slow and must not run under the lock:
-		// onEvent takes the same mutex, and the dying engine emits into it. Publishing
-		// first is safe precisely because the state is already Disconnected: StateFor
-		// only moves out of Protected/Blocked, so every event the engine emits on its
-		// way down is inert by construction. Telling the user "disconnected" the
-		// instant they asked, rather than when the last goroutine winds up, is also
-		// simply the truth — the session is already unreachable.
-		c.publishLocked(Disconnected)
-		c.mu.Unlock()
+	go c.disconnectNow()
+}
 
-		// Enforcement first, engine second (tunnel.Close's own order, and
-		// ADR-0014's): the kill-switch is lifted and the routes come out
-		// before the tunnel that was carrying traffic goes away. Reversed,
-		// the machine spends the length of an engine teardown fail-closed
-		// over a tunnel that is already gone — which is not a leak, but is
-		// the user watching their network die for no reason they can see.
-		if sess != nil {
-			sess.Close()
-		}
-		if cancel != nil {
-			cancel()
-		}
-		if eng != nil {
-			eng.Stop()
-		}
-	}()
+// DisconnectAndWait is Disconnect, synchronously: it returns only once the
+// kill-switch is lifted, the routes are out and the engine has stopped.
+//
+// It exists because the QUIT path cannot use Disconnect (bacchus#186). Disconnect
+// is fire-and-forget, so `ctrl.Disconnect(); w.Close()` — what the close button
+// did before #186 — never guaranteed the teardown it appears to guarantee: the
+// window close reaches the driver's last-window Quit and the process exits while
+// the teardown goroutine is still inside sess.Close().
+//
+// Which one wins is not determined by anything. The hardware pass of bacchus#144
+// saw the profiles back at Allow after a close, so the teardown does finish in
+// practice on that machine; nothing makes it so, and the losing outcome is
+// bacchus#115's stranded machine — profiles left at Block with no client left to
+// lift them and no message anywhere. A property this app cannot state is a
+// property it does not have.
+//
+// NEVER call this from the UI goroutine. It blocks for as long as an engine
+// teardown takes, and publishLocked's OnState callback hands work back to that
+// same goroutine — see clients/fyne/tray.go's quit, which runs it from a
+// goroutine of its own and asks the app to quit afterwards.
+func (c *Controller) DisconnectAndWait() {
+	c.disconnectNow()
+}
+
+func (c *Controller) disconnectNow() {
+	c.mu.Lock()
+	eng, cancel, sess := c.eng, c.cancel, c.sess
+	c.eng, c.cancel, c.sess, c.state = nil, nil, nil, Disconnected
+	// Any connect in flight is now stale and must not install its engine on top
+	// of this: the user asked to be disconnected, and an attempt that finishes a
+	// second later does not get to overrule them.
+	c.gen++
+	// Announced here — under the lock, and BEFORE the teardown below — rather
+	// than after the engine is actually down. Both halves of that are load-bearing.
+	//
+	// Under the lock, because that is what stops a concurrent ICE event from
+	// publishing Protected after this (publishLocked).
+	//
+	// Before the teardown, because Stop() is slow and must not run under the lock:
+	// onEvent takes the same mutex, and the dying engine emits into it. Publishing
+	// first is safe precisely because the state is already Disconnected: StateFor
+	// only moves out of Protected/Blocked, so every event the engine emits on its
+	// way down is inert by construction. Telling the user "disconnected" the
+	// instant they asked, rather than when the last goroutine winds up, is also
+	// simply the truth — the session is already unreachable.
+	c.publishLocked(Disconnected)
+	c.mu.Unlock()
+
+	// Enforcement first, engine second (tunnel.Close's own order, and
+	// ADR-0014's): the kill-switch is lifted and the routes come out
+	// before the tunnel that was carrying traffic goes away. Reversed,
+	// the machine spends the length of an engine teardown fail-closed
+	// over a tunnel that is already gone — which is not a leak, but is
+	// the user watching their network die for no reason they can see.
+	if sess != nil {
+		sess.Close()
+	}
+	if cancel != nil {
+		cancel()
+	}
+	if eng != nil {
+		eng.Stop()
+	}
 }
 
 // onEvent is core.Config.OnEvent: called from whichever engine goroutine observed

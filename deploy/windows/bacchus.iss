@@ -68,6 +68,31 @@ VersionInfoVersion={#SemVer}
 AppPublisher=Bacchus
 AppPublisherURL=https://github.com/bacchus-vpn/bacchus
 AppSupportURL=https://github.com/bacchus-vpn/bacchus/issues
+; The running client (issue #185). Both names, because the client creates both:
+; the Global\ one so the guard spans terminal-server sessions, and the bare one
+; as its fallback where the global namespace is refused. Setup and Uninstall
+; refuse to proceed while either exists.
+;
+; Until this line was here the uninstaller ran straight through a running client
+; and left {app} holding a locked exe. Setup had the same hole from the other
+; side: replacing a binary that is currently routing the machine.
+;
+; These strings MUST match clients/fyne/internal/singleinstance's constants
+; exactly, and nothing in either file would notice a rename. That package's
+; installer_test.go reads this script and asserts it - see that test for why
+; eyeballing it is not enough.
+AppMutex=Global\BacchusVpnClient,BacchusVpnClient
+; NOT the Restart Manager, deliberately. Its graceful close is a window-close
+; message, which since issue #186 HIDES this client to the notification area
+; rather than exiting it - so RM concludes the app will not close and falls back
+; to terminating it. A terminated Bacchus is issue #115's stranded machine: the
+; kill-switch stays armed, the firewall profiles stay at Block, and there is no
+; client left to lift them.
+;
+; AppMutex above refuses and asks the user to close it themselves, which routes
+; them through the client's own Quit - the one path that disarms the machine
+; before the process goes away.
+CloseApplications=no
 DefaultDirName={autopf}\Bacchus
 DefaultGroupName=Bacchus
 DisableProgramGroupPage=yes
