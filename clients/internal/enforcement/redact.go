@@ -38,6 +38,25 @@ func firstLine(s string) string {
 // -RouteMetric value).
 var ipCandidatePattern = regexp.MustCompile(`(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?:/[0-9]{1,3})?|[0-9A-Fa-f]*(?::[0-9A-Fa-f]*)+(?:/[0-9]{1,3})?`)
 
+// RedactAddresses is redactIPs for callers outside this package: the client's
+// log sink applies it to EVERY line, whoever wrote it.
+//
+// It exists because bacchus#187 turned the log from "what this package emits"
+// into a general disk file with several writers — core's relayed errors through
+// Controller.logf, the account-service client, the country refresh — and only
+// this package's own lines were ever redacted. A coordinator address reaches
+// the log through `countries: %v` just as readily as through a PowerShell
+// command line, and the reasoning in runPS above ("a forensic footprint for a
+// client whose whole point is running in a hostile jurisdiction") does not care
+// which function produced the string.
+//
+// Exported rather than reimplemented next to the sink deliberately. A second
+// copy of this regexp is a second thing to keep correct, and the way that fails
+// is silently: both copies redact the obvious cases and disagree on one shape
+// nobody tests. One function, applied twice on the enforcement path, is
+// cheaper than two functions applied once each.
+func RedactAddresses(s string) string { return redactIPs(s) }
+
 // redactIPs replaces every IP-literal-shaped substring in s with "<ip>".
 // Applied to anything derived from an OS command or its output before it
 // reaches the client's log (issue #140). Matches uniformly rather than trying

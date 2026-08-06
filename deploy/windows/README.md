@@ -152,6 +152,43 @@ That is the trade to weigh if the hardware run shows the per-user path is worse
 than it looks. Do not implement both — two config files is the state
 `configPaths` permanently shadows one of, which is worse than either.
 
+### `AppMutex`, and what a running client does to Setup (bacchus#185)
+
+`[Setup]` names both mutexes the client creates —
+`Global\BacchusVpnClient,BacchusVpnClient` — so Setup and Uninstall stop and ask
+the user to close Bacchus rather than proceeding over a running one. Before this
+line existed the uninstaller ran straight through a live client and left `{app}`
+holding a locked exe; Setup had the same hole from the other side, replacing a
+binary that was currently routing the machine.
+
+`CloseApplications=no` goes with it, and is the more interesting half.
+Inno's default is to use the Restart Manager, whose graceful close is a
+window-close message — which since `bacchus#186` **hides** this client to the
+notification area instead of exiting it. So the graceful path always fails and
+Inno falls back to terminating the process, which is `bacchus#115`'s stranded
+machine: kill-switch armed, firewall profiles at `Block`, and no client left to
+lift them. `AppMutex` refusing and sending the user through the client's own Quit
+is the only route that disarms the machine first.
+
+The two names must match
+`clients/fyne/internal/singleinstance`'s constants exactly, and nothing in either
+file would notice a rename. `installer_test.go` in that package asserts it — the
+`.iss` is not Go, Inno compiles an `AppMutex` naming a mutex nobody creates
+perfectly cleanly, and at runtime the failure looks exactly like a machine with no
+client open.
+
+**Not run on hardware.** The cases to run, all of which need a compiled
+installer and a real client:
+
+* uninstall with the client running — Setup should name Bacchus and refuse;
+* upgrade-install with the client running — same;
+* quit the client from the tray, then uninstall — should proceed;
+* start a second client from the Start menu while one runs — should show the
+  "already running" window and stop, and the first client's kill-switch should
+  still be armed afterwards (`Get-NetFirewallProfile | Select Name,
+  DefaultOutboundAction` all `Block`, and
+  `Get-NetFirewallRule -Group BacchusKillSwitch` still returning four rules).
+
 ## Two languages, and the check that keeps them in step
 
 Russian and English, both first-class, from the installer's first screen

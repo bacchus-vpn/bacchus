@@ -108,10 +108,26 @@ func (o *winOS) runPS(script string) (string, error) {
 		// client has never needed to log. bacchus.log is a disk file a user
 		// may hand over for support — naming infra addresses on it is a
 		// forensic footprint for a client whose whole point is running in a
-		// hostile jurisdiction. The returned error below is deliberately left
-		// full and unredacted: it only ever reaches the live, ephemeral tray
-		// status (setStatus in the retired Windows client's main.go), never the log file,
-		// so it keeps full diagnostic value for the running session.
+		// hostile jurisdiction.
+		//
+		// That file was real, then was not, and is again. It belonged to the
+		// Windows tray client retired in bacchus#138, after which nothing wrote
+		// it and this reasoning was protecting a sink that did not exist
+		// (bacchus#187). clients/fyne keeps one now — at
+		// %APPDATA%\Bacchus\bacchus.log and the XDG equivalent — and applies
+		// RedactAddresses to EVERY line reaching it, whoever wrote it, so what
+		// happens here is the first of two passes rather than the only one. It
+		// stays first because the truncation above is not redaction and no sink
+		// could do it: only this call site knows that PowerShell's position
+		// block is a re-echo of the script rather than diagnostic text.
+		//
+		// The returned error below is still deliberately left full and
+		// unredacted, and that exemption was RE-CHECKED rather than carried
+		// over. It reaches exactly one place: Controller.abort wraps it into a
+		// Detail, which OnDetail puts on the main window's detail line. Nothing
+		// on that path writes it to the log. So it is the same ephemeral,
+		// in-session surface the retired client's tray status was, and it keeps
+		// full diagnostic value for the running session.
 		first := redactIPs(firstLine(strings.TrimSpace(script)))
 		outFirst := redactIPs(firstLine(strings.TrimSpace(string(out))))
 		o.log("[tun] ps failed: %s | %s", first, outFirst)

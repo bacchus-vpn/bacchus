@@ -52,6 +52,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/bacchus-vpn/bacchus/clients/fyne/internal/appstate"
+	"github.com/bacchus-vpn/bacchus/clients/fyne/internal/clientlog"
 )
 
 // settingsOpen guards against opening two windows onto the same file (e.g. a
@@ -75,7 +76,7 @@ var splitTunnelModes = []string{appstate.BypassModeExclude, appstate.BypassModeI
 // what it was then - silently reverting a country the user chose in between, in
 // a window that has no control for it and so cannot even show what it undid.
 // Asking again at save time means this window overwrites only what it edits.
-func showSettings(a fyne.App, current func() appstate.Config, cfgPath string, enforced, volunteeringRefused bool, onSaved func(appstate.Config, string)) {
+func showSettings(a fyne.App, current func() appstate.Config, cfgPath string, enforced, volunteeringRefused bool, logSink *clientlog.Sink, onSaved func(appstate.Config, string)) {
 	if settingsOpen {
 		return
 	}
@@ -257,6 +258,56 @@ func showSettings(a fyne.App, current func() appstate.Config, cfgPath string, en
 		}
 	}
 
+	// The log file (bacchus#187, ruling D2). The one control in this window that
+	// is NOT a config field and does NOT wait for Save.
+	//
+	// Both halves of that are deliberate. It is not a config field because a
+	// config file that exists and does not parse leaves appstate.Config at its
+	// zero value — so a key here would let an unrelated JSON typo silently turn
+	// logging off at exactly the launch where somebody needs it on, which is
+	// main.go's documented startup hazard aimed at the thing that diagnoses it.
+	// And it does not wait for Save because turning it off DELETES the existing
+	// log: a destructive action queued behind a button the user may never press,
+	// on a window they may close with Cancel, is not the control they asked for.
+	logNotice := widget.NewLabel(lang.L("Bacchus keeps a small log of what it did, so a problem can be explained without asking you to run anything. It never contains your traffic, and network addresses are removed before anything is written down."))
+	logNotice.Wrapping = fyne.TextWrapWord
+
+	logCheck := widget.NewCheck(lang.L("Keep a log file"), nil)
+	logStatus := widget.NewLabel("")
+	logStatus.Wrapping = fyne.TextWrapWord
+
+	// Seeded before OnChanged is attached: SetChecked fires the callback, and
+	// firing it here would delete the log on the way IN to the window.
+	logCheck.SetChecked(logSink != nil && logSink.Enabled())
+	switch {
+	case logSink == nil || !logSink.Available():
+		logCheck.Disable()
+		logStatus.SetText(lang.L("This computer has no per-user folder for Bacchus to write to, so there is no log file."))
+	default:
+		logStatus.SetText(lang.L("The file is:") + " " + logSink.Path())
+		if err := logSink.LastError(); err != nil {
+			logStatus.SetText(lang.L("The log file could not be written:") + " " + err.Error())
+		}
+		logCheck.OnChanged = func(on bool) {
+			if err := logSink.SetEnabled(on); err != nil {
+				logStatus.SetText(lang.L("The log setting could not be changed:") + " " + err.Error())
+				return
+			}
+			if on {
+				logStatus.SetText(lang.L("The file is:") + " " + logSink.Path())
+				return
+			}
+			logStatus.SetText(lang.L("Logging is off and the log file has been deleted."))
+		}
+	}
+
+	logCheckItem := widget.NewFormItem("", logCheck)
+	// The consequence is on the control, not in the paragraph above it. Turning
+	// this off destroys the file, and a user reaching for it is usually somebody
+	// who has just decided their machine should not carry a record — which is
+	// the moment to be exact rather than reassuring.
+	logCheckItem.HintText = lang.L("Turning this off deletes the log file that is already there. Turning it back on starts a new one; the old one does not come back.")
+
 	relayHopsItem := widget.NewFormItem(lang.L("Relay hops"), relayHopsSelect)
 	// Fail-closed is the part a user cannot guess and would otherwise learn
 	// from a connect that simply stops working, so it is on the control itself
@@ -326,6 +377,10 @@ func showSettings(a fyne.App, current func() appstate.Config, cfgPath string, en
 		volunteerAdvertiseItem,
 		volunteerExitKeyItem,
 		widget.NewFormItem("", generateExitKey),
+		widget.NewFormItem("", widget.NewSeparator()),
+		widget.NewFormItem("", logNotice),
+		logCheckItem,
+		widget.NewFormItem("", logStatus),
 	)
 	form.SubmitText = lang.L("Save")
 	form.CancelText = lang.L("Cancel")

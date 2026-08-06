@@ -1,0 +1,22 @@
+{
+    "Quit": "Выйти",
+    "Show Bacchus": "Показать Bacchus",
+    "OK": "ОК",
+    "Close": "Закрыть",
+
+    "Closing this window leaves Bacchus running in the notification area, so your connection stays up. To disconnect and quit, use Quit in the tray menu or in the File menu.": "После закрытия этого окна Bacchus продолжит работать в области уведомлений, и подключение останется активным. Чтобы отключиться и выйти, выберите «Выйти» в меню значка или в меню «Файл».",
+
+    "Bacchus is already running": "Bacchus уже запущен",
+    "Another copy of Bacchus is already running on this computer, so this one has stopped. Use the Bacchus icon in the notification area to open it.": "На этом компьютере уже запущена другая копия Bacchus, поэтому эта копия завершила работу. Откройте её через значок Bacchus в области уведомлений.",
+    "Bacchus could not check whether it is already running on this computer, and will not start a second copy: two of them can leave this machine unprotected while both say otherwise. Close any other Bacchus window and try again.": "Bacchus не смог проверить, запущен ли он уже на этом компьютере, и не станет запускать вторую копию: две копии могут оставить компьютер без защиты, при этом обе будут сообщать об обратном. Закройте другие окна Bacchus и попробуйте снова.",
+    "Details are in:": "Подробности здесь:",
+
+    "Bacchus keeps a small log of what it did, so a problem can be explained without asking you to run anything. It never contains your traffic, and network addresses are removed before anything is written down.": "Bacchus ведёт небольшой журнал своих действий, чтобы можно было разобраться в проблеме, не прося вас ничего запускать. В нём никогда нет вашего трафика, а сетевые адреса удаляются до записи.",
+    "Keep a log file": "Вести файл журнала",
+    "Turning this off deletes the log file that is already there. Turning it back on starts a new one; the old one does not come back.": "При выключении уже существующий файл журнала удаляется. При повторном включении начинается новый файл; прежний не восстанавливается.",
+    "The file is:": "Файл:",
+    "Logging is off and the log file has been deleted.": "Ведение журнала выключено, файл журнала удалён.",
+    "This computer has no per-user folder for Bacchus to write to, so there is no log file.": "На этом компьютере нет пользовательской папки, доступной Bacchus для записи, поэтому файла журнала нет.",
+    "The log file could not be written:": "Не удалось записать файл журнала:",
+    "The log setting could not be changed:": "Не удалось изменить настройку журнала:"
+}
