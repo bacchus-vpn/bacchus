@@ -207,7 +207,7 @@ func (e *Engine) sendCapacityReport(r accounting.Receipt, key ed25519.PrivateKey
 		return
 	}
 	r.Saturated = ctr.TakeSaturated()
-	l.send(wire{
+	l.send(e, wire{
 		Type:      "capacity-report",
 		Receipt:   &r,
 		ReportSig: accounting.SignReport(key, r),

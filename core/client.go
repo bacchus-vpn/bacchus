@@ -77,6 +77,13 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 	// trigger, and mesh-walk rediscovers coordinator ADDRESSES, which is no help
 	// whatsoever against a coordinator whose address is fine and whose dialect is not.
 	unroutable := false
+	// Whether a "list" request was refused by the local socket for its SIZE and never
+	// sent (issue #183). Tracked here for the same reason unroutable is: it reads as
+	// silence and is not silence. `list` is well under the safe payload today — it was
+	// 438 bytes on the path #183 was found on, and went out fine while the connect
+	// beside it did not — so this leg is not the one that breaks. It is checked anyway
+	// because the leg that does not break today is the one nobody notices growing.
+	tooLarge := false
 	for _, l := range links {
 		select {
 		case <-ctx.Done():
@@ -88,7 +95,8 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 		e.drainMsgCh(l)
 		e.greet(l)
 		mark := l.unroutableMark()
-		l.sendN(wire{Type: "list", Cred: e.admissionCred()}, 3)
+		sendMark := l.tooLargeMark()
+		l.sendN(e, wire{Type: "list", Cred: e.admissionCred()}, 3)
 		if countries, ok := e.awaitCountries(ctx, l, per); ok {
 			// The reply advertised the network's release; if this client is too
 			// old (force-major) surface that rather than a stale country list (#36).
@@ -100,12 +108,25 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 		if l.answeredUnroutably(mark) {
 			unroutable = true
 		}
+		if l.refusedForSize(sendMark) {
+			// Not deprioritized, and it is the one case here that is not (issue #183):
+			// the request never reached this member, so there is nothing about it to
+			// remember. See establish's matching branch.
+			tooLarge = true
+			continue
+		}
 		// Deprioritized either way: a member that cannot give us a country list is one
 		// to rotate past, whether it went silent or answered unintelligibly. What the
 		// two must NOT share is the error below — the health memo only reorders the
 		// next attempt, while the error decides whether the whole engine gets torn down
 		// and rebuilt against a rediscovered directory.
 		e.markUnhealthy(l.raw)
+	}
+	if tooLarge {
+		// Ahead of the unroutable case, and — like it — deliberately not wrapping the
+		// mesh-walk sentinel. A request this host refused to send is not evidence that
+		// rendezvous is down.
+		return nil, fmt.Errorf("core: the country-list request could not be sent from this host: %w", ErrRequestTooLarge)
 	}
 	if unroutable {
 		// At least one member is up and talking. Rendezvous is not down, so mesh-walk
@@ -142,6 +163,31 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 // is only visible at the moment the reply is dropped, which is why coordLink counts it
 // there.
 var ErrCoordinatorUnroutable = errors.New("core: coordinator answered in a shape this build cannot route")
+
+// ErrRequestTooLarge is what the client legs return when the request never left
+// this host — the local socket refused the datagram for its size, i.e. it exceeds the
+// path MTU (issue #183).
+//
+// Same argument as ErrCoordinatorUnroutable, one step further out. That case is a
+// coordinator answering in the wrong dialect; this one is a coordinator that was never
+// asked. Both arrive at a waiting leg as nothing-happened, both would be reported as
+// ErrNoCoordinatorReachable without a way to tell them apart, and mesh-walk is the
+// wrong recovery for both — but this one is not even about the network: it is about
+// this client's own path, it is identical on every pool member, and no amount of
+// rediscovering coordinators can change it.
+//
+// It names the size case ONLY, and that restraint is load-bearing rather than
+// cautious. A connected UDP socket surfaces a dead peer's ICMP port-unreachable as an
+// error on the next write, so "the write failed" is also what a genuinely unreachable
+// coordinator looks like — and that one really is ErrNoCoordinatorReachable, really is
+// what mesh-walk is for, and must keep behaving exactly as it did. See coordLink's
+// tooLargeN.
+//
+// It is also the only failure in this family that the USER can act on, which is the
+// reason it is worth a sentinel rather than a log line. The condition it names —
+// running Bacchus inside another tunnel, or over a link at the IPv6 minimum MTU — is
+// the normal condition of exactly the users a censorship-resistant VPN exists for.
+var ErrRequestTooLarge = errors.New("core: the request could not be sent — it is larger than this network path allows")
 
 // awaitCountries waits for a "countries" reply on member l's inbox within timeout,
 // skipping any other buffered message. ok is false on timeout, cancellation, or
@@ -216,6 +262,7 @@ type connectOutcome int
 const (
 	connectOK             connectOutcome = iota // a path was established
 	coordinatorSilent                           // no reply — the member looks blocked
+	requestTooLarge                             // the request never left this host — the local socket refused the datagram for its size (issue #183)
 	coordinatorUnroutable                       // member replied, in a shape this build cannot route — up, but not speaking our protocol (issue #5)
 	coordinatorRefused                          // member replied "error" — up, but wouldn't pair us
 	transportFailed                             // member paired us, but the transport never came up
@@ -400,6 +447,7 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 	// engine to rebuild it against members that answer identically.
 	allSilent := true
 	unroutable := false
+	tooLarge := false
 	for _, l := range e.orderLinks() {
 		select {
 		case <-ctx.Done():
@@ -438,17 +486,35 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 			e.markUnhealthy(l.raw)
 		} else {
 			allSilent = false
-			if outcome == coordinatorUnroutable {
+			switch outcome {
+			case coordinatorUnroutable:
 				// Deprioritized like a silent member — it cannot pair us either — but
 				// NOT counted as silence, which is the distinction that decides whether
 				// the engine is torn down and rebuilt (issue #5).
 				e.markUnhealthy(l.raw)
 				unroutable = true
+			case requestTooLarge:
+				// Deliberately NOT marked unhealthy (issue #183). Health memory says
+				// "prefer another member next time", and this member did nothing wrong
+				// — the datagram never reached it. Every other member is behind the same
+				// local path and would refuse the same bytes, so demoting them one by
+				// one only reorders a rotation in which each entry fails identically,
+				// while making the pool's health picture describe this client's MTU.
+				tooLarge = true
 			}
 		}
 	}
 	if allSilent {
 		return connPath{}, ErrNoCoordinatorReachable
+	}
+	// Before the unroutable case: a request that was never sent is a stronger claim on
+	// the error than a reply we could not parse, and unlike every other branch here it
+	// is entirely actionable by the user. Deliberately NOT wrapping
+	// ErrNoCoordinatorReachable — that sentinel triggers mesh-walk recovery, which
+	// rediscovers coordinator ADDRESSES and cannot help a datagram that does not fit
+	// the path.
+	if tooLarge {
+		return connPath{}, fmt.Errorf("core: the connect request could not be sent from this host: %w", ErrRequestTooLarge)
 	}
 	if unroutable {
 		return connPath{}, fmt.Errorf("core: a coordinator answered the connect in a shape this build cannot route: %w", ErrCoordinatorUnroutable)
@@ -724,10 +790,20 @@ func (e *Engine) connectVia(ctx context.Context, l *coordLink, modes []string, d
 // beats one that answered unintelligibly, which beats one that stayed silent.
 // connectVia only merges failures, so connectOK (the lowest value) never participates.
 //
-// coordinatorUnroutable sits directly above coordinatorSilent because it is the
+// coordinatorUnroutable sits directly above requestTooLarge because it is the
 // weakest evidence of reachability that is still evidence (issue #5): the member sent
 // us bytes. It sits below coordinatorRefused because a refusal additionally proves the
 // member understood the request.
+//
+// requestTooLarge sits directly above coordinatorSilent and is the one rung that is
+// not about the member at all (issue #183): the request never left this host, so it is
+// evidence about the local path and none whatsoever about the coordinator. It beats
+// silence because it names a definite cause where silence names none, and it loses to
+// every outcome in which the member actually answered — deliberately, because a member
+// that paired one mode and could not be sent the other is better described by what it
+// did than by what this client failed to do. The EMSGSIZE diagnosis is emitted from
+// the send path regardless of how this merge lands, so nothing is hidden by placing it
+// low; only the returned error and the mesh-walk decision are at stake.
 func mergeOutcome(a, b connectOutcome) connectOutcome {
 	if b > a {
 		return b
@@ -833,9 +909,10 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	// any left over from a prior mode on this member so awaitSession can't pick
 	// up a stale session id.
 	e.drainMsgCh(l)
-	// Taken after the drain and before the send, so it counts only what THIS attempt
-	// drew (issue #5).
+	// Taken after the drain and before the send, so they count only what THIS attempt
+	// drew (issue #5 for the reply side, issue #183 for the send side).
 	mark := l.unroutableMark()
+	sendMark := l.tooLargeMark()
 
 	// Device-credential presentation (issue #50/#51, ADR-0045): answers the
 	// coordinator's connect-time entitlement gate when this client has a
@@ -845,19 +922,19 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	// awaitSession's remaining budget below rather than silently extending the
 	// caller's overall deadline for this attempt.
 	started := time.Now()
-	fields, _ := e.presentDeviceCredential(ctx, l, timeout)
+	fields, presented := e.presentDeviceCredential(ctx, l, timeout)
 	sessionTimeout := timeout - time.Since(started)
 	if sessionTimeout < time.Second {
 		sessionTimeout = time.Second
 	}
 
-	l.sendN(wire{
+	l.sendN(e, wire{
 		Type:            "connect",
 		Country:         req.wireCountry(),
 		FirstHop:        req.plan.firstHopID(),
 		Mode:            req.mode,
 		Nonce:           nonce,
-		Cred:            e.admissionCred(),
+		Cred:            e.connectAdmissionCred(presented),
 		ExcludeSessions: req.exclude,
 		Challenge:       fields.challenge,
 		DeviceCred:      fields.cred,
@@ -868,6 +945,17 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	reply, res := e.awaitSession(ctx, l, sessionTimeout)
 	switch res {
 	case pairSilent:
+		// Three different conditions arrive here as the same non-event — no session
+		// reply before the deadline — and they want three different recoveries.
+		//
+		// Checked first, because it is the only one that is not about the coordinator
+		// at all (issue #183): a datagram the local socket refused never reached the
+		// network, so nothing the member did or did not do is evidence of anything.
+		// Reporting it as silence is what makes a client on a 1280-byte path say the
+		// coordinator is unreachable and start walking the mesh for a live one.
+		if l.refusedForSize(sendMark) {
+			return attemptResult{outcome: requestTooLarge}
+		}
 		// Silence and "answered unintelligibly" are the same non-event to a leg
 		// waiting for a session reply, and they are not the same condition (issue #5).
 		// The connect leg has the same hole the country list had: a coordinator sending

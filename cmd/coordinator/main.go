@@ -936,7 +936,11 @@ func handle(m wire, src *net.UDPAddr) {
 		if _, ok := admit(m, src, admission.RoleClient, ""); !ok {
 			return
 		}
-		c := issueDeviceChallenge(src)
+		// The credential just verified is stashed with the nonce, so the connect that
+		// answers it does not have to carry a second copy of the largest field on the
+		// wire (issue #183, ADR-0057). issueDeviceChallenge keeps it only when there
+		// was an authority to verify it against — see stashCred.
+		c := issueDeviceChallenge(src, m.Cred)
 		if c == "" {
 			// Either the gate is off — in which case a client that asks anyway gets an
 			// empty challenge and simply has nothing to sign — or the store is at
@@ -947,6 +951,13 @@ func handle(m wire, src *net.UDPAddr) {
 		}
 		send(src, wire{Type: "challenge", Challenge: c})
 	case "connect":
+		// A client that completed the challenge exchange put its admission credential
+		// on THAT message and leaves it off this one, because carrying it twice per
+		// connect attempt is what pushed this datagram past a 1280-byte path (issue
+		// #183, ADR-0057). Resolved before admit rather than inside it: what is
+		// verified below is a credential, wherever it arrived, and the rest of this
+		// handler should see the one this connect is actually being judged on.
+		m.Cred = admissionCredFor(m, src)
 		// Client admission (issue #42): matchmaking is gated too, so a leaked
 		// exit list can't be turned into a live session without a credential.
 		cred, ok := admit(m, src, admission.RoleClient, "")
