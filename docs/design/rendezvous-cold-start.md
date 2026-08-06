@@ -147,6 +147,39 @@ Hard requirements on top:
   degraded (e.g. obfuscated-WireGuard variants that survive in some operators).
   This is the same partial-transport-union principle as the data plane.
 
+#### 4.1.1 What is built, as of ADR-0059 — and what is not
+
+This section stated a requirement for **years** that the code did not meet, and in
+a way that was invisible from either side: the DTLS/ICE fingerprint machinery
+`core/dtls_fingerprint.go` and `core/ice_fingerprint.go` implement **existed**,
+was tested, and was wired to `core/transport_webrtc.go` — the *data-plane*
+transport. `Config.DTLSFingerprint` never reached `core/coordpool.go`. Meanwhile
+`coordLink.send` was `json.Marshal` then `conn.Write`, so **the first packet a
+client ever sent was plaintext JSON over raw UDP** and a DPI box read
+`{"type":"connect"` off it. Everything below was downstream of that.
+
+So this table, rather than prose, and it is kept honest as the slices land:
+
+| §4.1 requirement | State |
+|---|---|
+| First contact is DTLS-shaped rather than cleartext | **Coordinator half built** (ADR-0059, `#175` slice 1). It accepts DTLS alongside raw JSON on one signaling port. The **client** still sends cleartext — that is slice 2 |
+| Actually STUN/WebRTC-shaped, not merely DTLS-shaped | **Not built** — `#202`. A DTLS handshake with no ICE connectivity checks in front of it on the same 5-tuple is not what a browser produces, and `core/ice_fingerprint.go` has no caller at this hop until it is |
+| Randomize the DTLS/ICE fingerprint | **Not applied at this hop** — slice 3. The profiles exist and `dtls.Config` takes their hooks directly; what is missing is a `dtls.Config` counterpart to `dtlsProfile.apply`, which takes a `*webrtc.SettingEngine` |
+| Do not rely on QUIC mimicry | Held — nothing here uses QUIC |
+| **A transport pool with per-user failover at this hop** | **Not built.** `#175` stays open for it. The hop still has one protocol, no probe, no race and no per-`NetworkKey()` learning — every one of which the data plane has had since ADR-0028 |
+
+Two of `#175`'s design questions are deliberately **still open** and were not
+answered to get here, because the shape ruled (S1/S2) adds no probe: what a probe
+*is* when there is no end-to-end Noise channel yet, and whether a coordinator-hop
+probe leaks a distinguisher of its own.
+
+One correction this work produced, recorded because the wrong version of it is the
+intuitive one: **`handshake.ProtocolVersion` is not the compatibility mechanism
+for a shape change at this hop and must not be used as one.** `handshake.Check`
+rejects a mismatch in *both* directions, so bumping it is a fleet break rather
+than a window. The window is a first-bytes demux on the coordinator and
+try-then-fall-back on the client — see ADR-0059 §4.
+
 ### 4.2 Seed — the cold bootstrap (a fresh client with nothing)
 
 A layered fallback that degrades gracefully. Each layer is a courier for the same

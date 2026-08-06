@@ -489,6 +489,13 @@ var (
 	sessions = map[string]*session{}
 	pc       *net.UDPConn
 
+	// rendezvous demultiplexes the signaling socket between DTLS and raw JSON
+	// (issue #175 slice 1, ADR-0059). Nil when -rendezvous-dtls=false and in
+	// every test that drives handle() directly, which is why replyTo tolerates a
+	// nil receiver: a nil mux means "nobody is on the new shape", and every reply
+	// goes out in the clear exactly as before.
+	rendezvous *rendezvousMux
+
 	// operators maps a node id to its coordinator-known operator / vouch-subtree tag,
 	// advertised in the signed directory for operator-diversity hop selection (issue
 	// #124, ADR-0038 §6). It is coordinator-side truth, NOT a node self-report — a node
@@ -509,8 +516,19 @@ var (
 	coordRelease string
 )
 
+// send delivers one reply to a peer, in whichever shape that peer reached us in
+// (issue #175 slice 1, ADR-0059). A peer with an established DTLS association
+// gets the reply inside it; every other peer — which is every client on the
+// current build — gets the cleartext datagram this has always sent.
+//
+// The choice lives here, in the one function every handler already replies
+// through, rather than in the handlers. That is what kept the DTLS half from
+// touching handle() at all.
 func send(to *net.UDPAddr, m wire) {
 	b, _ := json.Marshal(m)
+	if rendezvous.replyTo(to, b) {
+		return
+	}
 	_, _ = pc.WriteToUDP(b, to)
 }
 func randID() string { b := make([]byte, 8); _, _ = rand.Read(b); return hex.EncodeToString(b) }
@@ -541,6 +559,7 @@ func main() {
 	policyRootPubKey := flag.String("policy-root-pubkey", "", "offline ROOT public key (hex) the signed network policy chains to (issue #39, ADR-0043). When set, this coordinator fetches a signed policy bundle and enforces the floors, fences and reserves inside it — numbers it cannot author, because it does not hold the key that signs them. Empty DISABLES signed policy and leaves this coordinator enforcing only its own flags. NOTE the direction of failure flips here: unlike -admission-pubkey and -min-serving-version, which fail OPEN when unset, a coordinator WITH a policy root configured stops assigning new work once its policy goes stale. Coordinators are a pool with client rotation, so one failing closed sheds to its peers.")
 	policySource := flag.String("policy-source", "", "where to fetch the signed policy bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at. Required when -policy-root-pubkey is set. Re-fetched every 10s and re-verified from scratch every time, delegation included.")
 	policyStatePath := flag.String("policy-state", "secrets/policy-state.json", "path to this coordinator's persistent policy state (issue #39): the last VERIFIED bundle, so a restart does not begin unpoliced, and the highest policy sequence ever accepted, which is what refuses a rollback. The sequence floor cannot be re-derived from signed data, so write access to this file is equivalent to being able to roll this coordinator back one generation — keep it with the other secrets.")
+	rendezvousDTLS := flag.Bool("rendezvous-dtls", true, "also accept DTLS-shaped rendezvous on -addr, alongside raw JSON, on the same port (issue #175, ADR-0059). The two shapes are told apart by the DTLS record header, which no JSON document can produce, so this REFUSES NOTHING a coordinator accepted before and is safe to deploy ahead of any client that speaks it. Replies go back in whichever shape the peer arrived in. Turn it OFF only to shed the one cost it adds: a bounded table of per-source DTLS associations, which a spoofed-source flood can hold slots in for the length of a handshake timeout (it cannot get further — DTLS's cookie exchange is answered from a source that never replies).")
 	printBootstrapPub := flag.Bool("print-bootstrap-pubkey", false, "load (or generate) the snapshot-signing key at -bootstrap-key, print its public key (hex) to stdout, and exit. Provision this to mesh-walk clients (bacchus-node -mesh-pubkey) so they can verify coordinator-signed snapshots recovered via a peer (issue #31, design §4.3). Couriers get the same key inside their -courier-invite.")
 	flag.Parse()
 
@@ -664,6 +683,22 @@ func main() {
 	}
 	log.Printf("bacchus coordinator v3 (UDP) listening on %s", *addr)
 
+	// The rendezvous hop stops being cleartext (issue #175 slice 1, ADR-0059).
+	// Built before the packet loop below, because the loop's first act is to ask
+	// it whether a datagram is DTLS-shaped. Fatal on a failure to build: an
+	// operator who asked for the shaped hop must not silently get a coordinator
+	// that came up serving only cleartext, which is the same discipline
+	// -geoip/-operators/-asn-table already take.
+	if *rendezvousDTLS {
+		mux, err := newRendezvousMux(pc)
+		if err != nil {
+			log.Fatalf("rendezvous: %v", err)
+		}
+		rendezvous = mux
+		go rendezvous.sweepLoop(context.Background())
+		log.Printf("rendezvous: accepting DTLS alongside raw JSON on %s (issue #175)", *addr)
+	}
+
 	turnCfg := turnConfig{
 		addr:     *turnAddr,
 		publicIP: *turnPublicIP,
@@ -688,10 +723,39 @@ func main() {
 	}
 	go ratingsAdvanceLoop(context.Background())
 
+	servePackets(pc)
+	// Only reachable once the signaling socket is closed, which nothing in this
+	// process does. Reaching it means the coordinator has no way to hear a client
+	// and must say so rather than sitting there looking alive.
+	log.Fatal("signaling socket closed — the coordinator can no longer receive")
+}
+
+// servePackets is the signaling read loop: decode, demultiplex, dispatch. It is
+// a function rather than main()'s tail so a test can run the PRODUCTION path
+// instead of a copy of it — the property #175 slice 1 has to prove is that one
+// port serves two shapes, and a reimplemented loop would prove it about the
+// reimplementation.
+//
+// A transient read error is skipped, exactly as it always was. A CLOSED socket
+// returns instead of spinning, which is the one behavioural difference: before
+// this the loop would busy-spin at full CPU forever on a socket that could never
+// produce another datagram.
+func servePackets(conn *net.UDPConn) {
 	buf := make([]byte, 65535)
 	for {
-		n, src, err := pc.ReadFromUDP(buf)
+		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			continue
+		}
+		// The rendezvous hop stops being cleartext (issue #175 slice 1,
+		// ADR-0059). A conclusively DTLS-shaped datagram is routed to this
+		// source's association and its decrypted contents re-enter at handle()
+		// below; anything else takes the path it always took, byte for byte. The
+		// polarity is deliberate — see looksLikeDTLS.
+		if rendezvous.route(buf[:n], src) {
 			continue
 		}
 		var m wire
