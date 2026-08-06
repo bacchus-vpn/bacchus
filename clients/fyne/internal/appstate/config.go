@@ -593,6 +593,17 @@ func SaveConfig(path string, c Config) error {
 // whether the bytes are whole, and its failure mode restores a complete older
 // file rather than a torn one.
 //
+// # On Windows the replacement can be refused
+//
+// Windows will not rename over a file another process holds open, so a save
+// while something else — a text editor left open on the config — has it can
+// return "the process cannot access the file". That is a legible failure that
+// changes nothing on disk, and it is not a regression: os.WriteFile needed write
+// access to the same handle and was refused by the same rule, having already
+// been given the chance to truncate. The one thing that must not happen on that
+// path is a config that is neither the old one nor the new one, and replacing
+// the file is what rules it out on every platform.
+//
 // It is package-local, as coldstart's is, and for the reason coldstart's doc
 // gives: consolidating the copies means editing correct, separately tested code
 // in packages this did not own. bacchus#188 holds that question, and its own body

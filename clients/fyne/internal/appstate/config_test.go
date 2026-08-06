@@ -89,6 +89,14 @@ func TestSaveConfigOverwritesExisting(t *testing.T) {
 // reader sees empty and partial files almost immediately at this size; against a
 // staged rename it can only ever see one whole file or the other, because the
 // live path is never opened for writing at all.
+//
+// Windows answers the same question by refusing rather than by succeeding: it
+// will not open a file while a rename is replacing it, and will not run the
+// rename while a reader holds it open. A refusal is not a failure of the
+// property under test — an open that does not happen cannot land on a partial
+// file — so both sides tolerate it there and nowhere else. See
+// TestASaveReplacesTheFileRatherThanRewritingIt, which asks the same question
+// with no concurrency at all and gets the same answer on every platform.
 func TestASaveIsNeverObservedShort(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bacchus-fyne.config.json")
@@ -113,20 +121,23 @@ func TestASaveIsNeverObservedShort(t *testing.T) {
 			c := base
 			c.Country = []string{"DE", "NL"}[i%2]
 			if err := SaveConfig(path, c); err != nil {
+				if runtime.GOOS == "windows" {
+					continue // a reader holds it; the file is untouched
+				}
 				writeErr = err
 				return
 			}
 		}
 	}()
 
-	reads := 0
+	reads, refused := 0, 0
 	for {
 		select {
 		case <-done:
 			if writeErr != nil {
 				t.Fatalf("SaveConfig: %v", writeErr)
 			}
-			if reads == 0 {
+			if reads == 0 && refused == 0 {
 				t.Fatal("the reader never observed the file; this test proved nothing")
 			}
 			return
@@ -134,6 +145,10 @@ func TestASaveIsNeverObservedShort(t *testing.T) {
 		}
 		b, err := os.ReadFile(path)
 		if err != nil {
+			if runtime.GOOS == "windows" {
+				refused++
+				continue // a rename holds it; nothing partial was handed over
+			}
 			t.Fatalf("the config file was not readable mid-save: %v", err)
 		}
 		var got Config
@@ -144,6 +159,36 @@ func TestASaveIsNeverObservedShort(t *testing.T) {
 			t.Fatalf("a read landed on a short config: %d bypass entries, label %q", len(got.Bypass), got.DeviceLabel)
 		}
 		reads++
+	}
+}
+
+// TestASaveReplacesTheFileRatherThanRewritingIt asks bacchus#190's question with
+// no concurrency in it, so it answers the same on every platform: after a save,
+// is the config the SAME FILE it was?
+//
+// That is the whole difference. os.WriteFile keeps the file and refills its
+// contents, so there is an interval in which the file exists and is short —
+// which is what a process killed in that interval leaves behind. Staging and
+// renaming replaces the file, so the one at that path is either wholly the old
+// one or wholly the new one and never a state in between.
+func TestASaveReplacesTheFileRatherThanRewritingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bacchus-fyne.config.json")
+	if err := SaveConfig(path, Config{DNS: "1.1.1.1:53"}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfig(path, Config{DNS: "9.9.9.9:53", Bypass: []string{"example.com"}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("the save rewrote the live config in place rather than replacing it: a process killed between the truncate and the bytes landing leaves the user's whole configuration empty or short, and the next launch reads what it left")
 	}
 }
 
