@@ -180,6 +180,18 @@ func TestASaveReplacesTheFileRatherThanRewritingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Resolve this stat's identity NOW, while the file it describes is still the
+	// one at that path.
+	//
+	// On Windows os.Stat records the PATH and os.SameFile resolves each operand's
+	// file id when it is CALLED, by opening that path (os/types_windows.go's
+	// loadFileId). So a before/after comparison across a rename opens the path
+	// twice after the rename, compares the new file with itself, and reports a
+	// match on a file that was in fact replaced — which is exactly how this test
+	// passed on Linux and failed on Windows against a build that was correct.
+	// Comparing it with itself here loads and caches the id; on Unix the id is
+	// already in the stat and this changes nothing.
+	_ = os.SameFile(before, before)
 	if err := SaveConfig(path, Config{DNS: "9.9.9.9:53", Bypass: []string{"example.com"}}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
