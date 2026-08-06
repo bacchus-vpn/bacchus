@@ -99,6 +99,69 @@ kill-switch Block it) — the path breaks, nothing egresses in the clear. See
 ADR-0028's #109 amendment and `docs/design/client-connection-ui.md` for the full
 reasoning and the arm/reserve locking (which mirrors the #73 arm/learn fix).
 
+## Transport protocol versions — `reality/2` (#176, decision B3)
+
+A camouflage protocol that is never adjusted is one that gets fingerprinted, so
+transports are expected to be **patched constantly**. Before #176 a transport was
+identified by a bare name, so a patched `reality` and an unpatched `reality`
+agreed that they agreed — `#114`'s failure one layer further down, and with less
+protection than the node level had, because there is no
+`-min-serving-transport-version` and no probe on the coordinator hop.
+
+**What ships: the identity carries a version. Nothing is fenced on it.**
+
+| | |
+|---|---|
+| Configured name | `webrtc`, `reality`, or a versioned form `reality/2` |
+| A bare name | means **version 1**, not "unversioned" — every pre-#176 config names exactly the transport it always named |
+| This build's numbers | `transportVersions` in `core/transport.go`, one entry per built-in transport |
+| A version this build does not implement | is **built and tried**, with one `EventInfo` naming both numbers |
+| A malformed version (`reality/two`, `reality/0`) | is a **construction error** |
+| An unknown base name (`quic/2`) | is still a construction error, as before |
+
+The one deliberate refusal is the malformed version. Reading `reality/two` as
+version 1 would hand an operator who typed a version the transport they were
+trying to move *off*, under the name of the one they asked for — the exact defect
+#176 exists to close, produced by its own parser.
+
+### Why nothing is fenced
+
+`#34`'s own words: *"a fence without a channel is a kill switch, not a repair
+tool."* The signed release channel is unstarted, so a peer left on the wrong
+transport version has no path to the build that would bring it back. B3 buys the
+diagnosis without the kill switch; B1 — actually declining to match — becomes a
+flag flip once `#34` lands.
+
+### The version is not inert while it is unenforced
+
+`Engine.transports` and `selection.Candidate.Transport` are both the **configured
+string**, so `reality/2` is a different pool key and a different learned-winner
+bucket from `reality`. Bumping a transport's version therefore invalidates the
+learned winner for that path, instead of trying a route validated against the old
+protocol shape first — which is the failure mode `#114` describes, arriving
+through the learned store.
+
+### What #176 does NOT do, and it is the larger half
+
+**Nothing carries this number to the peer.** A transport's own handshake rides
+`SignalFrame.Data`, which the engine and the coordinator both relay opaquely, so
+today only the local side can log the version it asked for. "Peers can tell they
+differ" needs a field on a wire message — the natural candidate is
+`handshake.Hello`'s `Capabilities`, which `handshake.Check` already ignores by
+design so *"a future feature can be negotiated without another protocol-breaking
+version bump."* That change spans `core/engine.go`, `core/handshake` and the
+coordinator, and is filed rather than smuggled in here.
+
+**The desktop client will silently drop a versioned name.**
+`SanitizePoolOrder` (`clients/fyne/internal/appstate/connection.go`) filters a
+configured pool against `allowedPoolTransports` by **exact string match**, so
+`reality/2` is dropped with no message — and a pool whose every member is
+versioned sanitizes to empty, which core reads as *the pool is off* and falls
+back to the single `Config.Transport`. That is a silent whole-ladder collapse, so
+**the day a transport version is actually bumped, the client's allow-list has to
+learn to compare base names first.** It is left alone here because that file
+belongs to another lane this wave, and because nothing bumps a version yet.
+
 ## Tuning constants (all in `core`, easy to change)
 
 | Constant | Default | Meaning |
