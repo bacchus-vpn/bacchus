@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"log"
 	"net"
 	"net/netip"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -399,6 +402,48 @@ func TestTheSignalingPortIsNotATURNServer(t *testing.T) {
 	}
 	if n, err := peer.Read(make([]byte, 1500)); err == nil {
 		t.Fatalf("an Allocate drew a %d-byte reply; this port must answer only Binding Requests", n)
+	}
+}
+
+// TestAnUnsendableReplyIsLoggedOnceAndNotPerDatagram keeps the new reply path
+// from becoming a log-flooding vector.
+//
+// Reaching the association table costs an attacker a DTLS handshake flight, and
+// that path already latches its log for this reason. Reaching the STUN responder
+// costs one 20-byte datagram from any source, so an unlatched line here would let
+// the attacker set the log rate. A write to port 0 fails deterministically and is
+// not net.ErrClosed, which is the case that logs.
+func TestAnUnsendableReplyIsLoggedOnceAndNotPerDatagram(t *testing.T) {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer conn.Close()
+	mux, err := newRendezvousMux(conn)
+	if err != nil {
+		t.Fatalf("newRendezvousMux: %v", err)
+	}
+
+	var logged bytes.Buffer
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	unsendable := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
+	for i := 0; i < 5; i++ {
+		if !mux.answerSTUN(bindingRequest(t).Raw, unsendable) {
+			t.Fatal("answerSTUN did not consume a Binding Request")
+		}
+	}
+
+	got := strings.Count(logged.String(), "STUN Binding Response could not be sent")
+	if got == 0 {
+		t.Skipf("this platform accepted a write to port 0, so the failure path did not run: %q", logged.String())
+	}
+	if got != 1 {
+		t.Fatalf("five failed replies produced %d log lines, want 1", got)
+	}
+	if strings.Contains(logged.String(), unsendable.IP.String()) {
+		t.Fatal("the log line names the (spoofable, unauthenticated) peer address")
 	}
 }
 

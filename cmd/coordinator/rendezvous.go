@@ -332,6 +332,13 @@ type rendezvousMux struct {
 	// atCapacity latches the first refusal so the log records the condition once
 	// rather than once per spoofed datagram, the shape challengeStore uses.
 	atCapacity bool
+	// stunWriteFailed latches the first unsendable Binding Response, for the same
+	// reason and more sharply. Reaching the association table costs an attacker a
+	// DTLS handshake flight; reaching the STUN responder costs one 20-byte
+	// datagram from any source at all, so an unlatched log line here is a
+	// flooding vector the attacker sets the rate of. It never resets: one line
+	// per process is what this is worth.
+	stunWriteFailed bool
 }
 
 // newRendezvousMux builds the mux and its DTLS server configuration.
@@ -416,9 +423,30 @@ func (m *rendezvousMux) answerSTUN(raw []byte, src *net.UDPAddr) bool {
 	if !ok {
 		return false
 	}
-	if _, err := m.pc.WriteToUDP(resp, src); err != nil {
-		if !errors.Is(err, net.ErrClosed) {
-			log.Printf("rendezvous: STUN reply to %s failed: %v", src, err)
+	if _, err := m.pc.WriteToUDP(resp, src); err != nil && !errors.Is(err, net.ErrClosed) {
+		m.mu.Lock()
+		first := !m.stunWriteFailed
+		m.stunWriteFailed = true
+		m.mu.Unlock()
+		if first {
+			// The peer address is deliberately not named: it is unauthenticated
+			// and trivially spoofable, so it identifies nobody, and this line is
+			// the one record of the condition rather than a per-source trace.
+			//
+			// Which means the ERROR cannot be logged as-is. net.OpError formats
+			// as "write udp <local>-><remote>: ...", so %v on it puts back the
+			// address the line above just decided to leave out. Unwrap to the
+			// syscall error, which is the part that carries the diagnosis.
+			detail := error(nil)
+			var oe *net.OpError
+			if errors.As(err, &oe) && oe.Err != nil {
+				detail = oe.Err
+			}
+			if detail == nil {
+				detail = errors.New("unknown")
+			}
+			log.Printf("rendezvous: a STUN Binding Response could not be sent (%v); "+
+				"further send failures on this path are not logged", detail)
 		}
 	}
 	// Consumed either way: a write failure does not make the datagram JSON.
