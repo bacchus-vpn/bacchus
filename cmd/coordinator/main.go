@@ -751,10 +751,16 @@ func servePackets(conn *net.UDPConn) {
 			continue
 		}
 		// The rendezvous hop stops being cleartext (issue #175 slice 1,
-		// ADR-0059). A conclusively DTLS-shaped datagram is routed to this
-		// source's association and its decrypted contents re-enter at handle()
-		// below; anything else takes the path it always took, byte for byte. The
-		// polarity is deliberate — see looksLikeDTLS.
+		// ADR-0059) and gains the STUN prefix that precedes DTLS in a real
+		// WebRTC flow (issue #202, ADR-0060). A conclusively STUN-shaped
+		// Binding Request is answered in place; a conclusively DTLS-shaped
+		// datagram is routed to this source's association and its decrypted
+		// contents re-enter at handle() below; anything else takes the path it
+		// always took, byte for byte. The polarity is deliberate — see
+		// looksLikeSTUN and looksLikeDTLS.
+		if rendezvous.answerSTUN(buf[:n], src) {
+			continue
+		}
 		if rendezvous.route(buf[:n], src) {
 			continue
 		}

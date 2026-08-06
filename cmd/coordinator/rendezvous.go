@@ -11,9 +11,15 @@ package main
 // protected ladder ever ran.
 //
 // This file makes the signaling port ALSO speak DTLS, alongside raw JSON, on the
-// same socket. It is deliberately the coordinator half only: it refuses nothing
-// it accepted before, so it deploys on its own, ahead of any client that speaks
-// the new shape. The client half is slice 2.
+// same socket — and, since issue #202, answer the STUN connectivity check that
+// precedes DTLS in a real WebRTC flow. It is deliberately the coordinator half
+// only: it refuses nothing it accepted before, so it deploys on its own, ahead
+// of any client that speaks the new shape. The client half is slice 2.
+//
+// The two halves are one shape. DTLS alone leaves a ClientHello arriving from
+// nowhere, which is DTLS-shaped and not WebRTC-shaped; the STUN prefix is what
+// makes the exchange resemble the ICE-then-DTLS sequence a video call produces.
+// See answerSTUN and ADR-0060.
 //
 // # Why one port and not two
 //
@@ -21,9 +27,18 @@ package main
 // it would tell a censor that the two shapes belong to one product. One port with
 // two shapes tells them nothing they did not already have.
 //
-// # How the two shapes are told apart
+// # How the three shapes are told apart
 //
-// By the first three bytes, and it is not a heuristic. A DTLS record begins with
+// STUN is tested first because it has the strongest signature — a four-byte
+// magic cookie at a fixed offset, an exact method, and a length field that must
+// account for the whole datagram. That ordering is for the reader, not for
+// correctness: the three classifiers are mutually exclusive, so swapping the
+// STUN and DTLS tests changes no behaviour, and
+// TestLooksLikeSTUNIsDisjointFromTheOtherTwoShapes is what keeps that true. See
+// looksLikeSTUN for why the first byte cannot settle STUN-versus-DTLS the way it
+// settles JSON.
+//
+// Then DTLS, by the first three bytes, and it is not a heuristic. A DTLS record begins with
 // a one-byte ContentType (20 change_cipher_spec, 21 alert, 22 handshake, 23
 // application_data, 25 connection_id) followed by the two-byte protocol version,
 // which for DTLS is 0xfeff (1.0) or 0xfefd (1.2). A JSON value begins with '{',
@@ -58,15 +73,19 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"log"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
 	dtls "github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
+
+	"github.com/bacchus-vpn/bacchus/core/coldstart"
 )
 
 const (
@@ -111,6 +130,21 @@ const (
 	// flights. Blocking instead would let one stalled association stall the whole
 	// read loop.
 	dtlsAssocQueue = 16
+
+	// stunHeaderSize is the fixed STUN message header: type(2) + length(2) +
+	// magic cookie(4) + transaction id(12). Every STUN message is at least this
+	// long and a Binding Request with no attributes is exactly this long.
+	stunHeaderSize = 20
+
+	// stunMagicCookie sits at bytes 4..8 of every RFC 5389 message. It is the
+	// strongest single signature of the three shapes this port carries, which is
+	// why the STUN test runs first.
+	stunMagicCookie = 0x2112A442
+
+	// stunBindingRequest is the only STUN method this port answers. Anything
+	// else — Allocate, Refresh, ChannelBind — is left alone: the signaling port
+	// is not a TURN server and must not start looking like one.
+	stunBindingRequest = 0x0001
 )
 
 // looksLikeDTLS reports whether raw is conclusively the start of a DTLS record.
@@ -130,6 +164,35 @@ func looksLikeDTLS(raw []byte) bool {
 	// 0xfeff is DTLS 1.0, 0xfefd is DTLS 1.2. pion forces 1.2 but accepts a 1.0
 	// record version in a ClientHello, which is what a real browser sends.
 	return raw[1] == dtlsRecordVersionMajor && (raw[2] == 0xff || raw[2] == 0xfd)
+}
+
+// looksLikeSTUN reports whether raw is conclusively a STUN Binding Request
+// (issue #202, ADR-0060).
+//
+// This is a stronger signature than the DTLS one, and it has to be, because
+// disjointness cannot be settled on the first byte here the way it is for JSON:
+// a DTLS ContentType (20, 21, 22, 23, 25) also has its two high bits clear, so
+// it satisfies the leading-zero-bits rule every STUN message type obeys. The
+// magic cookie is what separates them. Bytes 4..8 of a DTLS record are its
+// two-byte epoch followed by the first two bytes of a 48-bit sequence number,
+// both counting up from zero, so they cannot reach 0x2112A442 in any association
+// this coordinator will hold. Requiring the exact method narrows it further.
+//
+// The length test is the last of it: over UDP a STUN message IS the datagram, so
+// the declared attribute length must account for every remaining byte rather
+// than merely fit. That costs nothing and removes the last way something that is
+// not STUN reaches the responder.
+func looksLikeSTUN(raw []byte) bool {
+	if len(raw) < stunHeaderSize {
+		return false
+	}
+	if binary.BigEndian.Uint16(raw[0:2]) != stunBindingRequest {
+		return false
+	}
+	if binary.BigEndian.Uint32(raw[4:8]) != stunMagicCookie {
+		return false
+	}
+	return stunHeaderSize+int(binary.BigEndian.Uint16(raw[2:4])) == len(raw)
 }
 
 // ---------- one association ----------
@@ -256,8 +319,8 @@ func (a *dtlsAssoc) live() *dtls.Conn {
 // ---------- the mux ----------
 
 // rendezvousMux owns the signaling socket and routes each datagram to the shape
-// it is: DTLS records to a per-source association, everything else to the JSON
-// path this binary has always had.
+// it is: STUN Binding Requests answered in place, DTLS records to a per-source
+// association, everything else to the JSON path this binary has always had.
 type rendezvousMux struct {
 	pc  *net.UDPConn
 	cfg *dtls.Config
@@ -306,6 +369,60 @@ func (m *rendezvousMux) cap() int {
 		return m.capacity
 	}
 	return maxDTLSAssocs
+}
+
+// answerSTUN answers an ICE connectivity check on the signaling socket and
+// reports whether it consumed the datagram (issue #202, ADR-0060).
+//
+// This is the second half of the WebRTC shape. S1 made the port speak DTLS, but
+// a DTLS ClientHello arriving from nowhere is DTLS-shaped, not WebRTC-shaped: a
+// real endpoint runs ICE connectivity checks on a 5-tuple and only then runs
+// DTLS on that same 5-tuple, and the difference is free for a classifier to
+// read. Without this half, core/ice_fingerprint.go — which draws browser-shaped
+// ufrag/pwd precisely because pion's own are a distinguisher — has no caller at
+// this hop at all.
+//
+// # What it answers, and to whom
+//
+// Anything well-formed, from anyone. That is a ruling rather than an oversight,
+// and the postures rejected to reach it are recorded in ADR-0060. Answering
+// openly is what makes the port resemble the generic VoIP infrastructure the
+// design set out to hide among; a port that returns silence to an ordinary
+// Binding Request resembles nothing, and looking like nothing is itself a
+// signal.
+//
+// # The reflection cost, measured rather than asserted
+//
+// A bare Binding Request is 20 bytes and draws 40 back over IPv4 (header 20 +
+// XOR-MAPPED-ADDRESS 12 + FINGERPRINT 8), or 52 over IPv6, so a spoofed source
+// buys an attacker 2.0x or 2.6x. Accepted, on two grounds. It sits far below the
+// 50x-500x that makes a reflector worth building a campaign on — at 2x an
+// attacker gains almost nothing over sending the packets directly. And this
+// coordinator ALREADY runs a real STUN/TURN server on -turn-addr with
+// coldstart.Demux blended onto it, answering the same request with the same two
+// attributes; this is therefore a second instance of an exposure the deployment
+// has already accepted, not a new class of one.
+func (m *rendezvousMux) answerSTUN(raw []byte, src *net.UDPAddr) bool {
+	if m == nil || src == nil || !looksLikeSTUN(raw) {
+		return false
+	}
+	// XOR-MAPPED-ADDRESS has to name the family the peer actually reached us on.
+	// UDPAddr.AddrPort keeps an IPv4 peer as a 4-in-6 mapped address, which
+	// reports Is4() false and would encode the 20-byte IPv6 form for a v4
+	// client — wrong on the wire, and a distinguisher, since no real STUN server
+	// does that. Unmap before encoding.
+	ap := src.AddrPort()
+	resp, ok := coldstart.BindingResponse(raw, netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()))
+	if !ok {
+		return false
+	}
+	if _, err := m.pc.WriteToUDP(resp, src); err != nil {
+		if !errors.Is(err, net.ErrClosed) {
+			log.Printf("rendezvous: STUN reply to %s failed: %v", src, err)
+		}
+	}
+	// Consumed either way: a write failure does not make the datagram JSON.
+	return true
 }
 
 // route classifies one datagram and returns true if it was consumed as DTLS. A

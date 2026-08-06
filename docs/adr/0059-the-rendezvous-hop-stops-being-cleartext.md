@@ -252,6 +252,13 @@ pre-validation exchange is 48 bytes against a ≥128-byte request, a ratio below
 
 ### 8. S2 — why the STUN prefix is filed rather than built here
 
+> **Closed by ADR-0060 (2026-08-06).** The fork below was ruled in favour of the
+> first option — the port answers any well-formed Binding Request — and `#202` is
+> built. The first reason for deferring also inverted on inspection: because a
+> client that emits a prefix at a coordinator which does not answer stalls its
+> own handshake, the coordinator half has to land *before* slice 2, not with it.
+> The reasoning is left below as it stood, because ADR-0060 is a ruling on it.
+
 Ruled S2, and the mechanical cost is small: a third case in a demux that already
 exists, against a signature stronger than the DTLS one (STUN's two high bits are
 zero and the magic cookie `0x2112A442` sits at bytes 4..8), with `pion/stun/v3`
