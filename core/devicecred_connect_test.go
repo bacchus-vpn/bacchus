@@ -1296,3 +1296,169 @@ func TestDeviceCredPathIsEmptyForAnEmptyDir(t *testing.T) {
 		t.Fatalf("DeviceCredPath = %q", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Renewal's first check (issue #184, ADR-0057)
+//
+// deviceRenewLoop used to wait a full deviceRenewCheckInterval before doing
+// anything, and it is started by an engine that a desktop client builds only at
+// connect time and tears down about thirty seconds later when the connect is
+// refused. So the loop's first action never happened, renewal only ever ran while a
+// connect had SUCCEEDED, and a device whose credential had expired — 48 hours without
+// connecting, i.e. a weekend — could never renew the credential that was causing the
+// refusal. Recovery was an operator minting a fresh claim code for a paid account the
+// account service would have renewed on request.
+//
+// The tests below all prove the fix WITHOUT a ticker, because a test that waited for
+// one would take ten minutes and would prove the thing that already worked.
+// ---------------------------------------------------------------------------
+
+// renewOnEntryEngine builds a started client engine holding a credential inside its
+// renewal margin, with a renewal seam that reports each call on a channel.
+func renewOnEntryEngine(t *testing.T, renew func(context.Context, DeviceRenewRequest) (devicestore.Credential, error), seedCred bool) *Engine {
+	t.Helper()
+	now := time.Now()
+	// One hour of life against the default six-hour margin: due, and due by a margin
+	// no clock skew in a test can close.
+	_, issuerCertEnc, credEnc, devicePriv := mintTestChain(t, now, time.Hour)
+	eng, err := New(Config{
+		Coordinators: []string{"127.0.0.1:1"},
+		Roles:        []string{RoleClient},
+		DeviceRenew:  renew,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	eng.deviceKey = devicePriv
+	if seedCred {
+		if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: issuerCertEnc}); err != nil {
+			t.Fatalf("seed device store: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(eng.Stop)
+	return eng
+}
+
+// TestRenewalHappensOnTheLoopsFirstPassNotOnItsFirstTick is #184's headline. A
+// started engine holding an in-margin credential must renew it without any tick
+// firing — deviceRenewCheckInterval is ten minutes and the engine that starts this
+// loop lives for about thirty seconds.
+func TestRenewalHappensOnTheLoopsFirstPassNotOnItsFirstTick(t *testing.T) {
+	now := time.Now()
+	_, freshIssuer, freshCred, _ := mintTestChain(t, now, 48*time.Hour)
+	called := make(chan DeviceRenewRequest, 4)
+	eng := renewOnEntryEngine(t, func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+		called <- req
+		return devicestore.Credential{Device: freshCred, IssuerCert: freshIssuer}, nil
+	}, true)
+
+	select {
+	case req := <-called:
+		if req.Current.Device == "" {
+			t.Error("the renewal request did not carry what this device is renewing FROM")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no renewal within 5s of Start. deviceRenewCheckInterval is %s, and the client that starts this loop is torn down in about 30s — so a first check on the first TICK is a check that never happens (#184)", deviceRenewCheckInterval)
+	}
+
+	// And the fresh credential was actually persisted, so the next connect presents it.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if held, ok := eng.deviceStore.Get(); ok && held.Device == freshCred {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the renewal ran but the fresh credential was never stored")
+}
+
+// TestTheEntryCheckDoesNotEnrollADeviceThatHoldsNothing. maybeRenewDeviceCred returns
+// early when the store is empty, and that early return is correct and stays: renewal
+// is not enrollment, a claim code is spent exactly once, and the second spend does not
+// fail safely. Moving the first check earlier must not turn a device that has never
+// enrolled into one that tries to.
+func TestTheEntryCheckDoesNotEnrollADeviceThatHoldsNothing(t *testing.T) {
+	called := make(chan struct{}, 4)
+	renewOnEntryEngine(t, func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+		called <- struct{}{}
+		return devicestore.Credential{}, nil
+	}, false)
+
+	select {
+	case <-called:
+		t.Fatal("the entry check called the renewal seam with nothing enrolled — see ADR-0046; renewal is not enrollment")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestTheEntryCheckDoesNotRenewACredentialThatIsNotDue. The margin still decides;
+// only the timing of the first look changed.
+func TestTheEntryCheckDoesNotRenewACredentialThatIsNotDue(t *testing.T) {
+	now := time.Now()
+	_, issuerCertEnc, credEnc, devicePriv := mintTestChain(t, now, 48*time.Hour) // well past the 6h margin
+	called := make(chan struct{}, 4)
+	eng, err := New(Config{
+		Coordinators: []string{"127.0.0.1:1"},
+		Roles:        []string{RoleClient},
+		DeviceRenew: func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+			called <- struct{}{}
+			return devicestore.Credential{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	eng.deviceKey = devicePriv
+	if err := eng.deviceStore.Put(devicestore.Credential{Device: credEnc, IssuerCert: issuerCertEnc}); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(eng.Stop)
+
+	select {
+	case <-called:
+		t.Fatal("a credential outside its renewal margin was renewed on entry — the entry check moved WHEN the margin is consulted, not whether")
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestStopIsNotHeldByARenewalThatHangs is what the entry check costs and pays for.
+// The first call now happens immediately, so a Stop shortly after Start can land on
+// an in-flight renewal — and Config.DeviceRenew is an embedder's transport that this
+// package does not get to assume returns promptly. Before the entry check the first
+// call was ten minutes away and this could not arise; without the shutdown
+// cancellation it would hold Stop for deviceRenewCallTimeout, turning a fix for a
+// client that tears its engine down quickly into a client that cannot tear it down at
+// all.
+func TestStopIsNotHeldByARenewalThatHangs(t *testing.T) {
+	entered := make(chan struct{})
+	var once sync.Once
+	eng := renewOnEntryEngine(t, func(ctx context.Context, req DeviceRenewRequest) (devicestore.Credential, error) {
+		once.Do(func() { close(entered) })
+		<-ctx.Done() // an account service that accepts the connection and never answers
+		return devicestore.Credential{}, ctx.Err()
+	}, true)
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the renewal seam was never called")
+	}
+
+	done := make(chan struct{})
+	go func() { eng.Stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Stop was still blocked 5s in. deviceRenewCallTimeout is %s, so an unreachable account service would hold shutdown for that long", deviceRenewCallTimeout)
+	}
+}

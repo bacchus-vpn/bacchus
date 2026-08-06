@@ -401,24 +401,65 @@ func (e *Engine) deviceRenewMargin() time.Duration {
 	return defaultDeviceRenewMargin
 }
 
-// deviceRenewLoop periodically checks whether the stored device credential
-// needs renewing and, when Config.DeviceRenew is set, asks it for a fresh one.
-// Mirrors reloadCRLLoop's shape (ticker + e.stop select, the actual work
-// factored out and parameterized on now for tests).
+// deviceRenewLoop checks whether the stored device credential needs renewing and,
+// when Config.DeviceRenew is set, asks for a fresh one — ON ENTRY, and then on every
+// tick of deviceRenewCheckInterval.
+//
+// Work first, then wait. That is registerLoop's shape in core/engine.go, and this
+// loop having the opposite one is issue #184 (ADR-0057): its first action used to be
+// at T+10min, and it was reached by a client that builds an engine only at connect
+// time, so it needed ten minutes of engine uptime it never got. A refused connect
+// tears the engine down in about thirty seconds; the renewal that would have fixed
+// the refusal was destroyed before it acted. Renewal therefore only ever happened
+// while a connect had SUCCEEDED — and the trigger for the refusal is not connecting
+// for DefaultCredentialTTL, which is 48 hours, i.e. a weekend.
+//
+// The device is recoverable throughout: renewal is keyed on the enrolled device KEY,
+// not on holding a live credential, so the account service would have re-issued on
+// request the whole time. Only nothing ever asked.
+//
+// This does not renew anything that was not already due — maybeRenewDeviceCred's
+// margin check is unchanged, and its early return for a device with nothing enrolled
+// is deliberately untouched (an entry check must not become an enrollment attempt;
+// see ADR-0046). What changes is only WHEN the first check happens.
 func (e *Engine) deviceRenewLoop() {
 	defer e.wg.Done()
 	t := time.NewTicker(deviceRenewCheckInterval)
 	defer t.Stop()
 	for {
+		e.renewDeviceCredOnce()
 		select {
 		case <-e.stop:
 			return
 		case <-t.C:
-			ctx, cancel := context.WithTimeout(context.Background(), deviceRenewCallTimeout)
-			e.maybeRenewDeviceCred(ctx, time.Now())
-			cancel()
 		}
 	}
+}
+
+// renewDeviceCredOnce runs one renewal check under a fresh deviceRenewCallTimeout
+// budget that is ALSO cancelled by engine shutdown.
+//
+// The shutdown half is what the entry check above costs and pays for. Before it, the
+// first call was ten minutes in, so a Stop shortly after Start could not be waiting on
+// a caller-supplied transport; now the first call happens immediately, and an
+// unreachable account service would otherwise hold Stop's wg.Wait for the full 30
+// seconds — turning a fix for a client that tears its engine down quickly into a
+// client that cannot tear it down at all. Config.DeviceRenew is an embedder's
+// transport and this package does not get to assume it returns promptly; what it can
+// do is make sure the context it hands over dies when the engine does.
+func (e *Engine) renewDeviceCredOnce() {
+	ctx, cancel := context.WithTimeout(context.Background(), deviceRenewCallTimeout)
+	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-e.stop:
+			cancel()
+		case <-done:
+		}
+	}()
+	e.maybeRenewDeviceCred(ctx, time.Now())
 }
 
 // maybeRenewDeviceCred renews the stored credential when it is due, at clock
