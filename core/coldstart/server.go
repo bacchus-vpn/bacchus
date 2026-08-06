@@ -72,6 +72,22 @@ func LoadMemStore(path string) (*MemStore, error) {
 
 // SaveFile writes s to path in the format [LoadMemStore] reads, so an
 // operator-side tool can append a freshly issued secret and persist it.
+//
+// The write is ATOMIC — a complete file is renamed over the target and the live
+// file is never opened for writing (issue #178) — because the only writer,
+// cmd/coldstart-issue, is read-modify-write over the whole store. A torn write
+// there does not lose the entry being added; it destroys every bootstrap secret
+// ever issued, none of which is reconstructible. [writeFileAtomic] carries that
+// argument in full, along with the three ways the result differs from the
+// os.WriteFile this used to be.
+//
+// It does not create path's parent directory, which is unchanged: a missing
+// secrets directory is still an error rather than something a mint conjures.
+//
+// The lock that stops two concurrent issuers dropping one another's entry is
+// cmd/coldstart-issue's, not this — a whole file is what a READER is promised,
+// and a store that never held the loser's secret marshals to a perfectly
+// well-formed one.
 func (s *MemStore) SaveFile(path string) error {
 	s.mu.RLock()
 	f := make(secretFile, len(s.secrets))
@@ -83,7 +99,7 @@ func (s *MemStore) SaveFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("coldstart: marshal secrets file: %w", err)
 	}
-	if err := os.WriteFile(path, b, 0o600); err != nil {
+	if err := writeFileAtomic(path, b); err != nil {
 		return fmt.Errorf("coldstart: write secrets file: %w", err)
 	}
 	return nil
