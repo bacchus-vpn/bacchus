@@ -2007,6 +2007,22 @@ func reloadSecretsLoop(ctx context.Context, path string, current *atomic.Pointer
 // public key is logged so an operator can copy it into client
 // config/invites — there is no other distribution path for it in this v1
 // (see docs/design/bootstrap-protocol.md's open questions).
+//
+// The create is O_EXCL and the seed is flushed before this returns; bacchus#189
+// is both. One coordinator per host makes the race the weakest of the three seed
+// writers' — but it costs one flag to close, and read-then-create is a TOCTOU
+// wherever it appears: without O_EXCL a second process that also saw no file
+// overwrites this one's key with no error. EEXIST refuses rather than
+// re-reading, because the key this process holds in memory is not the key on
+// disk, and a coordinator signing snapshots under a key that is not the one an
+// operator will read back out is the same skew by a longer route. The flush is
+// what the log line below makes load-bearing: that pubkey is baked into invites,
+// and a power loss before the bytes are durable leaves every invite carrying it
+// failing snapshot verification against a regenerated key.
+//
+// A partial write is deliberately left in place — the malformed-key branch above
+// refuses it loudly on the next start, where deleting it would silently mint a
+// second signing key and strand every invite already issued.
 func loadOrGenerateBootstrapKey(path string) (ed25519.PrivateKey, error) {
 	if b, err := os.ReadFile(path); err == nil {
 		seed, err := hex.DecodeString(strings.TrimSpace(string(b)))
@@ -2027,8 +2043,24 @@ func loadOrGenerateBootstrapKey(path string) (ed25519.PrivateKey, error) {
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(path, []byte(hex.EncodeToString(priv.Seed())), 0o600); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("bootstrap key %s was created by another process while this one was generating: "+
+				"refusing, because the key this process holds is not the key on disk", path)
+		}
+		return nil, fmt.Errorf("create bootstrap key %s: %w", path, err)
+	}
+	if _, err := f.WriteString(hex.EncodeToString(priv.Seed())); err != nil {
+		f.Close()
 		return nil, fmt.Errorf("write bootstrap key %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("flush bootstrap key %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close bootstrap key %s: %w", path, err)
 	}
 	log.Printf("bootstrap: generated new signing key at %s — public key (bake into client config/invites): %s",
 		path, hex.EncodeToString(pub))
