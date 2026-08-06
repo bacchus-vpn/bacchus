@@ -120,6 +120,34 @@ JSON file, hot-reloaded every 30s — see `core/coldstart/server.go`). There is
 no vouch/trust system wired to this store yet (every entry is trusted
 equally); that is tracked as follow-on work, see §6.
 
+**The risk in that file is on the write side, not the read side** (issue #178).
+A coordinator that reads an unparseable secrets file keeps the empty store
+`startTurnAndBootstrap` seeded, so nobody can bootstrap — fail-closed, noisy,
+and repaired by the next tick. But `cmd/coldstart-issue` is read-modify-write
+over the whole store: load, add one, write all of it back. A run that dies
+mid-write therefore does not lose an update, it loses *every secret ever
+issued*. Each of those is a random value living in exactly two places — this
+file and a `bacchus1:` invite already handed to a person — so losing the
+server's copy does not invalidate the invites in any orderly way. It makes each
+one unauthenticatable, with no record of what was issued and no way to tell a
+holder from an attacker. In the private-seed phase
+(`rendezvous-cold-start.md` §5.8) that is the entire user base.
+
+Two rules follow, both enforced in code rather than by care:
+
+- `MemStore.SaveFile` **installs** the file rather than rewriting it. A complete
+  copy is staged under `.<name>.tmp*` in the target's own directory, flushed, and
+  renamed over the target, so the path never holds a partial file and a killed
+  writer leaves the previous one intact. Same shape and same reasoning as the
+  revocation file's write (`node-admission.md` §Revocation, issue #168), with the
+  polarity reversed: there an unreadable file means *nothing is revoked*, here it
+  means *nobody may bootstrap*.
+- `cmd/coldstart-issue` holds a `<path>.lock` for the duration of one
+  read-modify-write. Atomicity is a promise to a *reader*; it says nothing about
+  two issuers racing, where each writes a perfectly well-formed file and the
+  second lands without the first's entry. That failure leaves no torn file to
+  notice, so it is prevented rather than detected.
+
 An **invite** packs everything a fresh client needs — coordinator address,
 secret ID, secret, coordinator public key — into one copy-pasteable /
 QR-able string: `bacchus1:` + unpadded base64url of

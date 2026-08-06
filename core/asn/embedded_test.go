@@ -400,6 +400,65 @@ answered beside it.`, path, needs)
 	}
 }
 
+// TestReleaseWorkflowPublishNeedsTheGatedBuild asserts the THIRD link of the
+// chain the two tests above assert the first two of (issue #172's leftover,
+// filed as issue #180 and deliberately out of that card's scope at the time).
+//
+// verify-table carries the shipped table's release bar and verify-version
+// carries the tag's ancestry; windows-bundle needs both, which is what those two
+// tests pin. Neither of them is the job that mints anything. `publish` is — it
+// downloads the artifact, writes the notes and runs `gh release create` with the
+// only `contents: write` permission in the file — and it is gated only because
+// it needs windows-bundle, transitively, with nothing asserting that.
+//
+// It is its own test rather than a fifth assertion inside the ancestry one
+// BECAUSE THE LINK BELONGS TO BOTH GATES. Buried in either, its failure message
+// would arrive under a heading about the other one's subject, and deleting that
+// test for an unrelated reason would take this with it.
+//
+// WHAT THE REALISTIC EDIT LOOKS LIKE, since the obvious one is self-defeating:
+// dropping `needs:` outright would break publish immediately, because it
+// downloads windows-bundle's artifact and reads `needs.windows-bundle.outputs`.
+// The edit that stays green is publish coming to need a DIFFERENT bundle job. A
+// 1.0 that ships Windows and Linux grows a second one, and `needs: linux-bundle`
+// — or a second publish job beside this one — supplies artifacts perfectly well
+// while carrying none of the gates. That is the shape this is here for; the
+// no-needs branch below is asserted anyway because it costs one line and is what
+// a restructure looks like from here.
+//
+// A third caller of workflowJob does not trip the note in
+// TestReleaseWorkflowChecksTagAncestry about moving the three helpers into their
+// own package. That note is about a second COPY of them appearing somewhere
+// tidier — the same file and the same package is the case it argues for.
+func TestReleaseWorkflowPublishNeedsTheGatedBuild(t *testing.T) {
+	const path = "../../.github/workflows/release.yml"
+	b, err := os.ReadFile(path)
+	if err != nil {
+		// Not a skip, for the reason the two tests above give: a gate that
+		// opens when its input disappears is not a gate.
+		t.Fatalf("cannot read %s: %v\n\nThis test asserts the job that creates a release still waits for the gated build; without the file there is nothing to assert and reporting green would be reporting over nothing.", path, err)
+	}
+
+	publish := workflowJob(t, string(b), "publish")
+	needs, ok := workflowNeeds(publish)
+	switch {
+	case !ok:
+		t.Errorf(`the publish job in %s has no needs:.
+
+publish holds the only contents: write permission in this file and its if: fires
+on any tag push, so with nothing to wait for it starts beside verify-version,
+verify-table and the build itself.`, path)
+	case !strings.Contains(needs, "windows-bundle"):
+		t.Errorf(`the publish job in %s needs %q, which does not include windows-bundle.
+
+windows-bundle is what carries both gates — it needs verify-version and
+verify-table — so publish is gated on the tag being on main and on the age of the
+shipped IP→AS table only for as long as it needs windows-bundle. A publish job
+that waits for some other bundle instead gets its artifacts and none of the
+gates, and a draft release can be created beside a red one.`, path, needs)
+	}
+}
+
 // workflowRuns reports whether a job actually RUNS something containing want, as
 // opposed to mentioning it in a comment.
 //
@@ -451,7 +510,11 @@ func workflowJob(t *testing.T, src, name string) string {
 		}
 	}
 	if start < 0 {
-		t.Fatalf("no %q job in .github/workflows/release.yml.\n\nIf it was renamed, rename it here too — this test is the thing that notices when the release stops being gated on the shipped IP→AS table.", name)
+		// Deliberately not naming one subject. This has three callers now and
+		// only one of them is about the shipped table; a message that names the
+		// table would misdirect whoever removed the publish or verify-version
+		// job, which is the more likely edit.
+		t.Fatalf("no %q job in .github/workflows/release.yml.\n\nIf it was renamed, rename it here too — the tests in this file are what notice when the release stops being gated.", name)
 	}
 	for i := start; i < len(lines); i++ {
 		if isJobHeader(lines[i]) {
