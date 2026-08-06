@@ -93,8 +93,30 @@ func (c *Client) Enroll(ctx context.Context, dev *core.DeviceEnrollment, claim, 
 
 	s := signer{pub: dev.DevicePub(), sign: dev.SignEnroll}
 
-	challenge, _, err := c.Challenge(ctx)
-	if err != nil {
+	// The rotation over configured addresses (bacchus#192) is written out here
+	// rather than run through overExchanges, and the difference is the whole
+	// paragraph above: an address may be tried only until the moment /v1/enroll
+	// is sent to it. A challenge costs nothing, so an address that cannot mint one
+	// is skipped; the instant the enroll request goes out, that address is the
+	// only address, whatever it answers or fails to answer. Recovery from an
+	// ambiguous outcome is Collect, which is safe to repeat and may rotate freely.
+	var (
+		challenge []byte
+		err       error
+		base      string
+	)
+	for _, candidate := range c.baseOrder() {
+		challenge, _, err = c.challengeFrom(ctx, candidate)
+		if err == nil {
+			base = candidate
+			break
+		}
+		if !errors.Is(err, ErrUnreachable) {
+			return devicestore.Credential{}, err
+		}
+		c.markUnreachable(candidate)
+	}
+	if base == "" {
 		return devicestore.Credential{}, err
 	}
 	sig, err := s.sign(c.audience, challenge)
@@ -103,7 +125,7 @@ func (c *Client) Enroll(ctx context.Context, dev *core.DeviceEnrollment, claim, 
 	}
 
 	var resp credentialsResponse
-	err = c.post(ctx, "/v1/enroll", enrollRequest{
+	err = c.post(ctx, base, "/v1/enroll", enrollRequest{
 		Claim:     claim,
 		DevicePub: s.pub,
 		Label:     label,
@@ -171,17 +193,29 @@ func (c *Client) Collect(ctx context.Context, dev *core.DeviceEnrollment) (devic
 // issueCredential is the /v1/credential exchange without any persistence, shared
 // by Collect and by Renew — which persist to different places, and must not each
 // hold their own copy of the exchange to get there.
+//
+// It is the exchange the configured addresses exist for (bacchus#192): this is
+// what a device runs every ten minutes once it is inside its renewal margin, so
+// an address that has gone away is discovered here and rotated past here. Both
+// legs run against one address, and the unknown_challenge retry stays on that
+// same address — a fresh nonce is what fixes that code, and a fresh nonce from
+// somewhere else is not.
 func (c *Client) issueCredential(ctx context.Context, s signer) (credentialsResponse, error) {
-	resp, err := c.issueCredentialOnce(ctx, s)
-	if code, ok := CodeOf(err); ok && code == CodeUnknownChallenge {
-		return c.issueCredentialOnce(ctx, s)
-	}
+	var resp credentialsResponse
+	err := c.overExchanges(func(base string) error {
+		r, err := c.issueCredentialOnce(ctx, base, s)
+		if code, ok := CodeOf(err); ok && code == CodeUnknownChallenge {
+			r, err = c.issueCredentialOnce(ctx, base, s)
+		}
+		resp = r
+		return err
+	})
 	return resp, err
 }
 
-func (c *Client) issueCredentialOnce(ctx context.Context, s signer) (credentialsResponse, error) {
+func (c *Client) issueCredentialOnce(ctx context.Context, base string, s signer) (credentialsResponse, error) {
 	var resp credentialsResponse
-	challenge, _, err := c.Challenge(ctx)
+	challenge, _, err := c.challengeFrom(ctx, base)
 	if err != nil {
 		return resp, err
 	}
@@ -189,7 +223,7 @@ func (c *Client) issueCredentialOnce(ctx context.Context, s signer) (credentials
 	if err != nil {
 		return resp, fmt.Errorf("accountclient: sign renewal assertion: %w", err)
 	}
-	err = c.post(ctx, "/v1/credential", credentialRequest{
+	err = c.post(ctx, base, "/v1/credential", credentialRequest{
 		DevicePub: s.pub,
 		Challenge: challenge,
 		Sig:       sig,

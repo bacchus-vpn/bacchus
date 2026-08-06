@@ -427,6 +427,109 @@ func TestAccountServiceConfiguredAndItsDefaults(t *testing.T) {
 	}
 }
 
+// TestAnUpgradedClientKeepsWorkingOnTheOlderAccountServiceKey is bacchus#192's
+// back-compat half (wave ruling R5). The single-string key is on installed
+// clients' disks today; an upgrade that stopped reading it would look like
+// nothing at all for six hours and then take every one of those devices off the
+// network, at the far end of a change the user never saw.
+func TestAnUpgradedClientKeepsWorkingOnTheOlderAccountServiceKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bacchus-fyne.config.json")
+	// Exactly what an installed client's file holds: the older key, and no sign
+	// that a list was ever a possibility.
+	onDisk := `{
+	  "coordinators": ["203.0.113.10:8080"],
+	  "accountServiceUrl": "https://account.example:8443",
+	  "accountServiceAudience": "account.example",
+	  "accountServiceCa": "/etc/bacchus/account-ca.pem"
+	}`
+	if err := os.WriteFile(path, []byte(onDisk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c Config
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.AccountServiceConfigured() {
+		t.Fatal("an upgraded client reads its own config file as naming no account service")
+	}
+	if got := c.AccountServiceAddresses(); len(got) != 1 || got[0] != "https://account.example:8443" {
+		t.Fatalf("AccountServiceAddresses() = %v, want the single older key's value", got)
+	}
+
+	// And a Settings save does not migrate the file out from under it. A load
+	// that rewrote what it read would take a downgrade away from anyone who tried
+	// this build, and the whole point of one release of overlap is that both
+	// builds keep working.
+	if err := SaveConfig(path, c); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(after, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := raw["accountServiceUrl"]; got != "https://account.example:8443" {
+		t.Fatalf("after a save the older key is %v; nothing may migrate the user's file", got)
+	}
+}
+
+// TestTheAddressListWinsOverTheOlderKey: the two keys are resolved at the point
+// of use, and the list is what an operator edits to move. Folding the older value
+// in would resurrect exactly the address they were moving away from — at the
+// front, since it is the one this client already believed in.
+func TestTheAddressListWinsOverTheOlderKey(t *testing.T) {
+	c := Config{
+		AccountServiceURLs: []string{" https://new.example:8443 ", "", "https://spare.example:8443"},
+		AccountServiceURL:  "https://old.example:8443",
+	}
+	got := c.AccountServiceAddresses()
+	want := []string{"https://new.example:8443", "https://spare.example:8443"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AccountServiceAddresses() = %v, want %v — trimmed, blanks dropped, older key ignored", got, want)
+	}
+
+	// A config that names only a list is a complete configuration, and one that
+	// names neither still reads as a deployment with no account service.
+	if !(Config{AccountServiceURLs: []string{"https://a.example"}}).AccountServiceConfigured() {
+		t.Fatal("a list-only config reads as naming no account service")
+	}
+	if (Config{AccountServiceURLs: []string{" "}}).AccountServiceConfigured() {
+		t.Fatal("a list of blanks reads as naming an account service")
+	}
+}
+
+// TestANewConfigDoesNotAcquireTheDeprecatedKey: omitempty on the older key keeps
+// a client that never had one from learning the deprecated spelling from its own
+// saved file.
+func TestANewConfigDoesNotAcquireTheDeprecatedKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bacchus-fyne.config.json")
+	if err := SaveConfig(path, Config{AccountServiceURLs: []string{"https://account.example:8443"}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["accountServiceUrl"]; ok {
+		t.Fatal("a fresh config file carries the deprecated single-address key")
+	}
+	if _, ok := raw["accountServiceUrls"]; !ok {
+		t.Fatal("a fresh config file has no accountServiceUrls key")
+	}
+}
+
 // TestEffectiveDeviceCredDirDefaultsPerUserNotBesideTheExecutable: the
 // exe-adjacent path is issue #118's failure again — a device key written next to
 // a binary in a system directory fails on permissions for the ordinary user, and
@@ -509,6 +612,20 @@ func TestClearClaimCodeOnAFreshInstallIsNotAnError(t *testing.T) {
 	}
 }
 
+// deprecatedConfigKeys are read for back-compat and deliberately kept OUT of the
+// template. The template is what a new deployment copies, so a key that exists
+// only so an existing installation keeps working would teach the spelling being
+// retired to everyone who has no reason to use it.
+//
+// Naming them here rather than skipping "anything with omitempty" is the point:
+// the exemption is a list somebody has to add to on purpose, and the test below
+// checks both directions, so a deprecated key cannot drift back into the template
+// and a live key cannot be excused from it by accident.
+var deprecatedConfigKeys = map[string]string{
+	// bacchus#192: superseded by accountServiceUrls, read for one release.
+	"accountServiceUrl": "accountServiceUrls",
+}
+
 // TestTheExampleConfigCarriesEveryFieldAJSONConfigCanSet: the template is what
 // an operator copies, and a field missing from it is a field nobody knows to
 // set — which is how AdmissionPubKey came to be unreachable before #93.
@@ -528,7 +645,14 @@ func TestTheExampleConfigCarriesEveryFieldAJSONConfigCanSet(t *testing.T) {
 			continue
 		}
 		name, _, _ := strings.Cut(tag, ",")
-		if _, ok := raw[name]; !ok {
+		_, ok := raw[name]
+		if replacement, deprecated := deprecatedConfigKeys[name]; deprecated {
+			if ok {
+				t.Errorf("bacchus-fyne.config.example.json still offers %q, which is superseded by %q — a new deployment copying the template would start on the key being retired", name, replacement)
+			}
+			continue
+		}
+		if !ok {
 			t.Errorf("bacchus-fyne.config.example.json has no %q key, so an operator copying the template cannot discover it", name)
 		}
 	}

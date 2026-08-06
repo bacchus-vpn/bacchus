@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -933,8 +934,16 @@ func (c *Controller) openDeviceCredential() (deviceCredential, error) {
 	if !c.cfg.AccountServiceConfigured() {
 		return out, nil
 	}
+	addrs := c.cfg.AccountServiceAddresses()
+	// Said out loud rather than left to be discovered: a config that names both
+	// keys uses the list, and an operator who edited the older one and saw no
+	// change has no other way to find that out. Only when the two actually
+	// disagree — naming the same address twice is not a mistake worth a line.
+	if legacy := strings.TrimSpace(c.cfg.AccountServiceURL); legacy != "" && !slices.Contains(addrs, legacy) {
+		c.logf("account service: using accountServiceUrls (%s); the older accountServiceUrl key (%s) is not in that list and is being ignored", strings.Join(addrs, ", "), legacy)
+	}
 	cl, err := accountclient.New(accountclient.Config{
-		BaseURL:      strings.TrimSpace(c.cfg.AccountServiceURL),
+		BaseURLs:     addrs,
 		Audience:     strings.TrimSpace(c.cfg.AccountServiceAudience),
 		ServerCAFile: strings.TrimSpace(c.cfg.AccountServiceCA),
 		Logf:         c.logf,

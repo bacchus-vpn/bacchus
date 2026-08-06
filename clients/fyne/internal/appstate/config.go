@@ -216,13 +216,13 @@ type Config struct {
 	// core's device-credential gate is off unless a coordinator enables it, and a
 	// Bacchus network without an entitlement authority is a supported shape.
 	//
-	// AccountServiceURL, AccountServiceAudience and AccountServiceCA are the
+	// AccountServiceURLs, AccountServiceAudience and AccountServiceCA are the
 	// three values an operator hands over together, and none of them can be
 	// discovered:
 	//
-	//   - AccountServiceURL is "https://host:port", scheme and host only. Plain
-	//     http is refused: the assertions this client signs authenticate it TO
-	//     the service and cover no response byte, so the credential travelling
+	//   - AccountServiceURLs are "https://host:port" each, scheme and host only.
+	//     Plain http is refused: the assertions this client signs authenticate it
+	//     TO the service and cover no response byte, so the credential travelling
 	//     back is unprotected without TLS and an attacker who suppressed the
 	//     request could simply complete it and keep the result.
 	//   - AccountServiceAudience is the service's own identity, bound into every
@@ -230,12 +230,46 @@ type Config struct {
 	//     out of band; a client that read it from the reply it was about to sign
 	//     against would let the responder choose the binding.
 	//   - AccountServiceCA is a PEM file authenticating the service's TLS
-	//     identity. Required whenever the URL is set, and the system's public
+	//     identity. Required whenever a URL is set, and the system's public
 	//     root pool is never consulted even as a fallback — the service is
 	//     reached under a name chosen for camouflage, so a publicly-trusted
 	//     certificate for that name authenticates the decoy rather than the
 	//     service.
-	AccountServiceURL      string `json:"accountServiceUrl"`
+	//
+	// # Why the address is a list (bacchus#192)
+	//
+	// The account service runs on anonymously rented infrastructure and its
+	// address WILL change. A device renews as soon as it enters its renewal margin
+	// and holds the rest as slack, so a service that becomes unreachable at T
+	// takes the first devices offline at T + ~6 h — not the 42 hours between
+	// renewals. Naming the successor address here BEFORE the move is what makes a
+	// planned move survivable: the client rotates to it by itself, with nothing to
+	// re-download and nobody to tell.
+	//
+	// Every address shares this one audience and this one pinned CA. There is
+	// deliberately no per-address CA or audience to configure: that is what keeps
+	// this a list of LOCATIONS rather than a list of trust roots, and an address
+	// that does not present the pinned identity is unreachable rather than
+	// trusted. accountclient.New enforces it for the whole list at once.
+	//
+	// It does not help an UNPLANNED move — a list the client cannot update goes
+	// stale together — which is bacchus#193's job and needs this list underneath
+	// it.
+	AccountServiceURLs []string `json:"accountServiceUrls"`
+
+	// AccountServiceURL is the older single-address key, still read (bacchus#192,
+	// wave ruling R5). It is on installed clients' disks today, so an upgrade must
+	// not silently stop reaching the account service — which would cost that
+	// device its access six hours later, at the far end of a change it never saw.
+	//
+	// AccountServiceAddresses resolves the two: the list wins when it has
+	// anything in it, and this is used when it does not. Nothing rewrites the
+	// user's file to migrate between them — a load that quietly rewrote what it
+	// read would take a downgrade away from anyone who tried this build — so both
+	// keys survive a Settings save exactly as they were found. omitempty keeps a
+	// client that never had this key from acquiring an empty one and learning
+	// about the deprecated spelling from its own config file.
+	AccountServiceURL      string `json:"accountServiceUrl,omitempty"`
 	AccountServiceAudience string `json:"accountServiceAudience"`
 	AccountServiceCA       string `json:"accountServiceCa"`
 
@@ -316,7 +350,36 @@ func DefaultDeviceCredDir() string {
 // at all. False is a complete, supported deployment: no enrollment, no renewal,
 // and whatever core/devicestore already holds is what this device presents.
 func (c Config) AccountServiceConfigured() bool {
-	return strings.TrimSpace(c.AccountServiceURL) != ""
+	return len(c.AccountServiceAddresses()) > 0
+}
+
+// AccountServiceAddresses is every address this config names for the account
+// service, in preference order, trimmed and with blanks dropped.
+//
+// The list key wins whenever it holds anything; the older single-address key is
+// what is used when it does not (bacchus#192). The two are resolved here, at the
+// point of use, and never by rewriting the Config — see AccountServiceURL on why
+// a load that migrated the file would be worse than the duplication.
+//
+// A config that sets BOTH uses the list and ignores the single value. That is
+// the only ordering that lets an operator replace a stale address without
+// deleting a key: the alternative — folding the older value in — would resurrect
+// exactly the address they were moving away from, at the front, since it is the
+// one the client already believed in.
+func (c Config) AccountServiceAddresses() []string {
+	out := make([]string, 0, len(c.AccountServiceURLs))
+	for _, u := range c.AccountServiceURLs {
+		if s := strings.TrimSpace(u); s != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	if s := strings.TrimSpace(c.AccountServiceURL); s != "" {
+		return []string{s}
+	}
+	return nil
 }
 
 // EffectiveDeviceCredDir is DeviceCredDir, or the default when it is empty.

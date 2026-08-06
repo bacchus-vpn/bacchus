@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core/devicestore"
@@ -20,28 +21,51 @@ import (
 
 // Config builds a Client.
 type Config struct {
-	// BaseURL is the account service's address, scheme and authority only —
-	// "https://host:port". It is supplied by whoever configured this
-	// installation and is never discovered: the service is reached through the
+	// BaseURLs are the account service's addresses, each scheme and authority
+	// only — "https://host:port". They are supplied by whoever configured this
+	// installation and are never discovered: the service is reached through the
 	// onboarding endpoint's payment-only proxy or from inside a paid tunnel,
 	// and a client that went looking for it on the open internet would be
 	// designing for the one ingress path the deployment model says does not
 	// exist.
 	//
-	// Empty is not an error at this layer — it is a deployment with no account
-	// service, which New refuses so the caller does not construct a client that
-	// can never work. Callers decide "no account service" by not calling New.
-	BaseURL string
+	// At least one is required. Empty is not an error at this layer — it is a
+	// deployment with no account service, which New refuses so the caller does
+	// not construct a client that can never work. Callers decide "no account
+	// service" by not calling New.
+	//
+	// # Several addresses, one service
+	//
+	// This is a list of LOCATIONS, not of services (bacchus#192). The service
+	// runs on anonymously rented infrastructure and its address will change; a
+	// successor provisioned before the move is what makes a planned move
+	// survivable, because a device that cannot reach this service has only the
+	// renewal margin — six hours, not the 42-hour renewal period — before it
+	// stops connecting.
+	//
+	// Every address shares ONE Audience and ONE pinned ServerCAFile, and that is
+	// what keeps a second address a second location and never a second authority:
+	// there is no per-address CA and no per-address audience to configure, so a
+	// list of addresses cannot quietly become a list of trust roots. An address
+	// that does not present the pinned identity fails its TLS handshake and is
+	// treated as unreachable, exactly as an address that is down is.
+	//
+	// The order is the preference order. A whole exchange is run against one
+	// address, and an address that fails as unreachable is set aside for
+	// unreachableCooldown before it is preferred again — the ordering core's
+	// coordinator pool uses on the same problem.
+	BaseURLs []string
 
 	// Audience is the service's own identity, bound into every assertion this
-	// client signs. Pinned here, out of band, alongside ServerCAFile. It is never
-	// in any response and MUST NOT be inferred from one.
+	// client signs. Pinned here, out of band, alongside ServerCAFile. It applies
+	// to every address in BaseURLs and is validated once. It is never in any
+	// response and MUST NOT be inferred from one.
 	Audience string
 
 	// ServerCAFile is a PEM file holding the certificate authority (or the
 	// self-signed leaf) that authenticates the service's TLS identity. REQUIRED,
-	// and the system's public root pool is deliberately not consulted even as a
-	// fallback.
+	// applied to every address in BaseURLs, and the system's public root pool is
+	// deliberately not consulted even as a fallback.
 	//
 	// This is a security requirement rather than a convenience: the service sits
 	// behind a camouflaged front under a name chosen to be unremarkable, so
@@ -78,10 +102,89 @@ const DefaultTimeout = 30 * time.Second
 
 // Client speaks the three verbs. Safe for concurrent use.
 type Client struct {
-	base     string
+	bases    []string
 	audience string
 	http     *http.Client
 	log      func(format string, args ...any)
+
+	healthMu  sync.Mutex
+	unhealthy map[string]time.Time
+}
+
+// unreachableCooldown is how long an address that failed as unreachable is
+// deprioritized for. It is core's coordCooldown, for core's reason: an address
+// that is cooling down is still tried when every address is cooling down, since
+// a slow retry beats a client that refuses to try at all.
+//
+// It is short relative to the ten minutes between renewal attempts, so it does
+// almost nothing across renewals and everything within one exchange — the second
+// leg of a challenge/verb pair must not open by preferring the address whose
+// first leg just failed.
+const unreachableCooldown = 30 * time.Second
+
+// baseOrder returns the configured addresses healthy-first: the ones that have
+// not failed recently in configured order, then the cooling ones in configured
+// order.
+//
+// This is the ordering core's rankCoordinators gives the coordinator pool, on
+// the same problem — several addresses for one thing, any of which may be
+// blocked or gone, none of which may be dropped permanently. It is written here
+// rather than called there because rankCoordinators is unexported in package
+// core and this package deliberately does not pull the engine in; the two want to
+// be one helper, and folding them is a change to a file this did not own. What is
+// NOT different is the discipline: healthy-first, cooldown-sinks-never-removes,
+// configured order preserved inside each group.
+func (c *Client) baseOrder() []string {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+	now := time.Now()
+	healthy := make([]string, 0, len(c.bases))
+	cooling := make([]string, 0, len(c.bases))
+	for _, b := range c.bases {
+		if t, bad := c.unhealthy[b]; bad && now.Sub(t) < unreachableCooldown {
+			cooling = append(cooling, b)
+		} else {
+			healthy = append(healthy, b)
+		}
+	}
+	return append(healthy, cooling...)
+}
+
+// markUnreachable sinks an address that did not answer.
+func (c *Client) markUnreachable(base string) {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+	c.unhealthy[base] = time.Now()
+}
+
+// overExchanges runs one whole exchange against each configured address in
+// health order, stopping at the first address that does not fail as unreachable.
+//
+// A WHOLE exchange, not a single request, and that is the load-bearing part. A
+// challenge is server state — the service holds live challenges in memory, which
+// is why a restart answers unknown_challenge — so a challenge minted at one
+// address means nothing at another. Rotating between the two legs of a pair would
+// turn "the first address went away" into a permanent unknown_challenge loop.
+//
+// It rotates only on ErrUnreachable. Everything else is the service ANSWERING,
+// and a coded refusal is the same answer at every address of one service: moving
+// on would turn one refusal into as many refusals as there are addresses, each
+// spending a challenge, and for the verbs that spend more than a challenge it
+// would be far worse (see Enroll, which does not use this).
+func (c *Client) overExchanges(exchange func(base string) error) error {
+	order := c.baseOrder()
+	var err error
+	for _, base := range order {
+		err = exchange(base)
+		if !errors.Is(err, ErrUnreachable) {
+			return err
+		}
+		c.markUnreachable(base)
+		if len(order) > 1 {
+			c.logf("account service: %s did not answer, trying the next configured address", base)
+		}
+	}
+	return err
 }
 
 func (c *Client) logf(format string, args ...any) {
@@ -95,7 +198,7 @@ func (c *Client) logf(format string, args ...any) {
 // It refuses rather than defaults on all three of the pinned values, and the
 // refusals are the point:
 //
-//   - An empty BaseURL would build a client that fails on first use with a URL
+//   - No BaseURLs at all would build a client that fails on first use with a URL
 //     parse error instead of at configuration time.
 //   - An empty Audience would sign assertions bound to the empty string, which
 //     every service would accept from every other service's device. The account
@@ -105,30 +208,50 @@ func (c *Client) logf(format string, args ...any) {
 //     terminate. That failure is invisible: everything works, against whoever is
 //     in the middle.
 //
+// The last two are validated ONCE, for the whole list, because there is one of
+// each: they are what make an additional address a second location rather than a
+// second authority (bacchus#192). Only the first refusal changed when the field
+// became a list — from "BaseURL is required" to "at least one".
+//
 // http:// is refused outright. The assertions authenticate this client to the
 // service and cover no response byte, so everything valuable on this surface —
 // the credential, the issuer cert, the admission credential — travels back
 // unprotected without TLS, and an attacker who suppressed a valid enrollment
 // would simply complete it and keep the result.
 func New(cfg Config) (*Client, error) {
-	if strings.TrimSpace(cfg.BaseURL) == "" {
-		return nil, errors.New("accountclient: BaseURL is required")
+	var bases []string
+	seen := map[string]bool{}
+	for _, raw := range cfg.BaseURLs {
+		trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
+		if trimmed == "" {
+			continue
+		}
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("accountclient: BaseURL %q: %w", raw, err)
+		}
+		if u.Scheme != "https" {
+			return nil, fmt.Errorf("accountclient: BaseURL %q must be https, got %q", raw, u.Scheme)
+		}
+		if u.Host == "" {
+			return nil, fmt.Errorf("accountclient: BaseURL %q has no host", raw)
+		}
+		if u.Path != "" && u.Path != "/" {
+			// The verb paths are absolute ("/v1/enroll"); a base with a path would
+			// silently drop it and dial the wrong place, or produce "/prefix/v1/…"
+			// against a service that serves neither. Refusing beats guessing.
+			return nil, fmt.Errorf("accountclient: BaseURL %q must be scheme and host only, got path %q", raw, u.Path)
+		}
+		// Deduplicated in configured order, the way core dedups its coordinator
+		// pool: the same address twice is not a second location, and it would make
+		// one unreachable address consume two rotations.
+		if s := u.String(); !seen[s] {
+			seen[s] = true
+			bases = append(bases, s)
+		}
 	}
-	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/"))
-	if err != nil {
-		return nil, fmt.Errorf("accountclient: BaseURL: %w", err)
-	}
-	if u.Scheme != "https" {
-		return nil, fmt.Errorf("accountclient: BaseURL must be https, got %q", u.Scheme)
-	}
-	if u.Host == "" {
-		return nil, errors.New("accountclient: BaseURL has no host")
-	}
-	if u.Path != "" && u.Path != "/" {
-		// The verb paths are absolute ("/v1/enroll"); a base with a path would
-		// silently drop it and dial the wrong place, or produce "/prefix/v1/…"
-		// against a service that serves neither. Refusing beats guessing.
-		return nil, fmt.Errorf("accountclient: BaseURL must be scheme and host only, got path %q", u.Path)
+	if len(bases) == 0 {
+		return nil, errors.New("accountclient: at least one BaseURL is required")
 	}
 	if strings.TrimSpace(cfg.Audience) == "" {
 		return nil, errors.New("accountclient: Audience is required; an empty one binds assertions to nothing")
@@ -179,10 +302,11 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	return &Client{
-		base:     u.String(),
-		audience: strings.TrimSpace(cfg.Audience),
-		http:     hc,
-		log:      cfg.Logf,
+		bases:     bases,
+		audience:  strings.TrimSpace(cfg.Audience),
+		http:      hc,
+		log:       cfg.Logf,
+		unhealthy: map[string]time.Time{},
 	}, nil
 }
 
@@ -251,9 +375,22 @@ type credentialRequest struct {
 //
 // Fetching a challenge mints server state and spends nothing of the caller's, so
 // this is the one verb here that is freely retryable.
+//
+// It rotates over the configured addresses, and the challenge it returns belongs
+// to whichever one answered. A caller that follows it with a signed verb must
+// send that verb to the SAME address, which is why every such caller in this
+// package drives the rotation itself (overExchanges) rather than calling this.
 func (c *Client) Challenge(ctx context.Context) (challenge []byte, expiresAt time.Time, err error) {
+	err = c.overExchanges(func(base string) error {
+		challenge, expiresAt, err = c.challengeFrom(ctx, base)
+		return err
+	})
+	return challenge, expiresAt, err
+}
+
+func (c *Client) challengeFrom(ctx context.Context, base string) ([]byte, time.Time, error) {
 	var resp challengeResponse
-	if err := c.post(ctx, "/v1/challenge", struct{}{}, &resp); err != nil {
+	if err := c.post(ctx, base, "/v1/challenge", struct{}{}, &resp); err != nil {
 		return nil, time.Time{}, err
 	}
 	if len(resp.Challenge) == 0 {
@@ -270,12 +407,14 @@ func (c *Client) Challenge(ctx context.Context) (challenge []byte, expiresAt tim
 // well-formed error body is a statement by the service, and everything else — a
 // truncated response, a TLS failure, a timeout, a 404 from something that is not
 // the account service — is the network, not an answer.
-func (c *Client) post(ctx context.Context, path string, req, out any) error {
+// base names which configured address to send to; the caller owns that choice
+// because it owns the exchange the request belongs to.
+func (c *Client) post(ctx context.Context, base, path string, req, out any) error {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("accountclient: encode %s request: %w", path, err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("accountclient: build %s request: %w", path, err)
 	}
