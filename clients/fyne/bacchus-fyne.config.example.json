@@ -38,7 +38,7 @@
   "volunteerAdvertise": "",
   "volunteerExitKey": "",
 
-  "accountServiceUrl": "",
+  "accountServiceUrls": [],
   "accountServiceAudience": "",
   "accountServiceCa": "",
   "deviceCredDir": "",

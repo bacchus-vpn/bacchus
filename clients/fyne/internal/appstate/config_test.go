@@ -76,6 +76,168 @@ func TestSaveConfigOverwritesExisting(t *testing.T) {
 	}
 }
 
+// TestASaveIsNeverObservedShort is bacchus#190: SaveConfig used to end in
+// os.WriteFile, which opens the LIVE file with O_TRUNC and refills it, so a
+// process killed between the truncate and the bytes landing left the user's whole
+// configuration empty or short — and the next launch read what the killed one
+// left. ClearClaimCode's caller is a connect attempt, so that window is reached by
+// an ordinary gesture rather than a rare administrative one.
+//
+// A killed process cannot be staged in a unit test, so this asks the question a
+// reader would: while saves are happening, is the file on disk ever anything
+// other than a whole config? Against the truncate-and-refill shape a concurrent
+// reader sees empty and partial files almost immediately at this size; against a
+// staged rename it can only ever see one whole file or the other, because the
+// live path is never opened for writing at all.
+//
+// Windows answers the same question by refusing rather than by succeeding: it
+// will not open a file while a rename is replacing it, and will not run the
+// rename while a reader holds it open. A refusal is not a failure of the
+// property under test — an open that does not happen cannot land on a partial
+// file — so both sides tolerate it there and nowhere else. See
+// TestASaveReplacesTheFileRatherThanRewritingIt, which asks the same question
+// with no concurrency at all and gets the same answer on every platform.
+func TestASaveIsNeverObservedShort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bacchus-fyne.config.json")
+
+	// Big enough that the refill is many write syscalls rather than one — a
+	// bypass list is the field a real user can grow without noticing.
+	bypass := make([]string, 0, 4000)
+	for i := 0; i < 4000; i++ {
+		bypass = append(bypass, "host-"+strings.Repeat("x", 40)+".example")
+	}
+	base := Config{Coordinators: []string{"203.0.113.10:8080"}, Bypass: bypass, DeviceLabel: "laptop"}
+
+	if err := SaveConfig(path, base); err != nil {
+		t.Fatalf("SaveConfig (seed): %v", err)
+	}
+
+	done := make(chan struct{})
+	var writeErr error
+	go func() {
+		defer close(done)
+		for i := 0; i < 40; i++ {
+			c := base
+			c.Country = []string{"DE", "NL"}[i%2]
+			if err := SaveConfig(path, c); err != nil {
+				if runtime.GOOS == "windows" {
+					continue // a reader holds it; the file is untouched
+				}
+				writeErr = err
+				return
+			}
+		}
+	}()
+
+	reads, refused := 0, 0
+	for {
+		select {
+		case <-done:
+			if writeErr != nil {
+				t.Fatalf("SaveConfig: %v", writeErr)
+			}
+			if reads == 0 && refused == 0 {
+				t.Fatal("the reader never observed the file; this test proved nothing")
+			}
+			return
+		default:
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			if runtime.GOOS == "windows" {
+				refused++
+				continue // a rename holds it; nothing partial was handed over
+			}
+			t.Fatalf("the config file was not readable mid-save: %v", err)
+		}
+		var got Config
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatalf("a read landed on a partial config (%d bytes): %v", len(b), err)
+		}
+		if len(got.Bypass) != len(bypass) || got.DeviceLabel != "laptop" {
+			t.Fatalf("a read landed on a short config: %d bypass entries, label %q", len(got.Bypass), got.DeviceLabel)
+		}
+		reads++
+	}
+}
+
+// TestASaveReplacesTheFileRatherThanRewritingIt asks bacchus#190's question with
+// no concurrency in it, so it answers the same on every platform: after a save,
+// is the config the SAME FILE it was?
+//
+// That is the whole difference. os.WriteFile keeps the file and refills its
+// contents, so there is an interval in which the file exists and is short —
+// which is what a process killed in that interval leaves behind. Staging and
+// renaming replaces the file, so the one at that path is either wholly the old
+// one or wholly the new one and never a state in between.
+func TestASaveReplacesTheFileRatherThanRewritingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bacchus-fyne.config.json")
+	if err := SaveConfig(path, Config{DNS: "1.1.1.1:53"}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Resolve this stat's identity NOW, while the file it describes is still the
+	// one at that path.
+	//
+	// On Windows os.Stat records the PATH and os.SameFile resolves each operand's
+	// file id when it is CALLED, by opening that path (os/types_windows.go's
+	// loadFileId). So a before/after comparison across a rename opens the path
+	// twice after the rename, compares the new file with itself, and reports a
+	// match on a file that was in fact replaced — which is exactly how this test
+	// passed on Linux and failed on Windows against a build that was correct.
+	// Comparing it with itself here loads and caches the id; on Unix the id is
+	// already in the stat and this changes nothing.
+	_ = os.SameFile(before, before)
+	if err := SaveConfig(path, Config{DNS: "9.9.9.9:53", Bypass: []string{"example.com"}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("the save rewrote the live config in place rather than replacing it: a process killed between the truncate and the bytes landing leaves the user's whole configuration empty or short, and the next launch reads what it left")
+	}
+}
+
+// TestASaveLeavesNothingStagedBehind: staging is the cost of atomicity and a
+// temporary file left beside the config on every settings save would be a new
+// mess of its own. Only a save that is KILLED may leave one.
+func TestASaveLeavesNothingStagedBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bacchus-fyne.config.json")
+	if err := SaveConfig(path, Config{DNS: "1.1.1.1:53"}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := SaveConfig(path, Config{DNS: "9.9.9.9:53"}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(path) {
+			t.Errorf("a save left %q beside the config", e.Name())
+		}
+	}
+	// And the replacement carries the mode the file's contents require, every
+	// time rather than only at creation.
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Errorf("config file mode = %v, want 0600 — it holds turnPass and volunteerExitKey", perm)
+		}
+	}
+}
+
 // TestLoadConfigReturnsPath is the round-trip proof that LoadConfig's path
 // return is real, not a placeholder: a Settings save (settings.go) must land
 // back in the exact file the app read from, or an editor with a config in
@@ -427,6 +589,109 @@ func TestAccountServiceConfiguredAndItsDefaults(t *testing.T) {
 	}
 }
 
+// TestAnUpgradedClientKeepsWorkingOnTheOlderAccountServiceKey is bacchus#192's
+// back-compat half (wave ruling R5). The single-string key is on installed
+// clients' disks today; an upgrade that stopped reading it would look like
+// nothing at all for six hours and then take every one of those devices off the
+// network, at the far end of a change the user never saw.
+func TestAnUpgradedClientKeepsWorkingOnTheOlderAccountServiceKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bacchus-fyne.config.json")
+	// Exactly what an installed client's file holds: the older key, and no sign
+	// that a list was ever a possibility.
+	onDisk := `{
+	  "coordinators": ["203.0.113.10:8080"],
+	  "accountServiceUrl": "https://account.example:8443",
+	  "accountServiceAudience": "account.example",
+	  "accountServiceCa": "/etc/bacchus/account-ca.pem"
+	}`
+	if err := os.WriteFile(path, []byte(onDisk), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c Config
+	if err := json.Unmarshal(b, &c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.AccountServiceConfigured() {
+		t.Fatal("an upgraded client reads its own config file as naming no account service")
+	}
+	if got := c.AccountServiceAddresses(); len(got) != 1 || got[0] != "https://account.example:8443" {
+		t.Fatalf("AccountServiceAddresses() = %v, want the single older key's value", got)
+	}
+
+	// And a Settings save does not migrate the file out from under it. A load
+	// that rewrote what it read would take a downgrade away from anyone who tried
+	// this build, and the whole point of one release of overlap is that both
+	// builds keep working.
+	if err := SaveConfig(path, c); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(after, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got := raw["accountServiceUrl"]; got != "https://account.example:8443" {
+		t.Fatalf("after a save the older key is %v; nothing may migrate the user's file", got)
+	}
+}
+
+// TestTheAddressListWinsOverTheOlderKey: the two keys are resolved at the point
+// of use, and the list is what an operator edits to move. Folding the older value
+// in would resurrect exactly the address they were moving away from — at the
+// front, since it is the one this client already believed in.
+func TestTheAddressListWinsOverTheOlderKey(t *testing.T) {
+	c := Config{
+		AccountServiceURLs: []string{" https://new.example:8443 ", "", "https://spare.example:8443"},
+		AccountServiceURL:  "https://old.example:8443",
+	}
+	got := c.AccountServiceAddresses()
+	want := []string{"https://new.example:8443", "https://spare.example:8443"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AccountServiceAddresses() = %v, want %v — trimmed, blanks dropped, older key ignored", got, want)
+	}
+
+	// A config that names only a list is a complete configuration, and one that
+	// names neither still reads as a deployment with no account service.
+	if !(Config{AccountServiceURLs: []string{"https://a.example"}}).AccountServiceConfigured() {
+		t.Fatal("a list-only config reads as naming no account service")
+	}
+	if (Config{AccountServiceURLs: []string{" "}}).AccountServiceConfigured() {
+		t.Fatal("a list of blanks reads as naming an account service")
+	}
+}
+
+// TestANewConfigDoesNotAcquireTheDeprecatedKey: omitempty on the older key keeps
+// a client that never had one from learning the deprecated spelling from its own
+// saved file.
+func TestANewConfigDoesNotAcquireTheDeprecatedKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bacchus-fyne.config.json")
+	if err := SaveConfig(path, Config{AccountServiceURLs: []string{"https://account.example:8443"}}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["accountServiceUrl"]; ok {
+		t.Fatal("a fresh config file carries the deprecated single-address key")
+	}
+	if _, ok := raw["accountServiceUrls"]; !ok {
+		t.Fatal("a fresh config file has no accountServiceUrls key")
+	}
+}
+
 // TestEffectiveDeviceCredDirDefaultsPerUserNotBesideTheExecutable: the
 // exe-adjacent path is issue #118's failure again — a device key written next to
 // a binary in a system directory fails on permissions for the ordinary user, and
@@ -509,6 +774,20 @@ func TestClearClaimCodeOnAFreshInstallIsNotAnError(t *testing.T) {
 	}
 }
 
+// deprecatedConfigKeys are read for back-compat and deliberately kept OUT of the
+// template. The template is what a new deployment copies, so a key that exists
+// only so an existing installation keeps working would teach the spelling being
+// retired to everyone who has no reason to use it.
+//
+// Naming them here rather than skipping "anything with omitempty" is the point:
+// the exemption is a list somebody has to add to on purpose, and the test below
+// checks both directions, so a deprecated key cannot drift back into the template
+// and a live key cannot be excused from it by accident.
+var deprecatedConfigKeys = map[string]string{
+	// bacchus#192: superseded by accountServiceUrls, read for one release.
+	"accountServiceUrl": "accountServiceUrls",
+}
+
 // TestTheExampleConfigCarriesEveryFieldAJSONConfigCanSet: the template is what
 // an operator copies, and a field missing from it is a field nobody knows to
 // set — which is how AdmissionPubKey came to be unreachable before #93.
@@ -528,7 +807,14 @@ func TestTheExampleConfigCarriesEveryFieldAJSONConfigCanSet(t *testing.T) {
 			continue
 		}
 		name, _, _ := strings.Cut(tag, ",")
-		if _, ok := raw[name]; !ok {
+		_, ok := raw[name]
+		if replacement, deprecated := deprecatedConfigKeys[name]; deprecated {
+			if ok {
+				t.Errorf("bacchus-fyne.config.example.json still offers %q, which is superseded by %q — a new deployment copying the template would start on the key being retired", name, replacement)
+			}
+			continue
+		}
+		if !ok {
 			t.Errorf("bacchus-fyne.config.example.json has no %q key, so an operator copying the template cannot discover it", name)
 		}
 	}

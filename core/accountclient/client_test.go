@@ -180,7 +180,7 @@ func (f *fakeService) bodyFor(path string) []byte {
 
 func (f *fakeService) client(t *testing.T) *Client {
 	t.Helper()
-	c, err := New(Config{BaseURL: f.srv.URL, Audience: testAudience, ServerCAFile: f.ca})
+	c, err := New(Config{BaseURLs: []string{f.srv.URL}, Audience: testAudience, ServerCAFile: f.ca})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -252,12 +252,14 @@ func TestNewRefusesUnpinnableConfigurations(t *testing.T) {
 		cfg  Config
 		want string
 	}{
-		{"no base URL", Config{Audience: "a", ServerCAFile: f.ca}, "BaseURL is required"},
-		{"plain http", Config{BaseURL: "http://x.example", Audience: "a", ServerCAFile: f.ca}, "must be https"},
-		{"base carries a path", Config{BaseURL: "https://x.example/api", Audience: "a", ServerCAFile: f.ca}, "scheme and host only"},
-		{"no audience", Config{BaseURL: "https://x.example", ServerCAFile: f.ca}, "Audience is required"},
-		{"no pinned CA", Config{BaseURL: "https://x.example", Audience: "a"}, "ServerCAFile is required"},
-		{"CA file missing", Config{BaseURL: "https://x.example", Audience: "a", ServerCAFile: filepath.Join(t.TempDir(), "nope.pem")}, "read ServerCAFile"},
+		{"no base URL at all", Config{Audience: "a", ServerCAFile: f.ca}, "at least one BaseURL is required"},
+		{"a list of blanks", Config{BaseURLs: []string{"", "  "}, Audience: "a", ServerCAFile: f.ca}, "at least one BaseURL is required"},
+		{"plain http", Config{BaseURLs: []string{"http://x.example"}, Audience: "a", ServerCAFile: f.ca}, "must be https"},
+		{"plain http on the second address", Config{BaseURLs: []string{"https://x.example", "http://y.example"}, Audience: "a", ServerCAFile: f.ca}, "must be https"},
+		{"base carries a path", Config{BaseURLs: []string{"https://x.example/api"}, Audience: "a", ServerCAFile: f.ca}, "scheme and host only"},
+		{"no audience", Config{BaseURLs: []string{"https://x.example"}, ServerCAFile: f.ca}, "Audience is required"},
+		{"no pinned CA", Config{BaseURLs: []string{"https://x.example"}, Audience: "a"}, "ServerCAFile is required"},
+		{"CA file missing", Config{BaseURLs: []string{"https://x.example"}, Audience: "a", ServerCAFile: filepath.Join(t.TempDir(), "nope.pem")}, "read ServerCAFile"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -278,7 +280,7 @@ func TestNewRefusesACAFileThatIsNotOne(t *testing.T) {
 	if err := os.WriteFile(p, []byte("this is not a certificate\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := New(Config{BaseURL: "https://x.example", Audience: "a", ServerCAFile: p})
+	_, err := New(Config{BaseURLs: []string{"https://x.example"}, Audience: "a", ServerCAFile: p})
 	if err == nil || !strings.Contains(err.Error(), "no PEM certificate") {
 		t.Fatalf("New = %v, want a refusal naming the file as holding no certificate", err)
 	}
@@ -293,7 +295,7 @@ func TestClientDoesNotTrustThePublicRootPool(t *testing.T) {
 	b := newFakeService(t)
 
 	// Pinned to a, pointed at b.
-	c, err := New(Config{BaseURL: b.srv.URL, Audience: testAudience, ServerCAFile: a.ca})
+	c, err := New(Config{BaseURLs: []string{b.srv.URL}, Audience: testAudience, ServerCAFile: a.ca})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -282,15 +282,16 @@ operator scripting a deployment need not open a dialog.
 
 ### The account service (bacchus#163, ADR-0056)
 
-Six optional keys. **Leaving all six empty is a complete deployment, not a degraded
-one** — the same posture `admissionPubKey` has. A coordinator's device-credential
+Six optional keys, plus one superseded spelling. **Leaving all of them empty is a
+complete deployment, not a degraded one** — the same posture `admissionPubKey` has. A coordinator's device-credential
 gate is off unless its operator turned it on, and a Bacchus network with no
 entitlement authority is a supported shape. None of these is in Settings; like
 `coordinators`, they are operator configuration rather than user preference.
 
 | key | what it is |
 | --- | --- |
-| `accountServiceUrl` | `https://host:port` — scheme and host only, no path. Plain `http` is refused at startup, not downgraded: the assertions this client signs authenticate it *to* the service and cover no response byte, so the credential travelling back is unprotected without TLS. |
+| `accountServiceUrls` | A list of `https://host:port` — scheme and host only, no path, one per address the service can be reached at. Plain `http` is refused at startup, not downgraded: the assertions this client signs authenticate it *to* the service and cover no response byte, so the credential travelling back is unprotected without TLS. The order is the preference order; an address that does not answer is set aside for 30s and the next is tried, and a whole exchange always runs against one address because a challenge is state the address that minted it holds. See below for why it is a list. |
+| `accountServiceUrl` | **Superseded by `accountServiceUrls`** (bacchus#192), still read for one release so an installed client keeps working across the upgrade. It is used only when `accountServiceUrls` is empty; if both are set, the list wins and this is ignored (the client logs that it did). Nothing rewrites your file to migrate it. |
 | `accountServiceAudience` | The service's own identity, bound into every assertion this device signs. It is deliberately never in any response, so it has to arrive out of band — a client that read it from the reply it was about to sign against would let the responder choose the binding. |
 | `accountServiceCa` | Path to a PEM file authenticating the service's TLS identity. Required whenever the URL is set, and the public root pool is never consulted even as a fallback: the service is reached under a name chosen for camouflage, so a publicly-trusted certificate for that name authenticates the decoy. |
 | `deviceCredDir` | Where this device's keypair, device credential, issuer cert and admission credential live across restarts. **Empty is not "off"** — it defaults to a `device/` directory beside the per-user config file (mode 0700). Pointing it somewhere unwritable is a hard failure at Connect, not a silent fresh identity. |
@@ -298,8 +299,22 @@ entitlement authority is a supported shape. None of these is in Settings; like
 | `deviceLabel` | What the account's owner sees this device called in their own device list. It travels to the service in the clear and is stored there. This client **never** derives it from the machine — a hostname is a username on most desktops and a real name on many. Empty uses `desktop`, and every device sharing that label is the intended outcome. |
 
 The three `accountService*` keys are one group an operator hands over together:
-setting the URL without the audience or the CA is refused at Connect, naming the
+setting a URL without the audience or the CA is refused at Connect, naming the
 missing one, rather than falling back to something that would appear to work.
+
+**Why the address is a list (bacchus#192).** The account service runs on
+anonymously rented infrastructure and its address will change. A device renews as
+soon as it enters its renewal margin and holds the rest as slack, so a service
+that becomes unreachable at *T* takes the first devices offline at *T* + ~6 h —
+not the 42 hours between renewals. Naming the successor address here *before* the
+move is what makes a planned move survivable: the client rotates to it by itself,
+with nothing to re-download and nobody to tell. It does not help an *unplanned*
+move, where a list the client cannot update goes stale together.
+
+Every address shares the one `accountServiceAudience` and the one
+`accountServiceCa`. There is deliberately no per-address CA or audience, which is
+what keeps this a list of **locations** and never a list of trust roots: an
+address that does not present the pinned identity is unreachable, not trusted.
 
 Enrollment happens **inside** the connect, at the moment the user asked for the
 network, and never blocks it on the account service being reachable: an
