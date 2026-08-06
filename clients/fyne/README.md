@@ -29,6 +29,47 @@ language (Russian or English, following the OS locale; see i18n below), a **coun
 picker** underneath it, and one button that's always "the one thing you can do
 right now" (Connect, wait, or Disconnect).
 
+### Running it: one copy, a tray, and a log (bacchus#185/#186/#187, ADR-0058)
+
+**Only one Bacchus client runs at a time.** Start a second and it says so and stops.
+That is not tidiness: the kill-switch is machine-wide and its rules are removed by
+group, so before this guard existed the first client to disconnect disarmed the
+second one's kill-switch while it was still connected and still saying Protected.
+The guard is a named mutex on Windows (`Global\BacchusVpnClient` and
+`BacchusVpnClient`, which `deploy/windows/bacchus.iss` also names in `AppMutex`, so
+Setup and Uninstall refuse while a client is running) and an exclusive `flock` on
+`<config dir>/Bacchus/client.lock` on Linux. Both are released by the kernel when
+the process dies, so a crashed client does not lock you out of the next one.
+
+**Closing the window tucks Bacchus into the system tray; it does not disconnect.**
+The tray carries the current state, Connect/Disconnect, "Show Bacchus" and Quit.
+**Quit** is the only gesture that ends the session, and it disconnects, lifts the
+kill-switch and takes the routes out *before* the process exits — the File menu's
+Quit is the same action. The first time you close the window in a given run, it
+says once that Bacchus is still running, because a program that vanishes from the
+screen and stays in the process list looks like a leak.
+
+Where there is no tray, closing the window keeps the old behaviour — disconnect and
+exit — rather than hiding into nothing. On Windows there is always a notification
+area. On Linux the client asks the session bus whether a StatusNotifierItem host is
+registered (the same mechanism Fyne's tray uses): present on KDE, XFCE and Cinnamon,
+absent on a stock GNOME session without an extension.
+
+**Bacchus keeps a log file, on by default.** `%APPDATA%\Bacchus\bacchus.log` on
+Windows, `$XDG_CONFIG_HOME/Bacchus/bacchus.log` on Linux — the same directory as the
+config, so the Windows uninstaller's "remove your settings?" takes it with
+everything else. It is capped (256 KiB, one previous generation kept as
+`bacchus.log.1`), every line has IP addresses and your home directory path removed
+before it is written, and **Settings has a "Keep a log file" switch that turns it off
+and deletes what is there**. It contains no traffic and no credentials — see ADR-0058
+for what each writer may put in it.
+
+It is on by default because the failures it exists for are silent: you do not find
+out anything is wrong until connecting stops, which is exactly too late to have
+enabled logging. Before it existed, a Windows user could not produce a log at all —
+the shipping binary is linked `-H=windowsgui`, which has no console, so everything
+written to stderr went nowhere.
+
 ### The country picker (bacchus#16, ADR-0055)
 **You choose a country; the coordinator chooses the machine inside it.** Naming an
 exact exit is not a thing any client can do — country-only assignment (issue #146,
