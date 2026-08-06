@@ -147,7 +147,7 @@ Hard requirements on top:
   degraded (e.g. obfuscated-WireGuard variants that survive in some operators).
   This is the same partial-transport-union principle as the data plane.
 
-#### 4.1.1 What is built, as of ADR-0059 — and what is not
+#### 4.1.1 What is built, as of ADR-0059 and ADR-0060 — and what is not
 
 This section stated a requirement for **years** that the code did not meet, and in
 a way that was invisible from either side: the DTLS/ICE fingerprint machinery
@@ -163,7 +163,7 @@ So this table, rather than prose, and it is kept honest as the slices land:
 | §4.1 requirement | State |
 |---|---|
 | First contact is DTLS-shaped rather than cleartext | **Coordinator half built** (ADR-0059, `#175` slice 1). It accepts DTLS alongside raw JSON on one signaling port. The **client** still sends cleartext — that is slice 2 |
-| Actually STUN/WebRTC-shaped, not merely DTLS-shaped | **Not built** — `#202`. A DTLS handshake with no ICE connectivity checks in front of it on the same 5-tuple is not what a browser produces, and `core/ice_fingerprint.go` has no caller at this hop until it is |
+| Actually STUN/WebRTC-shaped, not merely DTLS-shaped | **Coordinator half built** (ADR-0060, `#202`). The signaling port answers any well-formed Binding Request with the same two attributes the TURN port on `-turn-addr` already answers with — byte-identical by construction, since two ports on one host answering differently would be a distinguisher in itself. The **client** emits no prefix yet: that is slice 2, and the responder is deliberately deployed first because a client whose check goes unanswered stalls its own handshake. `core/ice_fingerprint.go` gains its first caller at this hop when slice 2 lands |
 | Randomize the DTLS/ICE fingerprint | **Not applied at this hop** — slice 3. The profiles exist and `dtls.Config` takes their hooks directly; what is missing is a `dtls.Config` counterpart to `dtlsProfile.apply`, which takes a `*webrtc.SettingEngine` |
 | Do not rely on QUIC mimicry | Held — nothing here uses QUIC |
 | **A transport pool with per-user failover at this hop** | **Not built.** `#175` stays open for it. The hop still has one protocol, no probe, no race and no per-`NetworkKey()` learning — every one of which the data plane has had since ADR-0028 |
