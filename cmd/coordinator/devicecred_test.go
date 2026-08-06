@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bacchus-vpn/bacchus/core/admission"
 	"github.com/bacchus-vpn/bacchus/core/devicecred"
 )
 
@@ -386,7 +387,7 @@ func TestExpiredChallengeIsRefused(t *testing.T) {
 	s := &challengeStore{entries: map[string]pendingChallenge{}}
 	now := time.Now()
 
-	v := s.issue("peer", now)
+	v := s.issue("peer", "", now)
 	if v == nil {
 		t.Fatal("issue returned nothing")
 	}
@@ -395,7 +396,7 @@ func TestExpiredChallengeIsRefused(t *testing.T) {
 		t.Fatal("a challenge expired before its TTL")
 	}
 
-	v = s.issue("peer", now)
+	v = s.issue("peer", "", now)
 	if v == nil {
 		t.Fatal("issue returned nothing")
 	}
@@ -418,12 +419,12 @@ func TestChallengeStoreIsBounded(t *testing.T) {
 	s := &challengeStore{entries: map[string]pendingChallenge{}, capacity: testCap}
 	now := time.Now()
 
-	honest := s.issue("honest-client", now)
+	honest := s.issue("honest-client", "", now)
 	if honest == nil {
 		t.Fatal("the first issue failed")
 	}
 	for i := 0; i < testCap*4; i++ {
-		s.issue(spoofKey(i), now)
+		s.issue(spoofKey(i), "", now)
 	}
 	if got := s.len(); got > testCap {
 		t.Fatalf("store holds %d entries, above the %d cap", got, testCap)
@@ -434,7 +435,7 @@ func TestChallengeStoreIsBounded(t *testing.T) {
 	}
 
 	// Expiry frees the store again: once the flood ages out, issuing resumes.
-	if v := s.issue("later-client", now.Add(deviceChallengeTTL+time.Second)); v == nil {
+	if v := s.issue("later-client", "", now.Add(deviceChallengeTTL+time.Second)); v == nil {
 		t.Fatal("the store never recovered after its entries expired")
 	}
 }
@@ -503,5 +504,215 @@ func TestRetransmittedConnectIsNotRefusedByTheGate(t *testing.T) {
 		} else if r.Session != first.Session || r.ExitID != first.ExitID {
 			t.Errorf("copy %d answered session=%q exit=%q; copy 1 answered session=%q exit=%q", i+1, r.Session, r.ExitID, first.Session, first.ExitID)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The admission credential stashed on the challenge (issue #183, ADR-0057).
+//
+// A client that completes the challenge exchange leaves the admission credential
+// off the connect that follows, because carrying it on both is what pushed that
+// datagram past a 1280-byte path. These cover the coordinator's half: the stash is
+// readable by the connect, it holds nothing that was not verified, and it widens
+// nothing.
+// ---------------------------------------------------------------------------
+
+// TestConnectIsAdmittedFromTheCredentialStashedOnItsChallenge is the headline: a
+// connect carrying NO credential is admitted on the one its own challenge carried.
+func TestConnectIsAdmittedFromTheCredentialStashedOnItsChallenge(t *testing.T) {
+	setPC(t)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	setAdmission(t, pub, nil)
+	c := mintChain(t, chainWindow{})
+	setDeviceGate(t, c.rootPub, "coord-1")
+	peer := fakePeer(t)
+	src := peer.LocalAddr().(*net.UDPAddr)
+	_, enc := issueCred(t, priv, "device-1", admission.RoleClient)
+
+	// The challenge carries the credential, exactly as core's presentDeviceCredential
+	// sends it.
+	handle(wire{Type: "challenge", Cred: enc}, src)
+	reply, ok := readReply(t, peer, time.Second)
+	if !ok || reply.Type != "challenge" || reply.Challenge == "" {
+		t.Fatalf("challenge request answered %+v (ok=%v); want an issued nonce", reply, ok)
+	}
+
+	// The connect that follows carries none, and must still be admitted.
+	got := admissionCredFor(wire{Type: "connect", Nonce: "req-1"}, src)
+	if got != enc {
+		t.Fatalf("a connect with no credential resolved %q; want the one its challenge carried", got)
+	}
+	if _, ok := admit(wire{Type: "connect", Cred: got, Nonce: "req-1"}, src, admission.RoleClient, ""); !ok {
+		t.Fatal("the stashed credential did not pass admission — a client that puts it on the challenge could never connect")
+	}
+}
+
+// TestNothingIsStashedWithoutAnAuthorityToVerifyAgainst. With no admission authority
+// anchored, admit() admits everyone and m.Cred is an unverified, unbounded,
+// attacker-chosen string arriving on a SPOOFABLE UDP source. Keeping it would hand a
+// spoofer a per-entry memory multiplier on a store whose whole design is a bound; and
+// there is nothing to keep it FOR, because the connect that follows is admitted on
+// the same absent gate.
+func TestNothingIsStashedWithoutAnAuthorityToVerifyAgainst(t *testing.T) {
+	setPC(t)
+	c := mintChain(t, chainWindow{})
+	setDeviceGate(t, c.rootPub, "coord-1") // device gate on, admission deliberately off
+	peer := fakePeer(t)
+	src := peer.LocalAddr().(*net.UDPAddr)
+
+	handle(wire{Type: "challenge", Cred: strings.Repeat("A", 4096)}, src)
+	if _, ok := readReply(t, peer, time.Second); !ok {
+		t.Fatal("no reply to a challenge request")
+	}
+	if got := challenges.stashedCred(challengeKey(src), time.Now()); got != "" {
+		t.Fatalf("stashed %d bytes of unverified, caller-supplied credential; want nothing kept", len(got))
+	}
+}
+
+// TestAStashedCredentialDiesWithItsChallenge. The stash has no life of its own: it
+// is read out of the challenge entry, so the entry's TTL is its TTL. A connect that
+// arrives after the nonce expired is refused by admitDevice anyway — this pins that
+// it is not admitted by a credential that outlived it either.
+func TestAStashedCredentialDiesWithItsChallenge(t *testing.T) {
+	s := &challengeStore{entries: map[string]pendingChallenge{}}
+	now := time.Now()
+	if v := s.issue("peer", "bacchusc1:whatever", now); v == nil {
+		t.Fatal("issue returned nothing")
+	}
+	if got := s.stashedCred("peer", now.Add(deviceChallengeTTL-time.Nanosecond)); got == "" {
+		t.Fatal("the stash expired before its challenge did")
+	}
+	if got := s.stashedCred("peer", now.Add(deviceChallengeTTL)); got != "" {
+		t.Fatalf("a challenge exactly at its expiry still yielded %q", got)
+	}
+	if got := s.stashedCred("someone-else", now); got != "" {
+		t.Fatalf("a source with no outstanding challenge yielded %q — the stash is per-source or it is nothing", got)
+	}
+}
+
+// TestAConnectThatCarriesACredentialIsJudgedOnThatOne. The stash is a fallback, not
+// an override: verifying what was actually sent is both the simpler rule and the one
+// a stash cannot be used to bend.
+func TestAConnectThatCarriesACredentialIsJudgedOnThatOne(t *testing.T) {
+	setPC(t)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	setAdmission(t, pub, nil)
+	c := mintChain(t, chainWindow{})
+	setDeviceGate(t, c.rootPub, "coord-1")
+	peer := fakePeer(t)
+	src := peer.LocalAddr().(*net.UDPAddr)
+	_, stashed := issueCred(t, priv, "device-1", admission.RoleClient)
+	_, carried := issueCred(t, priv, "device-2", admission.RoleClient)
+
+	handle(wire{Type: "challenge", Cred: stashed}, src)
+	if _, ok := readReply(t, peer, time.Second); !ok {
+		t.Fatal("no reply to a challenge request")
+	}
+	if got := admissionCredFor(wire{Type: "connect", Cred: carried}, src); got != carried {
+		t.Fatalf("a connect carrying its own credential resolved %q; want the one it sent", got)
+	}
+}
+
+// TestTheStashCannotOutliveTheDeviceGate is the security argument written as a test.
+// An entry exists only while the DEVICE gate is enabled — issueDeviceChallenge
+// returns before touching the store otherwise — so the stash can never be the thing
+// that admits a connect which admitDevice would not also have to admit. That is what
+// keeps a blind spoofer, who can forge a source address but cannot see the nonce sent
+// to it, from spending someone else's stashed credential.
+func TestTheStashCannotOutliveTheDeviceGate(t *testing.T) {
+	setPC(t)
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	setAdmission(t, pub, nil)
+	resetChallenges()
+	t.Cleanup(resetChallenges)
+	peer := fakePeer(t)
+	src := peer.LocalAddr().(*net.UDPAddr)
+	_, enc := issueCred(t, priv, "device-1", admission.RoleClient)
+
+	// deviceVerifier is nil here: no setDeviceGate call.
+	handle(wire{Type: "challenge", Cred: enc}, src)
+	if _, ok := readReply(t, peer, time.Second); !ok {
+		t.Fatal("no reply to a challenge request")
+	}
+	if got := challenges.len(); got != 0 {
+		t.Fatalf("the disabled device gate created %d challenge entries; want none", got)
+	}
+	if got := admissionCredFor(wire{Type: "connect"}, src); got != "" {
+		t.Fatalf("a connect resolved %q with the device gate off; want nothing", got)
+	}
+}
+
+// TestAWholeExchangeWithTheCredentialOnlyOnTheChallenge drives handle() end to end
+// with both gates on: a "challenge" carrying the admission credential, then a
+// "connect" carrying the device chain and NO credential, which must come back a
+// session.
+//
+// The unit tests above cover the store and the resolver; this covers the WIRING, and
+// it exists because deleting the one line in main.go's connect handler that consults
+// the stash left every one of them passing. A resolver nothing calls admits nobody.
+func TestAWholeExchangeWithTheCredentialOnlyOnTheChallenge(t *testing.T) {
+	setPC(t)
+	resetRegistry(t)
+	// The fleet registers BEFORE admission is switched on. registerExit goes through
+	// handle() with no credential of its own, and an exit refused at admission leaves
+	// the country empty — which comes back "no-such-country" and would have this test
+	// passing or failing on the fixture rather than on the client path it is about.
+	exitFleet(t, 3, "NL")
+	pub, priv, _ := ed25519.GenerateKey(nil)
+	setAdmission(t, pub, nil)
+	c := mintChain(t, chainWindow{})
+	setDeviceGate(t, c.rootPub, "coord-1")
+	client := fakePeer(t)
+	src := client.LocalAddr().(*net.UDPAddr)
+	_, enc := issueCred(t, priv, "device-1", admission.RoleClient)
+
+	// Exactly what core sends: the credential rides the challenge.
+	handle(wire{Type: "challenge", Cred: enc}, src)
+	reply := recvWire(t, client, time.Second)
+	if reply.Type != "challenge" || reply.Challenge == "" {
+		t.Fatalf("challenge answered %+v; want an issued nonce", reply)
+	}
+
+	// And the connect that follows carries the device chain but no credential.
+	m := c.connectMsg(t, "coord-1", reply.Challenge)
+	m.Nonce = randID()
+	m.Country = "NL"
+	m.Mode = "direct"
+	if m.Cred != "" {
+		t.Fatal("the fixture connect carries a credential; this test is about one that does not")
+	}
+	handle(m, src)
+
+	got := recvWire(t, client, time.Second)
+	if got.Type != "session" {
+		t.Fatalf("a connect whose credential rode its challenge was answered %s (%s); want a session — an admission-enforcing coordinator that does not read the stash refuses every connect from an up-to-date client", got.Type, got.Reason)
+	}
+}
+
+// TestAConnectWithNoCredentialAndNoChallengeIsStillRefused. The stash must widen
+// nothing: with an authority anchored, a connect that presents neither a credential
+// of its own nor a challenge that carried one is exactly as unwelcome as it was
+// before #183.
+func TestAConnectWithNoCredentialAndNoChallengeIsStillRefused(t *testing.T) {
+	setPC(t)
+	resetRegistry(t)
+	exitFleet(t, 3, "NL") // before admission — see the test above
+	pub, _, _ := ed25519.GenerateKey(nil)
+	setAdmission(t, pub, nil)
+	resetChallenges()
+	t.Cleanup(resetChallenges)
+	client := fakePeer(t)
+	src := client.LocalAddr().(*net.UDPAddr)
+
+	handle(wire{Type: "connect", Nonce: randID(), Country: "NL", Mode: "direct"}, src)
+
+	// A "reject" specifically, which is admission's refusal — not an "error" about
+	// the country, which would mean this test never reached the gate it is about.
+	got := recvWire(t, client, time.Second)
+	if got.Type != "reject" {
+		t.Fatalf("an uncredentialed connect with no challenge behind it was answered %s (%s); want admission's reject — the stash must not become a way past admission", got.Type, got.Reason)
+	}
+	if got := sessionCount(); got != 0 {
+		t.Fatalf("%d sessions minted for an uncredentialed connect", got)
 	}
 }

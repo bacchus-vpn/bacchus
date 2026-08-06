@@ -18,12 +18,14 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -31,6 +33,33 @@ import (
 // deprioritized for. It is still tried if every pool member is cooling down —
 // a slow retry beats a client that refuses to connect at all.
 const coordCooldown = 30 * time.Second
+
+// safePathMTU is the path MTU every rendezvous datagram is sized to fit, and it
+// is 1280 rather than Ethernet's 1500 for two independent reasons that happen to
+// give the same number (issue #183, ADR-0057):
+//
+//   - It is the IPv6 minimum link MTU (RFC 8200 §5), which every IPv6 path is
+//     required to carry. A path that has fallen back to it is still a working
+//     path, so a datagram that does not fit is this client's problem and nobody
+//     else's.
+//   - It is Tailscale's default tunnel MTU, and the same order as WireGuard's
+//     common 1420 and the ~1400 carrier paths clamp to. Bacchus is a
+//     censorship-resistant VPN: running INSIDE another tunnel is not an exotic
+//     deployment, it is the deployment of the users most likely to need it.
+//
+// 1500 is a bet on the path. 1280 is the floor the path is allowed to have.
+const safePathMTU = 1280
+
+// maxRendezvousPayload is the largest UDP payload that fits safePathMTU: the MTU
+// less a 40-byte IPv6 header and an 8-byte UDP header. IPv4 leaves more room (20
+// bytes of header at minimum, so 1252), so sizing to the IPv6 arithmetic covers
+// both — which is the point, since a client does not choose which one its path is.
+//
+// It does NOT account for IPv6 extension headers or for an outer encapsulation
+// this client cannot see. What it buys is that the datagram fits a path that is
+// merely at the floor, not that it fits every conceivable path; the send-error
+// reporting below is what covers the rest, because no constant can.
+const maxRendezvousPayload = safePathMTU - 40 - 8
 
 // coordLink is one live UDP connection to a single coordinator pool member.
 // Sends are serialized per link (each link is written from the register loop,
@@ -64,6 +93,30 @@ type coordLink struct {
 	// consistent with anything else, only a monotonic count to compare against a
 	// snapshot.
 	unroutableN atomic.Uint64
+
+	// sendNotes memoizes the send-side diagnostics below, keyed by cause and message
+	// type, for the reason unroutable is memoized: a condition that recurs per
+	// datagram — and every one of these does, because sendN puts three copies of each
+	// connect on the wire and the client retries — turns the log into a flood, and a
+	// flooded log is as good as a silent one.
+	sendNotesMu sync.Mutex
+	sendNotes   map[string]bool
+
+	// tooLargeN counts datagrams this link's socket refused FOR THEIR SIZE, including
+	// the ones the memo above suppresses from the log. Same split as unroutableN and
+	// the same reason: the memo bounds reporting, this is the control-flow signal a
+	// waiting leg reads, and conflating them would make a second refused connect look
+	// exactly like a coordinator that stayed silent (issue #183).
+	//
+	// SIZE specifically, and not "any write error", which is the trap here. A
+	// connected UDP socket surfaces the ICMP port-unreachable from a dead coordinator
+	// as ECONNREFUSED on the NEXT write — so a member that is genuinely unreachable
+	// fails the write too, and counting that here would reclassify the one condition
+	// ErrNoCoordinatorReachable exists to name. EMSGSIZE is the only write error that
+	// says something about this host rather than about the peer, and it is the only
+	// one that changes what the client concludes. Every other write failure is still
+	// LOGGED (see noteSendFailed) and still reads as silence, exactly as before.
+	tooLargeN atomic.Uint64
 }
 
 // answeredUnroutably reports whether this member produced a reply readLoop could not
@@ -116,20 +169,142 @@ func (l *coordLink) noteUnroutable(e *Engine, msgType, why string) {
 		l.raw, shown, why)
 }
 
-func (l *coordLink) send(m wire) {
+// tooLargeMark snapshots the refused-for-size count so a caller can tell whether THIS
+// attempt drew one, exactly as unroutableMark does for the receive side.
+func (l *coordLink) tooLargeMark() uint64 { return l.tooLargeN.Load() }
+
+// refusedForSize reports whether a datagram this link was asked to send was refused
+// for its size since the caller took `before` from [coordLink.tooLargeMark].
+//
+// It is the send-side twin of answeredUnroutably, and it exists for the same reason:
+// without it, a request that never left the host is indistinguishable at the waiting
+// leg from a coordinator that never answered — so a definitive LOCAL fault is
+// reported as "no coordinator reachable", which is the mesh-walk trigger (issue #31)
+// and the sentence a user on a censored network will believe and report. Rediscovering
+// coordinator addresses cannot help a datagram that does not fit the path, and walking
+// the mesh to find that out costs the user a working diagnosis (issue #183).
+func (l *coordLink) refusedForSize(before uint64) bool {
+	return l.tooLargeN.Load() > before
+}
+
+// noteOnce reports whether this is the first time (cause, msgType) has been seen on
+// this link, latching it either way. Callers use it to bound a per-datagram condition
+// to one line per member per kind.
+func (l *coordLink) noteOnce(cause, msgType string) bool {
+	l.sendNotesMu.Lock()
+	defer l.sendNotesMu.Unlock()
+	if l.sendNotes == nil {
+		l.sendNotes = map[string]bool{}
+	}
+	k := cause + "/" + msgType
+	first := !l.sendNotes[k]
+	l.sendNotes[k] = true
+	return first
+}
+
+// isMessageTooLong reports whether err is the kernel refusing a datagram for its
+// size — EMSGSIZE, the same error `ping -M do` prints as "Message too long".
+//
+// It checks two errnos on purpose. On Unix the socket layer returns
+// syscall.EMSGSIZE and errors.Is finds it through net.OpError and os.SyscallError.
+// On Windows it returns WSAEMSGSIZE (10040), and syscall.EMSGSIZE on that platform
+// is one of the "invented values to support what package os expects"
+// (syscall/zerrors_windows.go) — a number no socket ever produces — so matching only
+// the named constant would silently never fire on half of the platforms 1.0 ships
+// to. The public syscall package does not export WSAEMSGSIZE (only the unimportable
+// internal/syscall/windows does), so the number is written out here rather than
+// named. On Unix, errno 10040 is not a value any socket returns either, so the extra
+// comparison is inert rather than merely harmless.
+func isMessageTooLong(err error) bool {
+	const wsaEMsgSize = syscall.Errno(10040) // Windows: WSAEMSGSIZE
+	return errors.Is(err, syscall.EMSGSIZE) || errors.Is(err, wsaEMsgSize)
+}
+
+// noteSendFailed reports, once per distinct message type, that a datagram this link
+// was asked to send never left the host — and, when the reason was its SIZE, counts
+// it every time so a waiting leg can act on it.
+//
+// The two halves are deliberately not the same set:
+//
+//   - Logging covers every write error, because "we never sent it" is worth a line
+//     whatever the reason, and before #183 there was no line at all.
+//   - Counting covers EMSGSIZE only. A connected UDP socket reports a dead peer's
+//     ICMP port-unreachable as ECONNREFUSED on the next write, so every genuinely
+//     unreachable coordinator fails a write too — counting those would turn the
+//     condition ErrNoCoordinatorReachable is FOR into a size complaint. See tooLargeN.
+//
+// EMSGSIZE gets its own sentence because it is a COMPLETE diagnosis: the kernel has
+// said the datagram is too big for the path, the size is known here, and the safe
+// floor is a constant a few lines up. Everything a user needs to understand the
+// failure is in hand at this point — which is why discarding it (issue #183: `_, _ =
+// l.conn.Write(b)`) turned a one-line answer into a two-hour misdiagnosis that
+// pointed at the coordinator.
+func (l *coordLink) noteSendFailed(e *Engine, msgType string, size int, err error) {
+	tooLarge := isMessageTooLong(err)
+	if tooLarge {
+		// Counted before the memo and every time, for the reason noteUnroutable gives:
+		// suppressing the count as well would make the second refusal look like silence
+		// to the leg waiting on it.
+		l.tooLargeN.Add(1)
+	}
+	cause := "send-failed"
+	if tooLarge {
+		cause = "too-large"
+	}
+	if !l.noteOnce(cause, msgType) {
+		return
+	}
+	if tooLarge {
+		e.emit(EventError, "", "the %d-byte %q datagram for coordinator %s is too large for this network path and was NOT sent (the local network stack refused it): the path's MTU is below %d bytes. This is a local path limit, not a blocked or unreachable coordinator. Bacchus sizes rendezvous to fit a %d-byte path (%d bytes of payload); a path below that is usually another VPN or tunnel wrapping this one",
+			size, msgType, l.raw, size+28, safePathMTU, maxRendezvousPayload)
+		return
+	}
+	e.emit(EventError, "", "the %d-byte %q datagram for coordinator %s could not be sent and was dropped locally: %v",
+		size, msgType, l.raw, err)
+}
+
+// noteOversize warns, once per distinct message type, that a datagram this build
+// produced exceeds maxRendezvousPayload — whether or not this particular path
+// happened to carry it.
+//
+// This is the half that does not need a small path to fire. #183 shipped because
+// loopback's MTU is 65536, so every unit test, both PR CI runs and the wave's
+// combination build carried a 1453-byte connect without complaint and stayed green;
+// the defect was found by a person on real hardware two days later. A size check at
+// the point of send costs one comparison, needs no network at all, and would have
+// said so on the developer's own machine the moment the datagram grew.
+func (l *coordLink) noteOversize(e *Engine, msgType string, size int) {
+	if !l.noteOnce("oversize", msgType) {
+		return
+	}
+	e.emit(EventError, "", "this build's %q datagram for coordinator %s is %d bytes, over the %d-byte payload that fits a %d-byte path — it will be delivered on an ordinary Ethernet path and refused on any path at the IPv6 minimum MTU (another VPN, a tunnel, or a clamped mobile link). See issue #183",
+		msgType, l.raw, size, maxRendezvousPayload, safePathMTU)
+}
+
+func (l *coordLink) send(e *Engine, m wire) {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
 	b, _ := json.Marshal(m)
-	if l.conn != nil {
-		_, _ = l.conn.Write(b)
+	if len(b) > maxRendezvousPayload {
+		l.noteOversize(e, m.Type, len(b))
+	}
+	if l.conn == nil {
+		return
+	}
+	// The whole reason this is not `_, _ = l.conn.Write(b)` — see noteSendFailed
+	// and issue #183. A write error here is a local, definitive fact about a datagram
+	// that never reached the network; dropping it leaves the client to infer, from
+	// the silence that follows, that the coordinator is unreachable.
+	if _, err := l.conn.Write(b); err != nil {
+		l.noteSendFailed(e, m.Type, len(b), err)
 	}
 }
 
 // sendN sends m n times, spaced out, to ride over UDP loss on the rendezvous
 // path (the coordinator dedupes; see cmd/coordinator).
-func (l *coordLink) sendN(m wire, n int) {
+func (l *coordLink) sendN(e *Engine, m wire, n int) {
 	for i := 0; i < n; i++ {
-		l.send(m)
+		l.send(e, m)
 		time.Sleep(60 * time.Millisecond)
 	}
 }

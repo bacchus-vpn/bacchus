@@ -48,13 +48,39 @@ recipient out of band, and a client credential travels the same way.
 The coordinator is the single matchmaking chokepoint (ADR-0015), so that is the
 one place a credential is checked. The credential rides in the `cred` field of
 the existing coordinator envelope; the engine attaches it to every message that
-needs it (`register`, `list`, `connect`).
+needs it (`register`, `list`, `challenge`, `connect`).
 
 | Handler   | Role checked | Subject binding | On reject |
 |-----------|--------------|-----------------|-----------|
 | `register`| the registering role (`relay`/`exit`) | bound to `m.ID` (the node id) | not added to the directory; `reject` sent |
 | `list`    | `client`     | none (bearer)   | no exit list; `reject` sent |
+| `challenge` | `client`   | none (bearer)   | no nonce issued; `reject` sent |
 | `connect` | `client`     | none (bearer)   | no session; `reject` sent |
+
+### `connect` is judged on a credential that may have arrived a round trip earlier
+
+`challenge` (ADR-0045) and `connect` are two messages of one exchange, and before
+ADR-0057 a client put the credential on **both** — 437 bytes of the same value,
+twice, per connect attempt. That is what pushed `connect` to 1453 bytes and off
+any path at the IPv6 minimum MTU (#183).
+
+A client now sends it once. Which message it rides is decided by whether the
+challenge exchange completed:
+
+- **A challenge was answered** — the coordinator issued a live nonce for this
+  source, so the credential rode the `challenge` and the `connect` carries none.
+  The coordinator verified it there, stashed it beside the nonce, and re-verifies
+  it — revocation and all — when the `connect` arrives.
+- **Anything else** — no device credential to present, the entitlement gate is
+  off, the challenge store is at capacity, or the reply was lost. The credential
+  rides the `connect`, which is the only place it can be.
+
+The condition is a challenge **answered**, not a challenge sent: a client cannot
+see whether the coordinator's entitlement gate is enabled, and a deployment
+running admission with that gate off answers with an empty challenge and stores
+nothing. The table above is unchanged by this — every handler still checks the
+same role with the same binding, and a `connect` with neither its own credential
+nor a stash behind it is refused exactly as before. See ADR-0057 §2–§3.
 
 `reject` reuses the ADR-0016 handshake-reject pair, so the reason (which names
 only credential facts, never a secret) is surfaced through the client's existing

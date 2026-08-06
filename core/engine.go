@@ -1601,7 +1601,7 @@ func (e *Engine) addListener(ln net.Listener) {
 // registrations, which must reach all coordinators.
 func (e *Engine) broadcast(m wire) {
 	for _, l := range e.links {
-		l.send(m)
+		l.send(e, m)
 	}
 }
 
@@ -1629,7 +1629,7 @@ func helloWire() wire {
 // calls it on the member it is about to use, so it greets only what it actually
 // rotates to. One-shot and idempotent — the coordinator answers only on a
 // version mismatch — so a repeat on a later rotation is harmless.
-func (e *Engine) greet(l *coordLink) { l.send(helloWire()) }
+func (e *Engine) greet(l *coordLink) { l.send(e, helloWire()) }
 
 // observeNetworkVersion evaluates the network's current release, as advertised
 // by a coordinator on a client reply, against this build (issue #36, ADR-0015).
@@ -1709,7 +1709,7 @@ func (s *coordSignaler) Send(ctx context.Context, f SignalFrame) error {
 		return errEngineStopped
 	default:
 	}
-	s.link.send(wire{Type: f.Kind, Session: s.sid, Cand: f.Data})
+	s.link.send(s.eng, wire{Type: f.Kind, Session: s.sid, Cand: f.Data})
 	return nil
 }
 

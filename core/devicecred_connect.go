@@ -78,7 +78,14 @@ func (e *Engine) presentDeviceCredential(ctx context.Context, l *coordLink, time
 	// request would race against itself. Loss of this one datagram is instead
 	// handled the same way any other silent leg is: the deadline below expires and
 	// the caller falls back to a plain connect.
-	l.send(wire{Type: "challenge", Cred: e.admissionCred()})
+	//
+	// This is also the copy of the admission credential that the connect no longer
+	// carries when this call succeeds (issue #183, ADR-0057). The credential was
+	// already here before that change — it is what gets the request past the
+	// coordinator's client-admission gate, which guards this message like every other
+	// client message — so nothing was added to this datagram; what changed is that the
+	// SECOND copy, on the connect, is now conditional. See connectAdmissionCred.
+	l.send(e, wire{Type: "challenge", Cred: e.admissionCred()})
 
 	budget := deviceChallengeTimeout
 	if budget > timeout {
@@ -141,6 +148,46 @@ func (e *Engine) admissionCred() string {
 	// the one it does hold would answer that oddity by disconnecting the node
 	// from a network it is still admitted to.
 	return held.Admission
+}
+
+// connectAdmissionCred is the admission credential a "connect" carries, given
+// whether presentDeviceCredential already delivered one on a "challenge" that the
+// coordinator ANSWERED (issue #183, ADR-0057).
+//
+// The admission credential is the single largest field on a connect — 437 bytes of a
+// 1443-byte datagram in this repository's own fixture, and 423 of the 1453 measured on
+// the testbed — and before this it was on the wire TWICE per connect attempt: once on
+// the challenge, once on the connect. Neither copy was new in bacchus#166; what that
+// issue added was the device-store fallback that first made admissionCred() return
+// anything at all for a client enrolled through the account service, which is why a
+// field that had always been empty suddenly weighed 423 bytes on both.
+//
+// Dropping the second copy is what puts the connect under maxRendezvousPayload. It is
+// a CONDITIONAL move, not a removal, and the condition is not the one it looks like:
+//
+//   - answered == false, no challenge sent. No device store, or nothing held. The
+//     coordinator has no state for this source at all, so the connect is the only
+//     place the credential can be.
+//   - answered == false, challenge sent but not answered. Two sub-cases the coordinator
+//     can tell apart and this client cannot. Either the gate is DISABLED — in which
+//     case issueDeviceChallenge returns an empty challenge and stores NOTHING, so a
+//     connect without the credential would be refused by admission on a deployment
+//     that runs admission with the entitlement gate off, which is an ordinary
+//     configuration and not an edge case — or the store was at capacity, or the reply
+//     was simply lost. The credential rides the connect in all of them.
+//   - answered == true. The coordinator issued a live nonce for this source, which it
+//     only does with the gate enabled, and stashed the credential beside it
+//     (cmd/coordinator/devicecred.go). This is the only path that omits it, and it is
+//     the path every real connect from an enrolled client takes.
+//
+// So the condition is "a challenge was ANSWERED", not "a challenge was sent". Those
+// differ exactly on the deployment described in the second bullet, and getting it
+// wrong there does not degrade — it refuses every connect.
+func (e *Engine) connectAdmissionCred(answered bool) string {
+	if answered {
+		return ""
+	}
+	return e.admissionCred()
 }
 
 // awaitChallenge waits for member l to answer a "challenge" request. ok is
@@ -354,24 +401,65 @@ func (e *Engine) deviceRenewMargin() time.Duration {
 	return defaultDeviceRenewMargin
 }
 
-// deviceRenewLoop periodically checks whether the stored device credential
-// needs renewing and, when Config.DeviceRenew is set, asks it for a fresh one.
-// Mirrors reloadCRLLoop's shape (ticker + e.stop select, the actual work
-// factored out and parameterized on now for tests).
+// deviceRenewLoop checks whether the stored device credential needs renewing and,
+// when Config.DeviceRenew is set, asks for a fresh one — ON ENTRY, and then on every
+// tick of deviceRenewCheckInterval.
+//
+// Work first, then wait. That is registerLoop's shape in core/engine.go, and this
+// loop having the opposite one is issue #184 (ADR-0057): its first action used to be
+// at T+10min, and it was reached by a client that builds an engine only at connect
+// time, so it needed ten minutes of engine uptime it never got. A refused connect
+// tears the engine down in about thirty seconds; the renewal that would have fixed
+// the refusal was destroyed before it acted. Renewal therefore only ever happened
+// while a connect had SUCCEEDED — and the trigger for the refusal is not connecting
+// for DefaultCredentialTTL, which is 48 hours, i.e. a weekend.
+//
+// The device is recoverable throughout: renewal is keyed on the enrolled device KEY,
+// not on holding a live credential, so the account service would have re-issued on
+// request the whole time. Only nothing ever asked.
+//
+// This does not renew anything that was not already due — maybeRenewDeviceCred's
+// margin check is unchanged, and its early return for a device with nothing enrolled
+// is deliberately untouched (an entry check must not become an enrollment attempt;
+// see ADR-0046). What changes is only WHEN the first check happens.
 func (e *Engine) deviceRenewLoop() {
 	defer e.wg.Done()
 	t := time.NewTicker(deviceRenewCheckInterval)
 	defer t.Stop()
 	for {
+		e.renewDeviceCredOnce()
 		select {
 		case <-e.stop:
 			return
 		case <-t.C:
-			ctx, cancel := context.WithTimeout(context.Background(), deviceRenewCallTimeout)
-			e.maybeRenewDeviceCred(ctx, time.Now())
-			cancel()
 		}
 	}
+}
+
+// renewDeviceCredOnce runs one renewal check under a fresh deviceRenewCallTimeout
+// budget that is ALSO cancelled by engine shutdown.
+//
+// The shutdown half is what the entry check above costs and pays for. Before it, the
+// first call was ten minutes in, so a Stop shortly after Start could not be waiting on
+// a caller-supplied transport; now the first call happens immediately, and an
+// unreachable account service would otherwise hold Stop's wg.Wait for the full 30
+// seconds — turning a fix for a client that tears its engine down quickly into a
+// client that cannot tear it down at all. Config.DeviceRenew is an embedder's
+// transport and this package does not get to assume it returns promptly; what it can
+// do is make sure the context it hands over dies when the engine does.
+func (e *Engine) renewDeviceCredOnce() {
+	ctx, cancel := context.WithTimeout(context.Background(), deviceRenewCallTimeout)
+	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-e.stop:
+			cancel()
+		case <-done:
+		}
+	}()
+	e.maybeRenewDeviceCred(ctx, time.Now())
 }
 
 // maybeRenewDeviceCred renews the stored credential when it is due, at clock
