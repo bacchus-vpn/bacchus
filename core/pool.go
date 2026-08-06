@@ -762,12 +762,13 @@ func (e *Engine) activePathServable() bool {
 // each accepted connection over whatever session is active at accept time — so a
 // failover swaps the path underneath without rebinding or dropping the listener.
 // Calling it again after a successful bind is a no-op (the listener persists
-// across reselections). socksBound is latched only once Listen actually
-// succeeds — poolMu is held continuously across the attempt (Listen is a fast
-// syscall with no callback into user code, so this is safe) rather than
-// released and reacquired, so two concurrent callers can never both dial
-// Listen on the same address, and a failed attempt leaves socksBound false so
-// a later call retries instead of silently no-op'ing forever.
+// across reselections). socksBound is latched only once the listener is bound
+// AND registered with the engine — poolMu is held continuously across the
+// attempt (Listen is a fast syscall with no callback into user code, and
+// addListener only takes e.mu to append, so this is safe) rather than released
+// and reacquired, so two concurrent callers can never both dial Listen on the
+// same address, and a failed attempt leaves socksBound false so a later call
+// retries instead of silently no-op'ing forever.
 func (e *Engine) bindPoolSocks(addr string) error {
 	e.poolMu.Lock()
 	if e.socksBound {
@@ -779,10 +780,17 @@ func (e *Engine) bindPoolSocks(addr string) error {
 		e.poolMu.Unlock()
 		return fmt.Errorf("core: socks listen: %w", err)
 	}
+	// Registered before the latch and before the accept loop exists (issue #197):
+	// a refusal means Stop already ran and ln is closed, so there is no listener to
+	// serve from and no port left held. addListener takes only e.mu, and nothing
+	// holding e.mu ever reaches for poolMu, so this nesting adds no ordering.
+	if !e.addListener(ln) {
+		e.poolMu.Unlock()
+		return errEngineStopped
+	}
 	e.socksBound = true
 	e.poolMu.Unlock()
 
-	e.addListener(ln)
 	e.emit(EventInfo, "", "SOCKS5 on %s (pool)", addr)
 	e.wg.Add(1)
 	go func() {

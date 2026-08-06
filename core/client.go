@@ -1430,20 +1430,37 @@ func (e *Engine) activeReconnectSession() (Session, *accounting.Counter, []byte)
 // is a no-op (the listener persists across reconnects). It mirrors the pool's
 // bindPoolSocks for the single-transport path, kept separate so the two failover
 // mechanisms do not share mutable state.
+//
+// rcBound is latched only once the listener is bound AND registered, with rcMu
+// held continuously across both (Listen is a fast syscall with no callback into
+// user code, and addListener only takes e.mu to append), so two concurrent
+// callers can never both dial Listen on the same address and a failed attempt
+// leaves rcBound false for a later retry. That mirrors bindPoolSocks, which
+// documents the same ordering at length: latching first meant one occupied port
+// turned every later attempt into a silent no-op that reported success with
+// nothing listening.
 func (e *Engine) serveReconnectSocks(addr string) error {
 	e.rcMu.Lock()
 	if e.rcBound {
 		e.rcMu.Unlock()
 		return nil
 	}
-	e.rcBound = true
-	e.rcMu.Unlock()
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
+		e.rcMu.Unlock()
 		return fmt.Errorf("core: socks listen: %w", err)
 	}
-	e.addListener(ln)
+	// Registered before the latch and before the accept loop exists (issue #197):
+	// a refusal means Stop already ran and ln is closed, so there is no listener to
+	// serve from and no port left held.
+	if !e.addListener(ln) {
+		e.rcMu.Unlock()
+		return errEngineStopped
+	}
+	e.rcBound = true
+	e.rcMu.Unlock()
+
 	e.emit(EventInfo, "", "SOCKS5 on %s", addr)
 	e.wg.Add(1)
 	go func() {

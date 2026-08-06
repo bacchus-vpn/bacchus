@@ -850,9 +850,16 @@ type Engine struct {
 	limiterCtx    context.Context
 	limiterCancel context.CancelFunc
 
-	mu        sync.Mutex // guards listeners + started
+	mu        sync.Mutex // guards listeners + started + stopped
 	listeners []net.Listener
 	started   bool
+	// stopped is latched by Stop under e.mu, in the SAME critical section that
+	// snapshots listeners, and it is what closes issue #197's window. Without it a
+	// listener that had been created but not yet registered was invisible to that
+	// snapshot and was never closed by anything: e.stop alone cannot serve here,
+	// because it is closed outside e.mu and a binder testing it would still be racing
+	// the snapshot rather than ordered against it.
+	stopped bool
 
 	stopOnce sync.Once
 	stop     chan struct{} // closed to signal shutdown
@@ -1380,7 +1387,12 @@ func (e *Engine) Start(ctx context.Context) error {
 			e.closeLinks()
 			return fmt.Errorf("core: exit listen: %w", err)
 		}
-		e.addListener(ln)
+		if !e.addListener(ln) {
+			// Stop ran under us; ln is already closed. Fail the start rather than
+			// serving from a socket nothing owns (issue #197).
+			e.closeLinks()
+			return errEngineStopped
+		}
 		e.wg.Add(1)
 		go e.serveExit(ln)
 		e.emit(EventInfo, "", "exit %s (%s) advertising %s + direct WebRTC", e.cfg.ID, e.cfg.Country, e.cfg.Advertise)
@@ -1403,7 +1415,10 @@ func (e *Engine) Start(ctx context.Context) error {
 			e.closeLinks()
 			return fmt.Errorf("core: relay ingress listen: %w", err)
 		}
-		e.addListener(ln)
+		if !e.addListener(ln) {
+			e.closeLinks()
+			return errEngineStopped
+		}
 		ingressPort = addrPort(ln.Addr())
 		e.wg.Add(1)
 		go e.serveExit(ln)
@@ -1536,8 +1551,16 @@ func (e *Engine) Stop() {
 		// wg.Wait() below, once the data path has actually stopped moving bytes.
 		e.limiterCancel()
 		e.closeLinks()
+		// Latch stopped and take the snapshot in one critical section (issue #197).
+		// The latch is what makes the snapshot complete rather than merely current: a
+		// binder that has already run net.Listen either wins this lock first, appends,
+		// and is closed below — or loses it and closes its own listener in
+		// addListener. There is no third outcome, and on the old code the third
+		// outcome was a SOCKS port held for the life of the process.
 		e.mu.Lock()
+		e.stopped = true
 		lns := e.listeners
+		e.listeners = nil
 		e.mu.Unlock()
 		for _, ln := range lns {
 			_ = ln.Close()
@@ -1591,10 +1614,34 @@ func (e *Engine) Wait() { <-e.done }
 // Done returns a channel closed when the engine has fully stopped.
 func (e *Engine) Done() <-chan struct{} { return e.done }
 
-func (e *Engine) addListener(ln net.Listener) {
+// addListener hands ln to the engine, which closes it at Stop, and reports
+// whether the engine took it.
+//
+// A false return means Stop has already run and ln has been CLOSED here — the
+// caller has nothing left to clean up and must not start an accept loop over it.
+// That is issue #197: between a binder's net.Listen and its registration there was
+// a window in which Stop's snapshot could not see the new listener, so a connect
+// aborted in that window (which is the ordinary outcome of a first run on Windows
+// unelevated, or on Linux without bacchus-netd) left 127.0.0.1:1080 accepting
+// forever, with no goroutine tracked by e.wg and no entry in e.listeners. Every
+// later Connect in that process then failed to bind the one pinned port the client
+// serves the user's traffic on.
+//
+// It refuses rather than latching quietly because the two callers that bind at
+// Start must fail Start, not proceed with a dead socket. Every caller reports the
+// refusal as errEngineStopped — the sentinel the pool's dial legs already return
+// for "shutdown overtook this operation" — because that is what happened: the
+// address was fine and Listen succeeded.
+func (e *Engine) addListener(ln net.Listener) bool {
 	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		_ = ln.Close()
+		return false
+	}
 	e.listeners = append(e.listeners, ln)
 	e.mu.Unlock()
+	return true
 }
 
 // broadcast sends m to every pool member. Used for the forwarder's hello and
