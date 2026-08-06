@@ -1870,6 +1870,99 @@ func TestASuccessfulRenewalClearsTheWarningAndSaysSoOnlyIfThereWasOne(t *testing
 	}
 }
 
+// TestRenewalFailuresAreAnnouncedOncePerRung is bacchus#191's residual: the
+// ladder had a deadline, a severity and a translation, and no memo. A device
+// inside its renewal margin retries every ten minutes for as long as the account
+// service is unreachable, so an unsuppressed emit is the same sentence roughly
+// thirty-six times across a six-hour outage.
+//
+// The memo is on the RUNG, not on "failing", and that is the half worth pinning:
+// suppressing per condition-that-is-failing would silence the escalation, which
+// is the one message in the ladder the user actually has to act on.
+func TestRenewalFailuresAreAnnouncedOncePerRung(t *testing.T) {
+	ctrl := newProxyOnlyController(Config{})
+	var details []Detail
+	ctrl.OnDetail = func(d Detail) { details = append(details, d) }
+
+	// Well outside the warning threshold: the calm rung.
+	_, _, calm, _ := mintAppstateChain(t, 40*time.Hour)
+	for i := 0; i < 10; i++ {
+		ctrl.recordRenewalFailure(calm, errors.New("boom"))
+	}
+	if len(details) != 1 {
+		t.Fatalf("ten consecutive failures at one rung produced %d messages, want 1: %+v", len(details), details)
+	}
+	if details[0].Kind != DetailRenewalFailing {
+		t.Fatalf("first message = kind %d, want DetailRenewalFailing", details[0].Kind)
+	}
+	// The suppressed attempts still update the state a UI reads, so the number on
+	// screen is the current one and not whichever attempt happened to be announced.
+	if st := ctrl.CredentialState(); !st.RenewalFailing || st.Detail.Kind != DetailRenewalFailing {
+		t.Fatalf("state after the suppressed repeats = %+v", st)
+	}
+
+	// The clock crosses into the urgent rung. That is new news even though the
+	// condition ("renewal is failing") has not changed at all.
+	_, _, urgent, _ := mintAppstateChain(t, 30*time.Minute)
+	ctrl.recordRenewalFailure(urgent, errors.New("boom"))
+	if len(details) != 2 || details[1].Kind != DetailRenewalUrgent {
+		t.Fatalf("an escalation to the urgent rung was not announced: %+v", details)
+	}
+	for i := 0; i < 10; i++ {
+		ctrl.recordRenewalFailure(urgent, errors.New("boom"))
+	}
+	if len(details) != 2 {
+		t.Fatalf("repeats at the urgent rung produced %d messages, want 2 in total: %+v", len(details), details)
+	}
+
+	// An account refusal is a different rung again — no amount of waiting fixes it
+	// — so it is said whatever the clock has already said.
+	revoked := &accountclient.Error{Code: accountclient.CodeDeviceRevoked, Recognized: true}
+	ctrl.recordRenewalFailure(urgent, revoked)
+	if len(details) != 3 || details[2].Kind != DetailDeviceRevoked {
+		t.Fatalf("an account refusal on top of a clock rung was not announced: %+v", details)
+	}
+
+	// A success clears the memo along with the state it lives in, so the next
+	// failure is news again rather than a repeat of what was said before the
+	// recovery.
+	ctrl.recordRenewalSuccess(urgent)
+	if len(details) != 4 || details[3].Kind != DetailRenewalRecovered {
+		t.Fatalf("the recovery was not announced: %+v", details)
+	}
+	ctrl.recordRenewalFailure(urgent, revoked)
+	if len(details) != 5 || details[4].Kind != DetailDeviceRevoked {
+		t.Fatalf("a failure after a recovery was suppressed as a repeat: %+v", details)
+	}
+}
+
+// TestTheRenewalDeadlineCoversTheWholeMargin pins decision E: credentialWarnAt
+// follows core's renewal margin instead of sitting at half of it.
+//
+// A device renews as soon as it enters its margin, so a device that is failing to
+// renew is inside that margin by construction and the margin is the entire budget
+// it has left. At the old 3 h threshold the first half of that budget produced
+// "your connection is unaffected for now" and no deadline at all — the user was
+// told there was nothing to do for three of the six hours they had to do it in.
+func TestTheRenewalDeadlineCoversTheWholeMargin(t *testing.T) {
+	// core's defaultDeviceRenewMargin. Everything a user can be told about happens
+	// at or below this, and every one of these was the calm rung before.
+	for _, left := range []time.Duration{
+		6 * time.Hour,
+		5*time.Hour + 59*time.Minute,
+		4 * time.Hour,
+		3*time.Hour + time.Minute,
+	} {
+		d := renewalFailureDetail(errors.New("boom"), time.Now().Add(left), left)
+		if d.Kind != DetailRenewalUrgent {
+			t.Errorf("a renewal failure with %v left gave kind %d, want DetailRenewalUrgent — inside the margin there is no rung that carries no deadline", left, d.Kind)
+		}
+		if d.Remaining != left {
+			t.Errorf("a renewal failure with %v left carried Remaining=%v", left, d.Remaining)
+		}
+	}
+}
+
 // mintAppstateChain mints a throwaway device credential whose claimed expiry is
 // ttl away, using only devicecred's exported API — the same shape core's own
 // tests use, reproduced here because this package cannot reach into core's.

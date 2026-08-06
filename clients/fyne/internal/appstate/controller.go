@@ -136,15 +136,40 @@ type CredentialState struct {
 // credentialWarnAt is how much life must be left in a credential before a failed
 // renewal is merely noted rather than escalated to the user.
 //
-// It is deliberately much larger than core's own renewal margin. That margin is
-// when a client STARTS trying; at the defaults a credential lives 48 hours and
-// renewal begins 6 hours out, so a device that cannot reach the service has
-// about six hours of retries before it goes dark. Waiting until the last of
-// those to say anything would put the warning inside the window where the user
-// can no longer do anything useful with it — reaching a support channel, moving
-// to a network that is not being interfered with, paying an invoice — so this
-// escalates at half the remaining slack rather than at its end.
-const credentialWarnAt = 3 * time.Hour
+// It FOLLOWS core's renewal margin — core's defaultDeviceRenewMargin, 6 h — and
+// that is the whole of the number. A device renews as soon as it enters its
+// margin (devicestore.NeedsRenewal fires at exp − margin), so no device with a
+// reachable service is ever sitting inside its margin: when the account service
+// becomes unreachable, the margin is not slack on top of a budget, it IS the
+// budget. Every renewal failure a user can be told about happens inside it.
+//
+// This was 3 h — half the margin — from bacchus#171/ADR-0056 §6, and that choice
+// was reasonable when it was made: it reads as "escalate at half the remaining
+// slack rather than at its end". It was made before ADR-0016 established that the
+// 6 h is the entire window rather than comfortable slack, and against that fact
+// half the budget passed with the user reading "your connection is unaffected for
+// now" and no deadline at all. The window a user needs to reach a support
+// channel, move to a network that is not being interfered with, or pay an invoice
+// is the whole window, so the deadline is stated for the whole window.
+//
+// Two consequences, both intended:
+//
+//   - The calm rung (DetailRenewalFailing) becomes unreachable at the default
+//     margin, since a failure can only be recorded from inside it. The rung stays
+//     in the ladder rather than being deleted — it is what `left <=
+//     credentialWarnAt` means, and it is reachable again for any deployment whose
+//     core margin is wider than this — but nothing routine reaches it now.
+//   - A warning that is shown for the whole six hours is a warning that can be
+//     ignored for the whole six hours. That is the accepted cost: the alternative
+//     is a user who is told nothing for three of them.
+//
+// It is a compile-time copy of core's constant and not a read of it, because
+// defaultDeviceRenewMargin is unexported and this package cannot reach it (nor
+// can it read Config.DeviceRenewMargin, which has no key in this client's config
+// file). If the two ever drift, the failure is this rung being announced early or
+// late, never a wrong deadline: the deadline itself comes from the stored
+// credential's own expiry, not from either number.
+const credentialWarnAt = 6 * time.Hour
 
 // CredentialState returns what this client knows about its own device
 // credential. Safe to call from any goroutine, including from inside an OnState
@@ -1043,6 +1068,27 @@ func (c *Controller) deviceRenewHook(dc deviceCredential) func(context.Context, 
 
 // recordRenewalFailure updates the credential state after a renewal that did not
 // work, and tells the user when there is a reason to.
+//
+// Once per rung, not once per attempt (bacchus#191). A device inside its renewal
+// margin retries every ten minutes (core's deviceRenewCheckInterval) for as long
+// as the service is unreachable, so an unsuppressed emit is the same sentence
+// roughly thirty-six times over a six-hour outage — which is how a line that also
+// carries real warnings stops being read. The memo is keyed on the LADDER RUNG
+// and not on "failing", because an escalation is new news: the user hears
+// DetailRenewalUrgent when the clock crosses into it even though they already
+// heard DetailRenewalFailing, and hears the account rungs
+// (DetailSubscriptionExpired, DetailDeviceRevoked) if the service starts refusing
+// for a reason no amount of waiting fixes. noteUnroutable in core/coordpool.go is
+// the shape.
+//
+// Only the announcement is suppressed. The stored CredentialState is rewritten on
+// every failure, so a UI reading it sees a Remaining that keeps shrinking rather
+// than the value from whichever attempt happened to be announced; and the log
+// line stays unconditional, because ten minutes apart it is the only record that
+// the retries are happening at all and each one carries its own error.
+//
+// recordRenewalSuccess clears the memo by clearing the state it lives in, so a
+// failure after a recovery is announced again.
 func (c *Controller) recordRenewalFailure(currentCred string, err error) {
 	exp, _ := devicestore.Expiry(currentCred)
 	left := time.Until(exp)
@@ -1051,6 +1097,9 @@ func (c *Controller) recordRenewalFailure(currentCred string, err error) {
 	d := renewalFailureDetail(err, exp, left)
 
 	c.mu.Lock()
+	// Already failing AND on the same rung: the user has been told this, and
+	// nothing about the condition has changed since.
+	repeat := c.cred.RenewalFailing && c.cred.Detail.Kind == d.Kind
 	c.cred.Enrolled = currentCred != ""
 	c.cred.ExpiresAt = exp
 	c.cred.RenewalFailing = true
@@ -1059,6 +1108,9 @@ func (c *Controller) recordRenewalFailure(currentCred string, err error) {
 	c.mu.Unlock()
 
 	c.logf("device credential: renewal failed: %v", err)
+	if repeat {
+		return
+	}
 	c.notifyDetail(d)
 }
 
