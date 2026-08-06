@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 )
 
 // Transport establishes authenticated, peer-to-peer, bidirectional byte-stream
@@ -102,16 +104,120 @@ const (
 	TransportReality = "reality"
 )
 
+// ---------- transport protocol versions (issue #176, decision B3) ----------
+
+// transportVersionSep separates a transport's base name from the protocol
+// version of that transport in a configured name: "reality/2".
+const transportVersionSep = "/"
+
+// transportVersions is the protocol version THIS BUILD implements for each
+// transport — the number that changes when a camouflage protocol is patched into
+// a shape an older peer cannot complete a handshake with.
+//
+// It is a third version axis and deliberately none of the other two:
+//
+//   - Release (ADR-0015/0029) versions the whole binary and fences stale NODES
+//     through -min-serving-version.
+//   - handshake.ProtocolVersion (ADR-0016) versions the signaling wire shape
+//     between a peer and a coordinator.
+//   - This versions ONE transport's own handshake, which the coordinator never
+//     sees: it rides SignalFrame.Data, opaque to the engine and the coordinator
+//     alike (see Signaler). Before #176 a transport was identified by a bare
+//     name, so a patched "reality" and an unpatched "reality" agreed that they
+//     agreed — the #114 failure one layer further down, and with less protection
+//     than the node level had.
+//
+// Bump the entry for a transport when its handshake or framing changes in a way
+// a peer on the previous number cannot complete or cannot decode.
+var transportVersions = map[string]int{
+	TransportWebRTC:  1,
+	TransportReality: 1,
+}
+
+// defaultTransportVersion is what a bare name means. A name with no version is
+// version 1 and not "unversioned", so every configuration that predates #176
+// keeps naming exactly the transport it always named.
+const defaultTransportVersion = 1
+
+// splitTransportName splits a configured transport name into its base name and
+// the protocol version it asks for: "reality/2" is ("reality", 2), and a bare
+// "reality" is ("reality", 1). The empty name is ("", 1) so newTransport's
+// default-to-WebRTC case is reached unchanged.
+//
+// A version that is not a positive integer is an error rather than a fallback.
+// Silently reading "reality/two" as version 1 would give an operator who typed a
+// version the transport they were trying to move OFF, under the name of the one
+// they asked for — which is the failure #176 exists to close, produced by its own
+// parser.
+func splitTransportName(name string) (base string, version int, err error) {
+	i := strings.Index(name, transportVersionSep)
+	if i < 0 {
+		return name, defaultTransportVersion, nil
+	}
+	base, raw := name[:i], name[i+len(transportVersionSep):]
+	v, convErr := strconv.Atoi(raw)
+	if convErr != nil || v < 1 {
+		return "", 0, fmt.Errorf("core: transport %q has a malformed version %q — want a positive integer, as in %q",
+			name, raw, TransportReality+transportVersionSep+"2")
+	}
+	return base, v, nil
+}
+
+// transportName renders a base name and version back into a configured name. A
+// version-1 transport renders bare, so nothing this build writes back out gains
+// a suffix that did not arrive with it.
+func transportName(base string, version int) string {
+	if version == defaultTransportVersion {
+		return base
+	}
+	return base + transportVersionSep + strconv.Itoa(version)
+}
+
 // newTransport builds the session transport named by cfg.Transport. An empty
 // value defaults to WebRTC, preserving every caller that predates the field.
+//
+// The name may carry a protocol version (issue #176): "reality/2" builds the
+// reality transport and records that this configuration asked for version 2.
+//
+// # A version this build does not implement is REPORTED, not refused
+//
+// That is decision B3 and it is the whole of what #176 ships. Refusing to build
+// the transport would be a fence, and a fence is only a repair tool where an
+// update can be delivered: #34 (the signed release channel) is unstarted, and its
+// own words are that "a fence without a channel is a kill switch". A peer left on
+// the wrong transport version today has no path to the build that would bring it
+// back, so it keeps its ladder and the mismatch announces itself in the log
+// instead. B1 — actually declining to match — becomes a flag flip once #34 lands.
+//
+// The version is not thrown away by being unenforced. It is part of the pool's
+// KEY (Engine.transports and selection.Candidate.Transport are both the configured
+// string), so bumping it invalidates the learned winner for that path rather than
+// letting a route validated against the old shape be tried first next time.
+//
+// What this does NOT do, and it is the larger half: nothing carries this number
+// to the PEER. A transport's own handshake rides SignalFrame.Data, which the
+// coordinator relays opaquely, so today only the local side can log the number it
+// asked for. Making two peers compare theirs needs a field on a wire message —
+// see docs/design/transport-pool.md.
 func newTransport(cfg Config, onEvent func(kind, msg string)) (Transport, error) {
-	switch cfg.Transport {
+	base, version, err := splitTransportName(cfg.Transport)
+	if err != nil {
+		return nil, err
+	}
+	if impl, known := transportVersions[base]; known && version != impl && onEvent != nil {
+		onEvent(EventInfo, fmt.Sprintf(
+			"transport %q asks for protocol version %d and this build implements version %d for %q — "+
+				"it is being built and tried anyway, because nothing is fenced on this number until there is a way to deliver an update (issue #34). "+
+				"A peer on a different version of this transport may fail to complete a handshake, or complete one and then wedge",
+			cfg.Transport, version, impl, base))
+	}
+	switch base {
 	case "", TransportWebRTC:
 		return newWebRTCTransport(cfg, onEvent), nil
 	case TransportReality:
 		return newRealityTransport(cfg, onEvent)
 	default:
-		return nil, fmt.Errorf("core: unknown transport %q (want %q or %q)",
-			cfg.Transport, TransportWebRTC, TransportReality)
+		return nil, fmt.Errorf("core: unknown transport %q (want %q or %q, each optionally versioned as in %q)",
+			cfg.Transport, TransportWebRTC, TransportReality, TransportReality+transportVersionSep+"2")
 	}
 }

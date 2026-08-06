@@ -186,6 +186,22 @@ func emitCRL(priv ed25519.PrivateKey, revocationsPath string, ttl time.Duration)
 // operator configures into the coordinator as -admission-pubkey. Mirrors the
 // coordinator's bootstrap-key handling so the two operator keys are managed the
 // same way.
+//
+// The create is O_EXCL and the seed is flushed before this returns; bacchus#189
+// is both. This is a CLI, so it is the one of the three seed writers an operator
+// can reasonably run in parallel — `xargs -P` over a batch against a fresh -key
+// path — and read-then-create is a TOCTOU: without O_EXCL two invocations both
+// see no file, both generate a ROOT SIGNING KEY, and the loser's is overwritten
+// with no error, after which whatever it signed verifies against nothing anybody
+// holds. EEXIST refuses rather than re-reading, because the key this process
+// holds in memory is not the key on disk. The flush is because the line below
+// puts the public half in front of an operator to paste into a coordinator; an
+// unclean shutdown before the bytes reach the platter leaves that pubkey
+// distributed and its private half gone.
+//
+// A partial write is left where it lies: a short file is refused loudly by the
+// malformed-key branch above on the next run, whereas removing it would present
+// the next run with a missing file and mint a second root key silently.
 func loadOrGenerateAdmissionKey(path string) (ed25519.PrivateKey, error) {
 	if b, err := os.ReadFile(path); err == nil {
 		seed, err := hex.DecodeString(strings.TrimSpace(string(b)))
@@ -206,8 +222,24 @@ func loadOrGenerateAdmissionKey(path string) (ed25519.PrivateKey, error) {
 			return nil, fmt.Errorf("create %s: %w", dir, err)
 		}
 	}
-	if err := os.WriteFile(path, []byte(hex.EncodeToString(priv.Seed())), 0o600); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("admission key %s was created by another process while this one was generating: "+
+				"refusing, because the key this run holds is not the key on disk", path)
+		}
+		return nil, fmt.Errorf("create admission key %s: %w", path, err)
+	}
+	if _, err := f.WriteString(hex.EncodeToString(priv.Seed())); err != nil {
+		f.Close()
 		return nil, fmt.Errorf("write admission key %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("flush admission key %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("close admission key %s: %w", path, err)
 	}
 	fmt.Fprintf(os.Stderr, "admission: generated new root signing key at %s\n", path)
 	fmt.Fprintf(os.Stderr, "admission: configure the coordinator with -admission-pubkey %s\n", hex.EncodeToString(pub))

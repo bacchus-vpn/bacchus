@@ -40,13 +40,32 @@ const keyFileName = "device.key"
 // the wrong one for a real client — see the package doc on why this is a
 // generate-once, not a cache.
 //
-// A MISSING file is generated fresh: mkdir -p the directory (0700), write the
-// seed (0600), and return the new key. A PRESENT but corrupt or unreadable file
-// is a hard error, never a silent regeneration — the whole reason this exists is
-// that DevicePub is what the issued credential binds, so quietly minting a new
-// key would silently strand whatever credential this device already holds,
-// invisibly to the caller. See cmd/coordinator's loadOrGenerateBootstrapKey for
-// the same shape applied to a different key.
+// A MISSING file is generated fresh: mkdir -p the directory (0700), create the
+// file exclusively (0600), write the seed, flush it, and return the new key. A
+// PRESENT but corrupt or unreadable file is a hard error, never a silent
+// regeneration — the whole reason this exists is that DevicePub is what the
+// issued credential binds, so quietly minting a new key would silently strand
+// whatever credential this device already holds, invisibly to the caller. See
+// cmd/coordinator's loadOrGenerateBootstrapKey for the same shape applied to a
+// different key.
+//
+// The create is O_EXCL and the flush is not optional; bacchus#189 is both. The
+// read above and the write below are a TOCTOU, so two processes that both see no
+// file both generate — and an O_CREATE without O_EXCL lets the loser overwrite
+// the winner's key with no error at all, reaching the silent-regeneration
+// outcome the paragraph above forbids through a door it does not look at. EEXIST
+// therefore REFUSES rather than re-reading: the key this call holds in memory is
+// not the key now on disk, and a caller handed a key that does not match the
+// file would enrol under one identity and reload under another. The flush is
+// because the public half of this key leaves the machine almost immediately —
+// the account service records DevicePub at enrolment — so an unclean shutdown in
+// the several seconds os.WriteFile leaves the bytes unsynced strands a
+// credential bound to a key the device no longer has.
+//
+// A write that fails partway leaves a SHORT file on purpose. It is caught loudly
+// on the next read by the malformed-key check above, which is fail-closed;
+// removing it would hand the next run a missing file and a silent fresh key,
+// which is the failure this function exists to refuse.
 func LoadOrGenerateKey(dir string) (ed25519.PrivateKey, error) {
 	if dir == "" {
 		_, priv, err := ed25519.GenerateKey(nil)
@@ -76,8 +95,24 @@ func LoadOrGenerateKey(dir string) (ed25519.PrivateKey, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("devicestore: create %s: %w", dir, err)
 	}
-	if err := os.WriteFile(path, []byte(hex.EncodeToString(priv.Seed())), 0o600); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("devicestore: device key %s was created by another process while this one was generating: "+
+				"refusing, because the key this call holds is not the key on disk", path)
+		}
+		return nil, fmt.Errorf("devicestore: create device key %s: %w", path, err)
+	}
+	if _, err := f.WriteString(hex.EncodeToString(priv.Seed())); err != nil {
+		f.Close()
 		return nil, fmt.Errorf("devicestore: write device key %s: %w", path, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("devicestore: flush device key %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("devicestore: close device key %s: %w", path, err)
 	}
 	return priv, nil
 }
