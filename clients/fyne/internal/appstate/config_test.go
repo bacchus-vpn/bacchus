@@ -76,6 +76,111 @@ func TestSaveConfigOverwritesExisting(t *testing.T) {
 	}
 }
 
+// TestASaveIsNeverObservedShort is bacchus#190: SaveConfig used to end in
+// os.WriteFile, which opens the LIVE file with O_TRUNC and refills it, so a
+// process killed between the truncate and the bytes landing left the user's whole
+// configuration empty or short — and the next launch read what the killed one
+// left. ClearClaimCode's caller is a connect attempt, so that window is reached by
+// an ordinary gesture rather than a rare administrative one.
+//
+// A killed process cannot be staged in a unit test, so this asks the question a
+// reader would: while saves are happening, is the file on disk ever anything
+// other than a whole config? Against the truncate-and-refill shape a concurrent
+// reader sees empty and partial files almost immediately at this size; against a
+// staged rename it can only ever see one whole file or the other, because the
+// live path is never opened for writing at all.
+func TestASaveIsNeverObservedShort(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bacchus-fyne.config.json")
+
+	// Big enough that the refill is many write syscalls rather than one — a
+	// bypass list is the field a real user can grow without noticing.
+	bypass := make([]string, 0, 4000)
+	for i := 0; i < 4000; i++ {
+		bypass = append(bypass, "host-"+strings.Repeat("x", 40)+".example")
+	}
+	base := Config{Coordinators: []string{"203.0.113.10:8080"}, Bypass: bypass, DeviceLabel: "laptop"}
+
+	if err := SaveConfig(path, base); err != nil {
+		t.Fatalf("SaveConfig (seed): %v", err)
+	}
+
+	done := make(chan struct{})
+	var writeErr error
+	go func() {
+		defer close(done)
+		for i := 0; i < 40; i++ {
+			c := base
+			c.Country = []string{"DE", "NL"}[i%2]
+			if err := SaveConfig(path, c); err != nil {
+				writeErr = err
+				return
+			}
+		}
+	}()
+
+	reads := 0
+	for {
+		select {
+		case <-done:
+			if writeErr != nil {
+				t.Fatalf("SaveConfig: %v", writeErr)
+			}
+			if reads == 0 {
+				t.Fatal("the reader never observed the file; this test proved nothing")
+			}
+			return
+		default:
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("the config file was not readable mid-save: %v", err)
+		}
+		var got Config
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatalf("a read landed on a partial config (%d bytes): %v", len(b), err)
+		}
+		if len(got.Bypass) != len(bypass) || got.DeviceLabel != "laptop" {
+			t.Fatalf("a read landed on a short config: %d bypass entries, label %q", len(got.Bypass), got.DeviceLabel)
+		}
+		reads++
+	}
+}
+
+// TestASaveLeavesNothingStagedBehind: staging is the cost of atomicity and a
+// temporary file left beside the config on every settings save would be a new
+// mess of its own. Only a save that is KILLED may leave one.
+func TestASaveLeavesNothingStagedBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bacchus-fyne.config.json")
+	if err := SaveConfig(path, Config{DNS: "1.1.1.1:53"}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	if err := SaveConfig(path, Config{DNS: "9.9.9.9:53"}); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(path) {
+			t.Errorf("a save left %q beside the config", e.Name())
+		}
+	}
+	// And the replacement carries the mode the file's contents require, every
+	// time rather than only at creation.
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Errorf("config file mode = %v, want 0600 — it holds turnPass and volunteerExitKey", perm)
+		}
+	}
+}
+
 // TestLoadConfigReturnsPath is the round-trip proof that LoadConfig's path
 // return is real, not a placeholder: a Settings save (settings.go) must land
 // back in the exact file the app read from, or an editor with a config in

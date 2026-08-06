@@ -530,6 +530,23 @@ var errNoConfigPath = errors.New("no config file path to save to")
 // world-readable directory around a 0600 secret is a smaller leak than the
 // file itself but still a leak of what is installed and when it was last
 // changed.
+//
+// # The write is atomic (bacchus#190)
+//
+// The file is staged whole beside itself, flushed, and renamed over the target,
+// so the live config is never open for writing and there is no instant at which
+// it holds a partial one. It used to end in os.WriteFile, which opens the live
+// file with O_TRUNC and refills it: a process killed in that window left the
+// user's whole configuration empty or short rather than losing one field, and the
+// next launch read what the killed one left.
+//
+// That window is reached by an ordinary gesture rather than a rare
+// administrative one. ClearClaimCode's caller is a CONNECT attempt, so this runs
+// while the user is waiting on the network — and a client whose config came back
+// empty mid-connect looks, to them, like the app lost their account at the exact
+// moment they tried to use it. Nothing here is unreconstructible the way
+// bacchus#178's bootstrap secrets are; the user retypes it. Being retypable is
+// not a reason to lose it.
 func SaveConfig(path string, c Config) error {
 	if path == "" {
 		return errNoConfigPath
@@ -538,10 +555,82 @@ func SaveConfig(path string, c Config) error {
 	if err != nil {
 		return err
 	}
+	// Before the staging, not just before the write: the temporary file is
+	// created in the target's OWN directory, so on a fresh install that directory
+	// has to exist before there is anywhere to stage. This is issue #118's fix and
+	// it must survive — the per-user candidate is <config dir>/Bacchus/, which
+	// nothing else creates.
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return writeConfigAtomic(path, b)
+}
+
+// writeConfigAtomic installs b at path by staging a complete file under
+// ".<name>.tmp*" in path's own directory, flushing it, and renaming it over the
+// target.
+//
+// Two mechanics are load-bearing rather than tidy, and they are the same two
+// core/coldstart/atomic.go names:
+//
+//   - The staged file is created IN THE TARGET'S DIRECTORY. os.Rename is atomic
+//     only within one filesystem, and a rename across one degrades to
+//     copy-then-delete — exactly the half-written file this exists to prevent.
+//   - The bytes are flushed BEFORE the rename, so a rename that becomes visible
+//     ahead of the data it points at cannot leave the next launch reading an
+//     empty config.
+//
+// Three consequences of replacing the file rather than rewriting it, each a real
+// change from os.WriteFile: the result is mode 0600 every time rather than only
+// at creation, which only ever narrows and this file holds turnPass and
+// volunteerExitKey; a path that is a SYMLINK is replaced rather than written
+// through; and a writer killed mid-save leaves its staged file behind, named so
+// it sorts beside the config, is hidden from a plain ls, and can never be
+// mistaken for the config itself.
+//
+// It does not fsync the directory, which is where every atomic writer in this
+// repository stops: that is a question about whether the RENAME is durable, not
+// whether the bytes are whole, and its failure mode restores a complete older
+// file rather than a torn one.
+//
+// It is package-local, as coldstart's is, and for the reason coldstart's doc
+// gives: consolidating the copies means editing correct, separately tested code
+// in packages this did not own. bacchus#188 holds that question, and its own body
+// asks for a wave in which those packages are not in flight.
+func writeConfigAtomic(path string, b []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp")
+	if err != nil {
+		return err
+	}
+	staged := tmp.Name()
+	// Removed on every path that does not rename it away, so a failure leaves the
+	// live config untouched AND nothing beside it for the user to wonder about. A
+	// no-op once the rename has succeeded.
+	defer func() { _ = os.Remove(staged) }()
+	if err := writeStagedConfig(tmp, b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(staged, path)
+}
+
+// writeStagedConfig fills the staged file and flushes it, so everything that can
+// fail has failed before anything is renamed over the file the next launch reads.
+func writeStagedConfig(f *os.File, b []byte) error {
+	// 0600 explicitly rather than whatever os.CreateTemp's mode survived the
+	// umask: this replaces a file SaveConfig has always written 0600, and its
+	// contents are the reason (see the doc above).
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 // ClearClaimCode erases Config.ClaimCode from whichever config file is actually
@@ -554,6 +643,12 @@ func SaveConfig(path string, c Config) error {
 // blind save of the connect's copy would silently revert whatever was changed in
 // between, which is a worse bug than the one this is fixing — so this reads what
 // is there now, clears one field, and puts it back.
+//
+// The read-modify-write is safe against a torn WRITE (SaveConfig stages and
+// renames, bacchus#190) and is deliberately not serialised against another
+// writer: atomicity is a promise to a reader, and two savers racing is a
+// last-writer-wins question this client does not have — the settings window and a
+// connect are one process and one user.
 //
 // A missing config file is not an error: nothing is on disk to hold a spent
 // claim code, which is the state this function exists to reach.
