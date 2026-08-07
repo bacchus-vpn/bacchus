@@ -1010,7 +1010,14 @@ func handle(m wire, src *net.UDPAddr) {
 		// answers it does not have to carry a second copy of the largest field on the
 		// wire (issue #183, ADR-0057). issueDeviceChallenge keeps it only when there
 		// was an authority to verify it against — see stashCred.
-		c := issueDeviceChallenge(src, m.Cred)
+		//
+		// The issuer cert on this message is stashed the same way and for the same
+		// reason (issue #206, ADR-0062): 362 bytes, identical for every device from one
+		// issuer, and previously re-sent on every connect. Its gate is the anchored
+		// ROOT rather than admission, because that is the authority that can speak for
+		// it — see stashIssuerCert, which also records why reusing stashCred's gate
+		// would refuse every connect on an admission-off deployment.
+		c := issueDeviceChallenge(src, m.Cred, m.IssuerCert)
 		if c == "" {
 			// Either the gate is off — in which case a client that asks anyway gets an
 			// empty challenge and simply has nothing to sign — or the store is at
@@ -1028,6 +1035,13 @@ func handle(m wire, src *net.UDPAddr) {
 		// verified below is a credential, wherever it arrived, and the rest of this
 		// handler should see the one this connect is actually being judged on.
 		m.Cred = admissionCredFor(m, src)
+		// The issuer cert is resolved the same way and in the same place (issue #206,
+		// ADR-0062). Unlike the credential above it is not a conditional move: a
+		// current client puts it on the "challenge" and never on a connect, so this is
+		// where the connect gets it back. Resolved here rather than inside admitDevice
+		// so that one function keeps verifying a chain it was handed rather than
+		// deciding where the chain came from.
+		m.IssuerCert = issuerCertFor(m, src)
 		// Client admission (issue #42): matchmaking is gated too, so a leaked
 		// exit list can't be turned into a live session without a credential.
 		cred, ok := admit(m, src, admission.RoleClient, "")

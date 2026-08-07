@@ -95,6 +95,19 @@ const (
 	// traffic, so a burst of pending challenges does not stay resident until the
 	// next request happens to arrive.
 	challengeSweep = 30 * time.Second
+
+	// maxStashedIssuerCert bounds the issuer-cert envelope this coordinator will
+	// hold beside a nonce (issue #206). A real one is 362 bytes and its size is
+	// fixed by its contents — a version, a serial, a 32-byte issuer key, two
+	// timestamps, a TTL cap and a 64-byte signature — so this is roughly three
+	// times what the artifact can be, not a guess at a range.
+	//
+	// It is belt and braces behind stashIssuerCert's real gate, which is that the
+	// ROOT signed the thing. The bound is what keeps a malformed value cheap in the
+	// window between arriving and being refused, on a map keyed by a spoofable UDP
+	// source: without it the read path accepts 64 KiB, and maxPendingChallenges
+	// would bound gigabytes rather than megabytes.
+	maxStashedIssuerCert = 1024
 )
 
 // pendingChallenge is one issued nonce.
@@ -114,12 +127,20 @@ const (
 // minted the nonce, held so the connect that answers it does not have to carry a
 // second copy (issue #183, ADR-0057). See challengeStore.stashCred for what may
 // reach this field and why the raw string is kept rather than the decoded result.
+//
+// issuerCert is the same move for the issuer cert, which the connect no longer
+// carries AT ALL (issue #206, ADR-0062). Its gate is a different authority — see
+// stashIssuerCert — and the raw envelope is kept for stashCred's reason: the
+// connect re-runs the whole verification against the clock and revocation list at
+// connect time, so a cert revoked inside the challenge's two-minute TTL is still
+// refused.
 type pendingChallenge struct {
-	value   []byte
-	expires time.Time
-	spentBy string
-	spent   bool
-	cred    string
+	value      []byte
+	expires    time.Time
+	spentBy    string
+	spent      bool
+	cred       string
+	issuerCert string
 }
 
 // challengeStore holds the nonces this coordinator has issued and not yet seen
@@ -178,17 +199,17 @@ func (s *challengeStore) sweepLocked(now time.Time) {
 	}
 }
 
-// issue mints a fresh challenge for key and stores it alongside cred, replacing any
-// challenge already outstanding for that key — a client that asks twice is retrying,
-// and honouring only the newest keeps one client from holding several live nonces.
-// The credential is replaced with the nonce for the same reason: it is the one that
-// came with the request being honoured.
+// issue mints a fresh challenge for key and stores it alongside cred and
+// issuerCert, replacing any challenge already outstanding for that key — a client
+// that asks twice is retrying, and honouring only the newest keeps one client from
+// holding several live nonces. Both stashed values are replaced with the nonce for
+// the same reason: they are the ones that came with the request being honoured.
 //
 // It returns nil when the store is at capacity after sweeping, which is a refusal
 // to issue rather than an eviction of someone else's live challenge: evicting
 // would let a spoofing attacker knock honest clients out of the store, turning a
 // memory bound into a denial of service against exactly the traffic it protects.
-func (s *challengeStore) issue(key, cred string, now time.Time) []byte {
+func (s *challengeStore) issue(key, cred, issuerCert string, now time.Time) []byte {
 	v := make([]byte, deviceChallengeLen)
 	if _, err := rand.Read(v); err != nil {
 		log.Printf("device credential: cannot generate a challenge: %v", err)
@@ -219,7 +240,7 @@ func (s *challengeStore) issue(key, cred string, now time.Time) []byte {
 		}
 	}
 	s.atCapacity = false
-	s.entries[key] = pendingChallenge{value: v, expires: now.Add(deviceChallengeTTL), cred: cred}
+	s.entries[key] = pendingChallenge{value: v, expires: now.Add(deviceChallengeTTL), cred: cred, issuerCert: issuerCert}
 	return v
 }
 
@@ -234,6 +255,18 @@ func (s *challengeStore) stashedCred(key string, now time.Time) string {
 		return ""
 	}
 	return e.cred
+}
+
+// stashedIssuerCert returns the issuer cert held for key, or "" when there is no
+// live entry. A read, like stashedCred: it disturbs nothing.
+func (s *challengeStore) stashedIssuerCert(key string, now time.Time) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[key]
+	if !ok || !now.Before(e.expires) {
+		return ""
+	}
+	return e.issuerCert
 }
 
 // spend returns the outstanding challenge for key, binding it to the connect nonce
@@ -350,14 +383,15 @@ func setupDeviceCred(ctx context.Context, rootPubHex, audience, advertised, revo
 func challengeKey(src *net.UDPAddr) string { return src.String() }
 
 // issueDeviceChallenge mints a fresh nonce for src and returns it base64-encoded,
-// or "" when the gate is disabled or the store is at capacity. cred is the admission
-// credential the "challenge" carried, stashed for the connect that will answer this
-// nonce (issue #183) — see stashCred for what is actually kept.
-func issueDeviceChallenge(src *net.UDPAddr, cred string) string {
+// or "" when the gate is disabled or the store is at capacity. cred and issuerCert
+// are what the "challenge" carried, stashed for the connect that will answer this
+// nonce (issues #183 and #206) — see stashCred and stashIssuerCert for what is
+// actually kept, which is not the same test in the two cases.
+func issueDeviceChallenge(src *net.UDPAddr, cred, issuerCert string) string {
 	if deviceVerifier == nil {
 		return ""
 	}
-	v := challenges.issue(challengeKey(src), stashCred(cred), time.Now())
+	v := challenges.issue(challengeKey(src), stashCred(cred), stashIssuerCert(issuerCert), time.Now())
 	if v == nil {
 		return ""
 	}
@@ -388,6 +422,61 @@ func stashCred(cred string) string {
 	return cred
 }
 
+// stashIssuerCert is what may be kept from a "challenge"'s issuer cert: the envelope
+// when the anchored ROOT signed it and it is live, and nothing at all otherwise
+// (issue #206, ADR-0062).
+//
+// # Why the gate is not stashCred's gate, which the card asked for
+//
+// #206 says the stash should keep "only what it verified, and only under the same
+// condition the existing stash uses." The first half holds and the second does not,
+// and the difference matters enough to be worth stating rather than quietly getting
+// right. stashCred's condition is `admissionVerifier != nil`, because ADMISSION is
+// what verified the credential it keeps — main.go's "challenge" handler runs admit()
+// before reaching here. Applying that same condition to the issuer cert would refuse
+// to stash on any deployment running the device-credential gate (#50) with admission
+// (#42) switched OFF: the nonce is issued, the client therefore leaves the cert off
+// its connect, the stash is empty, and admitDevice sees no cert and refuses EVERY
+// connect. That is the exact shape of the correction ADR-0057 §2 had to make to its
+// own ruling — the failure is total rather than degraded, and it is an ordinary
+// configuration rather than an edge case.
+//
+// The right condition is the authority that can actually speak for this artifact.
+// An issuer cert is signed by the offline root, which is the one thing a coordinator
+// running this gate is guaranteed to hold — an entry can only exist while
+// deviceVerifier is non-nil (issueDeviceChallenge returns before this on a disabled
+// gate). So the cert is verified HERE, on arrival, and only a cert the root signed
+// and has not revoked is kept.
+//
+// This is strictly stronger than the credential stash rather than a relaxation of
+// it, and it is stronger for a structural reason: an issuer cert is verifiable
+// STANDALONE, while an admission credential's bearer is checked by the gate one
+// layer up and a device credential means nothing without the assertion that binds it
+// to a nonce. Nothing unverified is stored either way.
+//
+// The raw envelope is kept rather than the parsed cert, for stashCred's reason: the
+// connect re-runs the full descent (Verifier.Verify) against the clock and the
+// revocation list AS OF THE CONNECT, so a cert revoked inside the challenge's
+// two-minute TTL is still refused. This check is what may be held, not what is
+// admitted.
+func stashIssuerCert(issuerCert string) string {
+	if deviceVerifier == nil || issuerCert == "" || len(issuerCert) > maxStashedIssuerCert {
+		return ""
+	}
+	signed, err := devicecred.DecodeIssuerCert(issuerCert)
+	if err != nil {
+		return ""
+	}
+	if _, err := deviceVerifier.VerifyIssuerCert(signed, time.Now()); err != nil {
+		// Not logged. This is reachable from any source that can send a datagram, and
+		// one line per malformed cert is how a log becomes as good as no log at all.
+		// The connect that follows is refused by admitDevice, which DOES log, once,
+		// with the reason — and that is the refusal an operator needs to see.
+		return ""
+	}
+	return issuerCert
+}
+
 // admissionCredFor is the admission credential a connect from src should be judged
 // on: the one it carried, or — when it carried none — the one the "challenge" that
 // minted this source's outstanding nonce carried (issue #183, ADR-0057).
@@ -407,6 +496,26 @@ func admissionCredFor(m wire, src *net.UDPAddr) string {
 		return m.Cred
 	}
 	return challenges.stashedCred(challengeKey(src), time.Now())
+}
+
+// issuerCertFor is the issuer cert a connect from src should be verified against:
+// the one it carried, or — when it carried none, which is every connect a current
+// client sends — the one the "challenge" that minted this source's outstanding nonce
+// carried (issue #206, ADR-0062).
+//
+// admissionCredFor's twin, and deliberately the same shape down to the tie-break: a
+// connect that carries its own wins outright and is not compared against the stash.
+// The two differ only in which message the client CHOOSES to put the field on. The
+// admission credential is conditional — it rides the connect whenever no challenge
+// was answered — so both branches here are live. The issuer cert moved outright, so
+// the first branch exists for a client that predates #206 and for nothing else; it
+// is what makes that client keep working against this coordinator, which is the half
+// of compatibility a coordinator can actually provide.
+func issuerCertFor(m wire, src *net.UDPAddr) string {
+	if m.IssuerCert != "" {
+		return m.IssuerCert
+	}
+	return challenges.stashedIssuerCert(challengeKey(src), time.Now())
 }
 
 // admitDevice reports whether a connect may proceed on its device credential.

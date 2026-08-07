@@ -17,11 +17,14 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 )
 
-// wire's Challenge/DeviceCred/IssuerCert/DeviceAssert fields (issue #50/#51,
-// ADR-0045) are built by presentDeviceCredential and awaited by awaitChallenge,
-// both in core/devicecred_connect.go — kept out of this already-large file, but
-// splicing into attemptWith's connect message right here, the one chokepoint
-// every client path (single-transport and pool) funnels through.
+// wire's Challenge/DeviceCred/DeviceAssert fields (issue #50/#51, ADR-0045) are
+// built by presentDeviceCredential and awaited by awaitChallenge, both in
+// core/devicecred_connect.go — kept out of this already-large file, but splicing
+// into attemptWith's connect message right here, the one chokepoint every client
+// path (single-transport and pool) funnels through.
+//
+// The fourth field, IssuerCert, is no longer among them: it rides the "challenge"
+// and the coordinator holds it beside the nonce (issue #206, ADR-0062).
 
 // CountryInfo is one country the coordinator will assign exits in, and the whole of
 // what a client learns about the network's shape (issue #146, ADR-0042).
@@ -938,7 +941,6 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 		ExcludeSessions: req.exclude,
 		Challenge:       fields.challenge,
 		DeviceCred:      fields.cred,
-		IssuerCert:      fields.issuerCert,
 		DeviceAssert:    fields.assert,
 	}, 3)
 

@@ -387,7 +387,7 @@ func TestExpiredChallengeIsRefused(t *testing.T) {
 	s := &challengeStore{entries: map[string]pendingChallenge{}}
 	now := time.Now()
 
-	v := s.issue("peer", "", now)
+	v := s.issue("peer", "", "", now)
 	if v == nil {
 		t.Fatal("issue returned nothing")
 	}
@@ -396,7 +396,7 @@ func TestExpiredChallengeIsRefused(t *testing.T) {
 		t.Fatal("a challenge expired before its TTL")
 	}
 
-	v = s.issue("peer", "", now)
+	v = s.issue("peer", "", "", now)
 	if v == nil {
 		t.Fatal("issue returned nothing")
 	}
@@ -419,12 +419,12 @@ func TestChallengeStoreIsBounded(t *testing.T) {
 	s := &challengeStore{entries: map[string]pendingChallenge{}, capacity: testCap}
 	now := time.Now()
 
-	honest := s.issue("honest-client", "", now)
+	honest := s.issue("honest-client", "", "", now)
 	if honest == nil {
 		t.Fatal("the first issue failed")
 	}
 	for i := 0; i < testCap*4; i++ {
-		s.issue(spoofKey(i), "", now)
+		s.issue(spoofKey(i), "", "", now)
 	}
 	if got := s.len(); got > testCap {
 		t.Fatalf("store holds %d entries, above the %d cap", got, testCap)
@@ -435,7 +435,7 @@ func TestChallengeStoreIsBounded(t *testing.T) {
 	}
 
 	// Expiry frees the store again: once the flood ages out, issuing resumes.
-	if v := s.issue("later-client", "", now.Add(deviceChallengeTTL+time.Second)); v == nil {
+	if v := s.issue("later-client", "", "", now.Add(deviceChallengeTTL+time.Second)); v == nil {
 		t.Fatal("the store never recovered after its entries expired")
 	}
 }
@@ -576,7 +576,7 @@ func TestNothingIsStashedWithoutAnAuthorityToVerifyAgainst(t *testing.T) {
 func TestAStashedCredentialDiesWithItsChallenge(t *testing.T) {
 	s := &challengeStore{entries: map[string]pendingChallenge{}}
 	now := time.Now()
-	if v := s.issue("peer", "bacchusc1:whatever", now); v == nil {
+	if v := s.issue("peer", "bacchusc1:whatever", "", now); v == nil {
 		t.Fatal("issue returned nothing")
 	}
 	if got := s.stashedCred("peer", now.Add(deviceChallengeTTL-time.Nanosecond)); got == "" {
