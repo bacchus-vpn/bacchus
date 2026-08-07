@@ -98,24 +98,36 @@ func parseAuthority(spec string) (admission.Authority, error) {
 // The anchored set is returned alongside the verifier purely so main can log
 // what it anchored (describeAuthorities), matching setupDeviceCred's shape; the
 // verifier keeps its own copy and does not read this one again.
-func setupAdmission(ctx context.Context, pubKeyHex string, authoritySpecs []string, revocationsPath string) (*admission.Verifier, []admission.Authority, error) {
+//
+// The fourth return value is the admission-namespace revocation list this
+// function builds and keeps reloadRevocationsLoop pointed at — nil exactly when
+// admission is disabled, the same case in which no reload loop starts at all.
+// It exists so a caller can point a SECOND, independent source at the identical
+// in-memory list (issue #199, ADR-0017, ADR-0063): the signed-revocations fetch
+// loop in cmd/coordinator/revocations.go installs into this same pointer on a
+// successful verify, additive to the plain-file reload this function already
+// runs. There would be nothing for that second source to populate, and no
+// verifier to ever consult it, if admission itself were off — which is exactly
+// why a disabled admission gate yields a nil pointer here rather than one
+// nobody reads.
+func setupAdmission(ctx context.Context, pubKeyHex string, authoritySpecs []string, revocationsPath string) (*admission.Verifier, []admission.Authority, *atomic.Pointer[admission.RevocationList], error) {
 	var authorities []admission.Authority
 	if pubKeyHex != "" {
 		pub, err := hex.DecodeString(pubKeyHex)
 		if err != nil || len(pub) != ed25519.PublicKeySize {
-			return nil, nil, fmt.Errorf("admission: bad -admission-pubkey: want %d hex-encoded bytes", ed25519.PublicKeySize)
+			return nil, nil, nil, fmt.Errorf("admission: bad -admission-pubkey: want %d hex-encoded bytes", ed25519.PublicKeySize)
 		}
 		authorities = append(authorities, admission.Authority{Pub: ed25519.PublicKey(pub), Roles: admission.AllRoles()})
 	}
 	for _, spec := range authoritySpecs {
 		a, err := parseAuthority(spec)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		authorities = append(authorities, a)
 	}
 	if len(authorities) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	revocations := new(atomic.Pointer[admission.RevocationList])
@@ -127,10 +139,10 @@ func setupAdmission(ctx context.Context, pubKeyHex string, authoritySpecs []stri
 		return revocations.Load().Revoked(serial)
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	go reloadRevocationsLoop(ctx, revocationsPath, revocations)
-	return v, authorities, nil
+	return v, authorities, revocations, nil
 }
 
 // describeAuthorities renders the anchored set for the startup log, as

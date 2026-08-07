@@ -211,7 +211,7 @@ func TestSetupAdmissionFlagComposition(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel() // stop the revocation reload goroutine this starts
-			v, anchors, err := setupAdmission(ctx, tc.pubKey, tc.specs, "")
+			v, anchors, _, err := setupAdmission(ctx, tc.pubKey, tc.specs, "")
 			if err != nil {
 				t.Fatalf("setupAdmission: %v", err)
 			}
@@ -270,7 +270,7 @@ func TestSetupAdmissionRejectsMalformedAnchors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			if _, _, err := setupAdmission(ctx, tc.pubKey, tc.specs, ""); err == nil {
+			if _, _, _, err := setupAdmission(ctx, tc.pubKey, tc.specs, ""); err == nil {
 				t.Fatal("setupAdmission succeeded, want a refusal — main log.Fatals on this, and anything it lets through becomes a running coordinator")
 			}
 		})
