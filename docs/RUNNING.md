@@ -615,6 +615,45 @@ install.
 Both bars are floors rather than schedules: they refuse, they do not refresh anything.
 Performing the refresh is still the manual step above.
 
+### The scheduled drift check (issue #150)
+
+The two bars above only ever fire once somebody pushes, opens a pull request, or cuts a
+release — so a quiet repository can drift past them with nothing noticing. A scheduled
+workflow closes that gap the same way [`bacchus-geoip-refresh.timer`](#keeping-it-fresh-issue-85)
+closes it for the country database above, but it cannot refresh anything the way that timer
+does: ADR-0044's fourth amendment §5 priced a scheduled job that opens a refresh pull
+request against the credential it would need, and the owner ruled against holding one in
+CI (recorded in the ADR's sixth amendment). What runs instead only **detects**:
+
+| file | what it is |
+|---|---|
+| `deploy/bacchus-asn-drift-check.sh` | fetch upstream, stage it through `asn-stage`, compare against the committed table |
+| `.github/workflows/asn-table-drift.yml` | runs the script weekly, and on demand via `workflow_dispatch` |
+
+```
+sh deploy/bacchus-asn-drift-check.sh
+```
+run from the repository root, is exactly what the workflow runs and the way to rehearse it
+by hand against the real feed. It fetches, decompresses, checks a row-count floor, stages
+through `asn-stage` and compares — never writing to `core/asn/table.tsv.gz` on any path,
+including every failure path. Exit **0** means no drift; exit **1** means the check itself
+could not complete (a bad download, a corrupt transfer, a feed too small to be a real
+release) and says nothing about whether the table is stale; exit **2** means the staged
+table differs from the committed one, and the message names the same three commands as
+[above](#refreshing-the-table-per-client-release) for fixing it.
+
+**Expect the workflow to stay red for stretches of ordinary time.** This compares byte for
+byte against a feed upstream rebuilds hourly, not against the calendar, so once the
+committed table is even a day behind it keeps failing on every scheduled run until somebody
+refreshes it — not only once it crosses 90 or 30 days. That is the intended shape of the
+signal: a single workflow staying red until acted on, rather than a pile of filed issues
+(this project's board treats the claim signal as the column a card sits in, and a bot-filed
+issue lands in none of them). No repository write, no stored credential, and no pull
+request are opened at any point — see
+[ADR-0044](adr/0044-as-lookup-seam-and-as-diverse-hop-selection.md)'s sixth amendment for
+the full argument and for why a repository-write credential in CI was refused rather than
+merely left unbuilt.
+
 ## Transport selection
 `-transport` picks the session transport (ADR-0008): `webrtc` (default; UDP/DTLS
 with NAT traversal) or `reality` (TCP :443 under camouflage TLS, issue #16). The

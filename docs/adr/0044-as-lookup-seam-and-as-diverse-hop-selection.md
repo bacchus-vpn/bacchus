@@ -925,6 +925,13 @@ cost, and because the honest reason to still want A is that C leaves a human in 
 which is the thing the timer was supposed to remove. The choice is the owner's; it is a
 credential decision, not a CI one. Carried as #150.
 
+> **Update (2026-08-07, #150): ruled and built.** The owner ruled option C on the issue.
+> The sixth amendment at the end of this record documents what was built: a scheduled
+> workflow and the script that carries option C's fetch-and-compare discipline, the
+> cadence and its justification against `tableReleaseMaxAge` rather than a round number,
+> and what now makes "no repository write" a property of a workflow file a reviewer can
+> read rather than only of this prose.
+
 ### 6. Consequences
 
 - **A release cannot be cut on a stale table** — on Windows, which is where releases are
@@ -953,6 +960,8 @@ credential decision, not a CI one. Carried as #150.
   #66 closes on the enforcement; none of the three is folded into it.
   > **Update (2026-08-04):** #149 and #151 are both ruled and built — see §4's update
   > and the fifth amendment. #150 is still open and is still a custody decision.
+  > **Update (2026-08-07):** #150 is now ruled and built too — see §5's own update
+  > and the sixth amendment. All three cards this bullet named are closed.
 
 ## Amendment (2026-08-04, #151) — a release is cut from `main` or it is not cut
 
@@ -1082,3 +1091,174 @@ does instead, and it warns rather than refuses.
 - **A pre-release tag is still unreachable**, unchanged. `verify-version`'s first step
   compares against a bare `VERSION`, so `v1.0.0-rc1` cannot pass it and never reaches this
   step. Nothing here revisits that.
+
+## Amendment (2026-08-07, #150) — the scheduled refresh ships: option C, cadence priced against the tighter bar
+
+The fourth amendment §5 priced three options for the scheduled refresh and ruled none of
+them — "the choice is the owner's; it is a credential decision, not a CI one." The owner
+has since ruled, on the issue: **option C**, no repository write at all. This amendment
+records what was built and is not a re-argument of the choice; §5 above still carries the
+reasoning and it is unchanged.
+
+### 1. What ships
+
+Two files, split the same way `deploy/bacchus-geoip-refresh.sh` and its `.timer`/`.service`
+units are split — the mechanism and its schedule are not the same file:
+
+| file | what it is |
+|---|---|
+| `deploy/bacchus-asn-drift-check.sh` | fetch upstream, stage it through `asn-stage`, compare against the committed table |
+| `.github/workflows/asn-table-drift.yml` | runs the script on a schedule, and on demand |
+
+The script's exit status is two-valued on purpose, and the split is the whole point of
+"fail loudly" meaning something useful rather than merely something loud: **1** means the
+check could not be completed — a bad download, a corrupt transfer, a row count far below
+what a real release carries, or a transform `asn-stage` itself refused — and is *not*
+evidence the committed table is stale. **2** means the check ran to completion and the
+freshly staged table differs from the committed one, which is the signal §5 exists to
+raise. Conflating the two would misdirect whoever reads the failure: a network blip is not
+fixed by regenerating the table, and telling an operator to do so over one is worse than
+not checking at all, for the same reason a false alarm erodes a real one.
+
+### 2. "Leave the previous file intact" is stronger here than the precedent it carries
+
+§5 asked for `bacchus-geoip-refresh.sh`'s discipline on the fetch half, and the script
+carries it unchanged: fetch and decompress into a scratch directory the script owns
+outright, verify the decompression and a row-count floor before trusting a byte of it, and
+only then run the transform. A bad download cannot reach the comparison, let alone the
+committed file.
+
+What differs from the precedent is *why that matters here*. `bacchus-geoip-refresh.sh`
+guards against handing a half-written table to a **live coordinator process** that might
+start mid-refresh on an operator's own host. Nothing here plays that role — this runs in a
+disposable CI checkout that nothing else reads concurrently — so the sharper risk is not a
+process racing the refresh, it is the script itself corrupting the one file the whole
+comparison depends on reading unmolested. The script's answer is not to be more careful
+about it: it simply never opens `core/asn/table.tsv.gz` (or its overridable stand-in) for
+writing, on any path, including every failure path. That is checked, not assumed —
+`deploy/asn_drift_check_test.go`'s behavioural tests hash the fixture "committed" table
+before and after every failure scenario, including the successful-drift-detection one, and
+a mutation that made the drift path `cp` the staged file over the committed one (rehearsed
+while building this, not merely imagined) was caught immediately by that check.
+
+### 3. The cadence, argued against `tableReleaseMaxAge` rather than chosen
+
+`core/asn/embedded_test.go` carries two bars on the committed table's age: `tableMaxAge`
+(90 days, the floor under any build) and `tableReleaseMaxAge` (30 days, the tighter bar a
+release has to clear). The workflow runs **weekly**, priced against the tighter of the two:
+
+- A weekly run catches the first sign of drift within at most 7 days of it appearing —
+  about a quarter of the 30-day release budget — leaving roughly 23 days of that budget,
+  and roughly 83 of the 90-day floor, for somebody to see the failure, refresh the table
+  and commit before either bar is actually crossed.
+- It is also the cadence already chosen for this exact publisher's sibling feed
+  (`deploy/bacchus-geoip-refresh.timer`, issue #85), so this is not a second, unexplained
+  polling rhythm for the same upstream — iptoasn.com rebuilds hourly regardless of which
+  of its two files is being polled, and nothing about the AS mapping's measured ~1.3%/month
+  drift (§6) suggests it moves on a different clock than the country mapping does.
+
+Both numbers are read off constants this amendment does not own (`core/asn` is another
+lane's territory in the wave this shipped in) and are restated here as prose rather than
+imported, the same way `docs/RUNNING.md`'s own table already restates them.
+
+### 4. Why this is expected to stay red between refreshes, named rather than left to be discovered
+
+This is **not** a calendar check like `TestEmbeddedTableIsFresh`. It is a byte-for-byte
+comparison against a feed that changes continuously, so once the committed table is even a
+day behind, the workflow keeps failing on every scheduled run until somebody refreshes it —
+not only once the table crosses 90 or 30 days. That follows directly from what "byte for
+byte" means against a live feed, and it is worth stating plainly rather than letting a
+future reader discover it and wonder whether the workflow is broken.
+
+It is also, on reflection, the correct shape for what wave ruling R7 asked for. R7 refused
+letting the timer file an issue on the ground that a bot adding to the board's issue set
+makes the board less trustworthy than the notification is worth. A workflow that stays red
+continuously until acted on is a *different* signal shape from an accumulating issue count
+— it is one indicator, always answerable by looking at one page, that gets quieter the
+moment somebody acts and no quieter before that. No cadence choice changes this property;
+it is a consequence of comparing byte for byte at all, which is the mechanism §5 already
+argued for on other grounds (the regenerate-and-compare property the committed table exists
+to make checkable). Recorded here so it reads as a documented consequence of that argument
+rather than as an unrelated surprise.
+
+### 5. What makes "no repository write" a property of the workflow, not only of this prose
+
+The workflow declares `permissions: contents: read` at the top level and grants nothing
+else to any job. That is not decoration: it is the one place the argument §5 above already
+makes against options A and B — a repository-write token is a weaker form of the same
+object ADR-0052 §6 refuses to let CI hold, on the ground that a build machine able to sign
+is a build machine able to push code — becomes something a reviewer can read off the YAML
+rather than something they have to take on the strength of this prose. `deploy/asn_drift_check_test.go`'s
+`TestScheduledWorkflowNeverRequestsRepositoryWrite` asserts both the presence of that block
+and the absence, anywhere in the file, of the write-scoped permissions options A or B would
+have needed — so a future edit that quietly added one back would fail on the next ordinary
+pull request, in the same way `core/asn.TestReleaseWorkflowGatesTheTable` already guards
+`release.yml`'s own gates from the other side.
+
+### 6. A consequence neither #150 nor §5 named: this is now the only recurring check of the two calendar bars
+
+`TestEmbeddedTableIsFresh` carries both age bars, but it only ever runs inside `ci.yml`
+(on a push or a pull request) or `release.yml`'s `verify-table` job (on a tag). Both are
+**event-triggered**. If the repository were to go quiet — no pushes, no pull requests, no
+tags — for longer than `tableMaxAge`, nothing would re-run the freshness test and nothing
+would notice the 90-day floor had been crossed; the next person to find out would be
+whoever next opens a pull request, however much later that is. `asn-table-drift.yml`'s
+`schedule:` trigger is not event-triggered, so it is now the only mechanism in this
+repository that re-asserts a calendar fact independent of development activity continuing
+at all. That is a real property beyond "detects upstream drift" — the two bars stop being
+purely reactive to a human doing something else first.
+
+### 7. Testing
+
+`deploy/asn_drift_check_test.go` follows the shape `deploy/windows/i18n_test.go` and
+`clients/fyne/manifest_test.go` already establish for this repository — an ordinary Go test
+whose subject is a non-Go build artifact — and goes one step further where the artifact is
+executable: it runs the real script, against an `httptest` fixture server standing in for
+upstream, and exercises every exit path named in §1 above (no drift, real drift, an
+unreachable server, a corrupt download, a download too small to be a real release, and a
+download that fails `asn-stage`'s own validation), plus the workflow file's wiring
+(schedule, `workflow_dispatch`, the pinned toolchain, and the permissions restriction in §5
+above). None of it touches the real, 700,000-row committed table or the real upstream feed
+— every fixture is a handful of documentation-space rows, the same choice
+`core/asn/embedded_test.go`'s own header explains for the real table: a failure should name
+rows a reader can check by eye, not a diff of a multi-megabyte file. It runs inside
+`ci.yml`'s existing `./deploy/...` glob (added for `deploy/windows` under issue #145),
+without any change to that file.
+
+Mutation-tested while this was built, in the sense this repository already means by that
+phrase (§3's `workflowSetsEnv`, `core/asn.TestReleaseWorkflowGatesTheTable`'s own doc
+comment): an early draft of the workflow-wiring tests checked `strings.Contains(src,
+"schedule:")`, which is also satisfied by `disabled_schedule:` — a mutation exercising
+exactly that rename passed silently against the first draft and failed correctly once the
+check was rewritten to match a line's *prefix* rather than search the whole file for a
+substring. Left as `hasYAMLLine` in the test file for the same reason `workflowSetsEnv`
+exists: the failure mode is specific enough to be worth a named guard against recurring.
+
+### 8. What stays refused
+
+Options A and B are not revisited — §5 above still carries the argument, ADR-0052 §6 still
+refuses CI a repository-write credential on the same ground, and nothing measured while
+building C changes either. What this amendment adds is that the refusal is now also
+something the workflow file states about itself (§5 above) and something a test enforces
+on every ordinary pull request that touches it, rather than a decision that lives only in
+this document.
+
+### 9. Consequences
+
+- **"Somebody must remember" is closed for the AS table**, the same way issue #85 closed it
+  for the country database — a run on a timer whose failure is visible removes the need for
+  a human to think to check. "Somebody must act" is unchanged and was never intended to
+  close here; §5's own argument is that leaving it open is the point of choosing C.
+- **The committed table is never opened for writing by this workflow**, on any path,
+  checked by `deploy/asn_drift_check_test.go` rather than asserted only in prose.
+- **The two calendar bars in `core/asn/embedded_test.go` now have a recurring check
+  independent of development activity** (§6 above) — a property this amendment did not set
+  out to build and found while pricing the cadence.
+- **The workflow is expected to run red for stretches of ordinary time**, between a table
+  going stale and somebody refreshing it, and that is the intended shape of the signal
+  rather than a defect to quiet (§4 above). A future change that adds a tolerance threshold
+  to quiet it down would be a different, unruled design and not a bug fix.
+- **Nothing here revisits §6's measurement, the encoding, the source, or the embedding
+  decision.** This amendment is scoped to the refresh mechanism alone.
+- **#150 is closed.** All three cards the fourth amendment's §6 named as carrying what it
+  did not build — #149, #150, #151 — are now ruled and built.
