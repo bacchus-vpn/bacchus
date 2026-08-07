@@ -101,6 +101,11 @@ done
 	fail "$table_path does not exist — run this from the repository root, or set BACCHUS_ASN_TABLE_PATH"
 
 scratch=$(mktemp -d)
+# Invoked indirectly, via `trap cleanup EXIT` below - shellcheck cannot follow a
+# trap target to its definition, and reports this as unreachable/unused (rehearsed
+# locally: it fires even with a single top-level `exit` later in the script and
+# clears if that exit is removed, which is not a reason to remove it).
+# shellcheck disable=SC2317,SC2329
 cleanup() { rm -rf "$scratch"; }
 trap cleanup EXIT
 trap 'exit 130' INT
