@@ -1,0 +1,157 @@
+{
+ "note": "Frozen NEGATIVE wire vectors for the root -\u003e revocations delegation -\u003e revocations document chain (ADR-0017, bacchus-payment#77). Every case here MUST be rejected, and rejected with the error named in expect_error. Every key is a published throwaway; see internal/devroot. A verifier holding root_pub alone must refuse each case at its own `now`, with min_as_of as the newest as_of it has already accepted and revoked_serial (when set) reported revoked by its revocation predicate. Passing these plus vectors.json is what makes conformance mean a correct verifier rather than a byte match. Regenerate only alongside a deliberate format change: go test ./internal/revocation -update.",
+ "root_pub": "G3qe/RAaWSSOU+NMl5UUj9/E2nEr2PfgFGzbL9aHisY=",
+ "cases": [
+  {
+   "name": "revocations under a foreign root",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyI5MWJlMmYzYzExMjIzMzQ0IiwiM2YyYTViNmMwMDExMjIzMyIsIjkxYmUyZjNjMTEyMjMzNDQiXX224G0DhCUXPW51kMhKLNAfBEXM2q6gz9H2gMSXw3DqOxyo3Q6F5AneLVhbP+3EDQSSXSQXMEVwIYa2Yc2El9oK",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiI2YTc4ODI1ZWQ3MzE0ZWZlIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiZGF0b2ZPbEdpb3gra2pGbllCZ3FDTk5vVmRxWGhSZGwwN0drTWhhbzl4dz0iLCJuYmYiOiIyMDI2LTA4LTE1VDExOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6ImZvcmVpZ24gcmV2b2NhdGlvbnMgc2lnbmVyIn0l2LJsADOIHJ5MqChGgX3uVFvtvryC3TOgHAx7sXtcLo5cub5STGOmdzNZ7LTNJHFEXd+0Pi2G7YtJzgK7UqEO"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "bad_signature"
+  },
+  {
+   "name": "policy-role delegation presented as revocations",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyI5MWJlMmYzYzExMjIzMzQ0IiwiM2YyYTViNmMwMDExMjIzMyIsIjkxYmUyZjNjMTEyMjMzNDQiXX0iHhxAweytmM1XyRZ8uHKzyDcSaRb86cIPtMGMnL04mHHwj2WFuRRIOrDUoGSIACdr+YsuQIVIC3hHhqUsiW0J",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJhZmIzOGYzNjFjN2E4MGQ3Iiwicm9sZSI6InBvbGljeSIsInB1YiI6IlNncDN6QjlVZm8ydnZXdE1aL2pLL2tEVzVDdG1YR3cweWlvbXhQS2tITDQ9IiwibmJmIjoiMjAyNi0wOC0xNVQxMTowMDowMFoiLCJleHAiOiIyMDI3LTA4LTE1VDEyOjAwOjAwWiIsIm5vdGUiOiJwb2xpY3kgc2lnbmVyIn1O2JmXSdaIhd2AMAgFbmBwzpddDLaksSH6RDa/CasrL0gvuSwc/TLQAuLI3Uvww2CVsnfbbM56hZ5WTvcij+gA"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "wrong_role"
+  },
+  {
+   "name": "a serial removed after signing",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyIzZjJhNWI2YzAwMTEyMjMzIiwiMDAwMDJmM2MxMTIyMzM0NCJdfQfebuMz4AockIQ5Uy8q3GGM+26WHvrRot/hK3V+c6PJwtOEuTWMFgK+7Xat46vbpkti8/Y+BSQND2Gh2GnBTwg=",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "bad_signature"
+  },
+  {
+   "name": "document signature tampered",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyIzZjJhNWI2YzAwMTEyMjMzIiwiOTFiZTJmM2MxMTIyMzM0NCJdfQfebuMz4AockIQ5Uy8q3GGM+26WHvrRot/hK3V+c6PJwtOEuTWMFgK+7Xat46vbpkti8/Y+BSQND2Gh2GnBT/c=",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "bad_signature"
+  },
+  {
+   "name": "delegation cert body tampered",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyIzZjJhNWI2YzAwMTEyMjMzIiwiOTFiZTJmM2MxMTIyMzM0NCJdfQfebuMz4AockIQ5Uy8q3GGM+26WHvrRot/hK3V+c6PJwtOEuTWMFgK+7Xat46vbpkti8/Y+BSQND2Gh2GnBTwg=",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6IlJFVk9DQVRJT05TIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "bad_signature"
+  },
+  {
+   "name": "issuer cert presented as the revocations delegation",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyIzZjJhNWI2YzAwMTEyMjMzIiwiOTFiZTJmM2MxMTIyMzM0NCJdfQfebuMz4AockIQ5Uy8q3GGM+26WHvrRot/hK3V+c6PJwtOEuTWMFgK+7Xat46vbpkti8/Y+BSQND2Gh2GnBTwg=",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJmNTVhZjU2ZWU2NWZlNDNjIiwiaXB1YiI6IjBFK3VYYWdadnhXamlDUlZFU2ZEWkhBZmpzRDZWMWx0NUN6bjdqWEhpczQ9IiwibmJmIjoiMjAyNi0wOC0xNVQxMTowMDowMFoiLCJleHAiOiIyMDI3LTA4LTE1VDEyOjAwOjAwWiIsIm10dGwiOjI1OTIwMDAwMDAwMDAwMCwibm90ZSI6Imlzc3VlciJ9XfVz2Zh7aC7XJ0Ue/+0RvGB1HN+IXxxxjN3LMdP/AdND2E1OII01xkGd1DkkQGGyb7E8Eeh+pItV5iLgF7z4Dg=="
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "bad_signature"
+  },
+  {
+   "name": "delegation cert presented as the revocations document",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "bad_signature"
+  },
+  {
+   "name": "document and delegation from two different signers the same root delegates",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyI5MWJlMmYzYzExMjIzMzQ0IiwiM2YyYTViNmMwMDExMjIzMyIsIjkxYmUyZjNjMTEyMjMzNDQiXX1CnIpg4RC4vCq+4TztvWNFgh0ifhqsmf/vQuTB8lWmkDcQvoFnM33k+twkJmKxaiY4HLpsz0NYiCABLin2IU8M",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "bad_signature"
+  },
+  {
+   "name": "live document under a delegation whose window closed",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyIzZjJhNWI2YzAwMTEyMjMzIiwiOTFiZTJmM2MxMTIyMzM0NCJdfQfebuMz4AockIQ5Uy8q3GGM+26WHvrRot/hK3V+c6PJwtOEuTWMFgK+7Xat46vbpkti8/Y+BSQND2Gh2GnBTwg=",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiIwOTQwNDI2MjA5OGY3OGI3Iiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTEyVDEyOjAwOjAwWiIsImV4cCI6IjIwMjYtMDgtMTRUMTI6MDA6MDBaIiwibm90ZSI6ImxhcHNlZCByZXZvY2F0aW9ucyBzaWduZXIifS55YJLsnqXAQG54yEX8tc8/zxBHrWBJgjHyvuQNsfP3TA/5il1fFbaPXYLnzQSS4Rk1OkiNAgCRKsXDxt2NlAY="
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "delegation_expired"
+  },
+  {
+   "name": "delegation revoked by serial",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyIzZjJhNWI2YzAwMTEyMjMzIiwiOTFiZTJmM2MxMTIyMzM0NCJdfQfebuMz4AockIQ5Uy8q3GGM+26WHvrRot/hK3V+c6PJwtOEuTWMFgK+7Xat46vbpkti8/Y+BSQND2Gh2GnBTwg=",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "revoked_serial": "d74c09023abab83c",
+   "expect_error": "delegation_revoked"
+  },
+  {
+   "name": "older as_of replayed after a newer one was accepted",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTE6MDA6MDBaIiwicmV2b2tlZCI6WyJzdGFsZS1vbmx5Il198QqTdRpZCib6KXCryy2LImQR4CTntvcdZUPAs80WlGIoVRvvIN5j1DOFItQaC3vNWIavafpEjOylZoJHrcNZAw==",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T13:00:00Z",
+   "min_as_of": "2026-08-15T13:00:00Z",
+   "expect_error": "rollback"
+  },
+  {
+   "name": "document of an unsupported version",
+   "bundle": {
+    "revocations": "eyJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyI5MWJlMmYzYzExMjIzMzQ0IiwiM2YyYTViNmMwMDExMjIzMyIsIjkxYmUyZjNjMTEyMjMzNDQiXSwidiI6Mn1TWlE412WQkpcntKj6UN+Q4JojvjzqWm8SCg+fWV8pUeyWJ7c35ptKaK0vDWRIlRuJ7k3PCZruwsOmJNkSGMwB",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "unsupported_version"
+  },
+  {
+   "name": "document truncated below a signature",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA=",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "malformed"
+  },
+  {
+   "name": "document body is not JSON",
+   "bundle": {
+    "revocations": "bm90IGEgcmV2b2NhdGlvbnMgZG9jdW1lbnTXIf0JNfucfUKD3w24kdFq3SpCO67gdoEk7WT25rW7BmRKKVFeg9HXs4yuSQllSTn8oZlIIuAsbLi+UAuEpSYG",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODNjIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In0W7DYPuPij5VjPDLxC/5MRU74RcyURdyjar4n9OaWBooR/LPHwEPEsZcTob+9/d9icHWVu0WRmC4iZpXyDdNEN"
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "malformed"
+  },
+  {
+   "name": "delegation cert truncated below a signature",
+   "bundle": {
+    "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyIzZjJhNWI2YzAwMTEyMjMzIiwiOTFiZTJmM2MxMTIyMzM0NCJdfQfebuMz4AockIQ5Uy8q3GGM+26WHvrRot/hK3V+c6PJwtOEuTWMFgK+7Xat46vbpkti8/Y+BSQND2Gh2GnBTwg=",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiJkNzRjMDkwMjNhYmFiODM="
+   },
+   "now": "2026-08-15T12:00:00Z",
+   "min_as_of": "0001-01-01T00:00:00Z",
+   "expect_error": "delegation_malformed"
+  }
+ ]
+}
