@@ -104,6 +104,18 @@ type Controller struct {
 	// warning that vanished when they pressed the button would vanish exactly
 	// when they had time to act on it.
 	cred CredentialState
+
+	// dir is the last signed cold-start directory this client verified
+	// (bacchus#193, ADR-0061), or the zero Directory when it holds none. Like
+	// cred it outlives a connect attempt — a directory is a fact about the
+	// network, not about one session — and unlike cred it EXPIRES, which
+	// AcquireDirectory checks on every read rather than trusting the moment it
+	// was stored.
+	//
+	// Held here so a country refresh and a connect agree about where the
+	// coordinators are. Two answers to that question is how a picker ends up
+	// listing the countries of a coordinator the connect is no longer dialling.
+	dir Directory
 }
 
 // CredentialState is what this client knows about its own device credential, and
@@ -179,6 +191,46 @@ func (c *Controller) CredentialState() CredentialState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.cred
+}
+
+// acquireDirectory refreshes this client's view of the signed cold-start
+// directory and returns it (bacchus#193). The zero Directory means there is none
+// — no invite, or nothing reachable — and every caller falls back to the
+// configured addresses for that case.
+//
+// The I/O happens with the lock RELEASED. It reads a file and can send a UDP
+// request with a five-second timeout, and holding c.mu across that would block
+// every state publish, every OnState callback and the UI goroutine behind them
+// for as long as a silent coordinator takes to time out.
+//
+// The result is stored only if it is one: a failed refresh keeps whatever was
+// held, so a connect during a coordinator outage still has the directory the
+// last one fetched, right up to the moment it expires on its own.
+func (c *Controller) acquireDirectory(ctx context.Context) (Directory, error) {
+	c.mu.Lock()
+	held, cfg := c.dir, c.cfg
+	c.mu.Unlock()
+
+	dir, err := AcquireDirectory(ctx, cfg, held, c.logf)
+	if err != nil {
+		return Directory{}, err
+	}
+
+	c.mu.Lock()
+	if dir.Held() {
+		c.dir = dir
+	}
+	c.mu.Unlock()
+	return dir, nil
+}
+
+// effectiveAddrs resolves what a connect (or a country refresh) should actually
+// dial: the coordinator pool and the account service address list, each after
+// the directory has had its say. See EffectiveCoordinators and
+// EffectiveAccountServiceURLs — they differ, and the difference has a reason.
+func effectiveAddrs(cfg Config, dir Directory) (coords, accountURLs []string) {
+	return EffectiveCoordinators(dir.Coordinators(), cfg.Coordinators),
+		EffectiveAccountServiceURLs(dir.AccountServiceURLs(), cfg.AccountServiceAddresses())
 }
 
 func NewController(cfg Config) *Controller {
@@ -544,8 +596,22 @@ func (c *Controller) RefreshCountries() {
 	c.mu.Unlock()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), CountryListTimeout+2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), CountryListTimeout+2*time.Second+directoryTimeout)
 		defer cancel()
+		// The same directory a connect would use (bacchus#193), so the picker
+		// asks the coordinator this client is actually going to dial. Without
+		// it, a moved coordinator leaves the picker listing nothing while the
+		// connect works — which reads as "the network has no countries".
+		//
+		// A malformed invite is not surfaced here: this is a background refresh
+		// with a status line, the connect refuses with the same message and a
+		// sentence the user is waiting for, and turning a typo into a picker
+		// error would report it in the least useful of the two places.
+		dir, derr := c.acquireDirectory(ctx)
+		if derr != nil {
+			c.logf("countries: %v", derr)
+		}
+		cfg.Coordinators, _ = effectiveAddrs(cfg, dir)
 		countries, err := FetchCountries(ctx, cfg, c.logf)
 
 		c.mu.Lock()
@@ -617,7 +683,24 @@ func (c *Controller) Connect() {
 }
 
 func (c *Controller) connectAsync(gen uint64) {
-	if !hasCoordinator(c.cfg.Coordinators) {
+	// The signed directory first, because it can supply the coordinator pool
+	// the very next line checks for (bacchus#193, ADR-0061). A client with no
+	// invite gets the zero Directory and no I/O at all, so everything below is
+	// exactly what it was; a client with one pays a file read, or — at most once
+	// per snapshot lifetime — one bounded UDP round trip.
+	//
+	// The error case is a malformed invite and nothing else. It aborts, named,
+	// for the reason LoadRelayDirectory's failure does: it is the user's to fix,
+	// and a typo that silently disabled directory updates would leave them
+	// believing this client follows a moved address when it does not.
+	dir, err := c.acquireDirectory(context.Background())
+	if err != nil {
+		c.abort(gen, err)
+		return
+	}
+	coords, accountURLs := effectiveAddrs(c.cfg, dir)
+
+	if !hasCoordinator(coords) {
 		c.abort(gen, noCoordinatorsError())
 		return
 	}
@@ -694,7 +777,7 @@ func (c *Controller) connectAsync(gen uint64) {
 	// URL that is not a URL, is the user's to fix and is named here rather than
 	// surfacing as one of core's construction errors about a field they never
 	// set.
-	dc, err := c.openDeviceCredential()
+	dc, err := c.openDeviceCredential(accountURLs)
 	if err != nil {
 		c.abort(gen, err)
 		return
@@ -714,7 +797,11 @@ func (c *Controller) connectAsync(gen uint64) {
 	c.publishCredentialFromStore(dc)
 
 	eng, err := core.New(core.Config{
-		Coordinators: c.cfg.Coordinators,
+		// The directory's coordinators ahead of the configured ones
+		// (bacchus#193). Identical to c.cfg.Coordinators for a client with no
+		// invite, and for one whose directory names a coordinator it already
+		// had.
+		Coordinators: coords,
 		// The client role, plus whichever serve roles were volunteered (issue
 		// #12). Always includes RoleClient: a volunteer donates its connection
 		// ALONGSIDE using it, so the serve roles add to the client role rather
@@ -863,7 +950,7 @@ func (c *Controller) connectAsync(gen uint64) {
 	// degrading to unprotected is the one failure mode this whole bar exists
 	// to rule out" — and the overwhelmingly common cause is running
 	// unelevated, which is fixable, but only by a user who is told.
-	sess, err := c.startEnforcement(volunteer.Serving())
+	sess, err := c.startEnforcement(volunteer.Serving(), coords)
 	if err != nil {
 		eng.Stop()
 		cancel()
@@ -924,22 +1011,43 @@ type deviceCredential struct {
 // absent CA silently falls back to the public root pool — so a typo here has to
 // stop the connect and name itself, not leave the user enrolled against
 // whoever answered.
-func (c *Controller) openDeviceCredential() (deviceCredential, error) {
+//
+// addrs is the resolved address list — the signed directory's when it named any,
+// the configured one otherwise (bacchus#193, see EffectiveAccountServiceURLs).
+// It is passed in rather than read from c.cfg so that the addresses this client
+// dials and the addresses it was told about cannot drift apart between the two
+// callers.
+//
+// The gate is still c.cfg.AccountServiceConfigured(): a deployment that names no
+// account service is a complete one, and a directory naming a service this
+// client was never configured for could not be used anyway — the audience and
+// the pinned CA are exactly the two values the directory does not and must not
+// carry. So the config remains what turns this on, and the directory only says
+// where.
+func (c *Controller) openDeviceCredential(addrs []string) (deviceCredential, error) {
 	dir := c.cfg.EffectiveDeviceCredDir()
 	dev, err := core.OpenDeviceEnrollment(dir)
 	if err != nil {
 		return deviceCredential{}, err
 	}
 	out := deviceCredential{dev: dev, dir: dir}
-	if !c.cfg.AccountServiceConfigured() {
+	if !c.cfg.AccountServiceConfigured() || len(addrs) == 0 {
 		return out, nil
 	}
-	addrs := c.cfg.AccountServiceAddresses()
-	// Said out loud rather than left to be discovered: a config that names both
-	// keys uses the list, and an operator who edited the older one and saw no
-	// change has no other way to find that out. Only when the two actually
-	// disagree — naming the same address twice is not a mistake worth a line.
-	if legacy := strings.TrimSpace(c.cfg.AccountServiceURL); legacy != "" && !slices.Contains(addrs, legacy) {
+	// Which list won, said out loud. Two different silences are being closed
+	// here and they are one sentence apart:
+	//
+	//   - The directory superseding the config (bacchus#193). An operator who
+	//     edits this file and sees no change deserves to know that a signed
+	//     answer is overriding it, and this line is the only place that can say
+	//     so — nothing else in the client reports where an address came from.
+	//   - The older single-address key losing to the list (bacchus#192), which
+	//     is the same complaint one layer down. Only when the two actually
+	//     disagree: naming the same address twice is not a mistake worth a line.
+	if configured := c.cfg.AccountServiceAddresses(); !slices.Equal(addrs, configured) {
+		c.logf("account service: using the address(es) the signed directory names (%s) rather than the %d in this client's config file (%s)",
+			strings.Join(addrs, ", "), len(configured), strings.Join(configured, ", "))
+	} else if legacy := strings.TrimSpace(c.cfg.AccountServiceURL); legacy != "" && !slices.Contains(addrs, legacy) {
 		c.logf("account service: using accountServiceUrls (%s); the older accountServiceUrl key (%s) is not in that list and is being ignored", strings.Join(addrs, ", "), legacy)
 	}
 	cl, err := accountclient.New(accountclient.Config{
@@ -1266,7 +1374,15 @@ func RoughDuration(d time.Duration) string {
 // intended shape and Config.ClaimCode is the interim; this method is what makes
 // the two the same code path rather than two implementations of one exchange.
 func (c *Controller) Enroll(ctx context.Context, claim, label string) error {
-	dc, err := c.openDeviceCredential()
+	// The same directory the connect path uses, so a dialog and a connect never
+	// enroll against two different addresses (bacchus#193). A malformed invite
+	// is returned as-is: this method's caller shows what it gets.
+	dir, err := c.acquireDirectory(ctx)
+	if err != nil {
+		return err
+	}
+	_, accountURLs := effectiveAddrs(c.cfg, dir)
+	dc, err := c.openDeviceCredential(accountURLs)
 	if err != nil {
 		return err
 	}
@@ -1341,7 +1457,14 @@ func (c *Controller) underlayDialHook() func(string) {
 // the plan is the validated answer and the config is only the request — a
 // stored opt-in that PlanVolunteer refused must not turn into a carve-out
 // here.
-func (c *Controller) startEnforcement(serving bool) (enforcement.Session, error) {
+//
+// coords is the pool the ENGINE was built against, passed in for the same
+// reason and a sharper one (bacchus#193): the kill-switch allows the coordinator
+// addresses through the lockdown, so a policy built from the config while the
+// engine dials the directory's addresses would block the one socket the session
+// depends on — the tunnel would come up and the client would be unable to reach
+// the coordinator that arranged it.
+func (c *Controller) startEnforcement(serving bool, coords []string) (enforcement.Session, error) {
 	if c.enf == nil {
 		return nil, nil
 	}
@@ -1350,7 +1473,7 @@ func (c *Controller) startEnforcement(serving bool) (enforcement.Session, error)
 		dns = DefaultDNSUpstream
 	}
 	sess, err := c.enf.Start(enforcement.Policy{
-		Coordinators: c.cfg.Coordinators,
+		Coordinators: coords,
 		STUNURL:      c.cfg.STUN,
 		TURNURL:      c.cfg.TURN,
 		DNSUpstream:  dns,

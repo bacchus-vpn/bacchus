@@ -59,7 +59,7 @@ func TestEachHelperFailureKeepsItsOwnSentence(t *testing.T) {
 			c.OnState = func(ConnState) {}
 			c.OnDetail = func(d Detail) { details = append(details, d.Text) }
 
-			_, err := c.startEnforcement(false)
+			_, err := c.startEnforcement(false, c.cfg.Coordinators)
 			if err == nil {
 				t.Fatal("startEnforcement returned no error for a helper that refused")
 			}

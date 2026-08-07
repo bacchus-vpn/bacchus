@@ -1352,7 +1352,7 @@ func TestEnforcementPolicyCarriesTheUsersConfiguration(t *testing.T) {
 	t.Run("defaults", func(t *testing.T) {
 		enf := &fakeEnforcer{}
 		c := newEnforcedController(Config{Coordinators: []string{"127.0.0.1:9"}}, enf)
-		if _, err := c.startEnforcement(false); err != nil {
+		if _, err := c.startEnforcement(false, c.cfg.Coordinators); err != nil {
 			t.Fatalf("startEnforcement: %v", err)
 		}
 		p, socksAddr := enf.lastPolicy(t)
@@ -1385,7 +1385,7 @@ func TestEnforcementPolicyCarriesTheUsersConfiguration(t *testing.T) {
 		var logged []string
 		c.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
 
-		if _, err := c.startEnforcement(false); err != nil {
+		if _, err := c.startEnforcement(false, c.cfg.Coordinators); err != nil {
 			t.Fatalf("startEnforcement: %v", err)
 		}
 		p, _ := enf.lastPolicy(t)
@@ -1461,6 +1461,11 @@ type enrollmentTestService struct {
 	ca         string
 	enrollCode string // non-empty answers /v1/enroll with this coded refusal
 	enrolls    int
+	// renewOK makes /v1/credential ISSUE rather than refuse. Off by default,
+	// because every test that predates bacchus#193 is about what this client
+	// does with a refusal; the directory tests need the other half, since what
+	// they measure is which ADDRESS the renewal reached.
+	renewOK bool
 }
 
 func newEnrollmentTestService(t *testing.T) *enrollmentTestService {
@@ -1497,6 +1502,10 @@ func newEnrollmentTestService(t *testing.T) *enrollmentTestService {
 		issue(w, r)
 	})
 	mux.HandleFunc("/v1/credential", func(w http.ResponseWriter, r *http.Request) {
+		if s.renewOK {
+			issue(w, r)
+			return
+		}
 		b, _ := json.Marshal(map[string]any{"error": map[string]any{"code": "bad_assertion"}})
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(403)
@@ -1541,7 +1550,7 @@ func TestEnrollmentRedeemsAClaimCodeAndErasesIt(t *testing.T) {
 	t.Cleanup(func() { appstateClearClaimCode = restore })
 
 	ctrl := newProxyOnlyController(s.config(t, "BC1-GOODCODE"))
-	dc, err := ctrl.openDeviceCredential()
+	dc, err := ctrl.openDeviceCredential(ctrl.cfg.AccountServiceAddresses())
 	if err != nil {
 		t.Fatalf("openDeviceCredential: %v", err)
 	}
@@ -1564,7 +1573,7 @@ func TestEnrollmentRedeemsAClaimCodeAndErasesIt(t *testing.T) {
 func TestEnrollmentSpendsNothingWhenTheDeviceAlreadyHasOne(t *testing.T) {
 	s := newEnrollmentTestService(t)
 	ctrl := newProxyOnlyController(s.config(t, "BC1-GOODCODE"))
-	dc, err := ctrl.openDeviceCredential()
+	dc, err := ctrl.openDeviceCredential(ctrl.cfg.AccountServiceAddresses())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1597,7 +1606,7 @@ func TestAServiceRefusalAbandonsTheConnectAndSaysWhy(t *testing.T) {
 			s := newEnrollmentTestService(t)
 			s.enrollCode = tc.code
 			ctrl := newProxyOnlyController(s.config(t, "BC1-BADCODE"))
-			dc, err := ctrl.openDeviceCredential()
+			dc, err := ctrl.openDeviceCredential(ctrl.cfg.AccountServiceAddresses())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1630,7 +1639,7 @@ func TestAnUnreachableAccountServiceDoesNotBlockConnecting(t *testing.T) {
 	ctrl := newProxyOnlyController(cfg)
 	ctrl.OnDetail = func(d Detail) { details = append(details, d) }
 
-	dc, err := ctrl.openDeviceCredential()
+	dc, err := ctrl.openDeviceCredential(ctrl.cfg.AccountServiceAddresses())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1659,7 +1668,7 @@ func TestABrokenAccountServiceConfigIsRefusedRatherThanSkipped(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := s.config(t, "BC1-GOODCODE")
 			tc.mutate(&cfg)
-			if _, err := newProxyOnlyController(cfg).openDeviceCredential(); err == nil {
+			if _, err := newProxyOnlyController(cfg).openDeviceCredential(cfg.AccountServiceAddresses()); err == nil {
 				t.Fatal("a broken account-service configuration was accepted")
 			}
 		})
@@ -1671,7 +1680,7 @@ func TestABrokenAccountServiceConfigIsRefusedRatherThanSkipped(t *testing.T) {
 // already has.
 func TestNoAccountServiceIsACompleteConfiguration(t *testing.T) {
 	ctrl := newProxyOnlyController(Config{Coordinators: []string{"127.0.0.1:1"}, DeviceCredDir: t.TempDir()})
-	dc, err := ctrl.openDeviceCredential()
+	dc, err := ctrl.openDeviceCredential(ctrl.cfg.AccountServiceAddresses())
 	if err != nil {
 		t.Fatalf("openDeviceCredential with no account service: %v", err)
 	}
@@ -1701,7 +1710,7 @@ func TestRenewalFailureBecomesAUserVisibleState(t *testing.T) {
 	var details []Detail
 	ctrl.OnDetail = func(d Detail) { details = append(details, d) }
 
-	dc, err := ctrl.openDeviceCredential()
+	dc, err := ctrl.openDeviceCredential(ctrl.cfg.AccountServiceAddresses())
 	if err != nil {
 		t.Fatal(err)
 	}
