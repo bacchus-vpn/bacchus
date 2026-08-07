@@ -543,6 +543,7 @@ func main() {
 	turnPass := flag.String("turn-pass", "", "TURN password (required)")
 	bootstrapKeyPath := flag.String("bootstrap-key", "secrets/coordinator-bootstrap.key", "path to the snapshot-signing ed25519 key (hex seed); generated on first run if missing")
 	bootstrapSecretsPath := flag.String("bootstrap-secrets", "secrets/bootstrap-secrets.json", "path to the per-user bootstrap secrets file (see cmd/coldstart-issue); reloaded periodically")
+	flag.Var(&accountServices, "account-service", "an account service base URL (\"https://host:port\", scheme and host only) to publish in the signed cold-start directory as role \"account\" — repeatable, one occurrence per address, in preference order (issue #193, ADR-0061). This is how a client learns the account service MOVED: it holds the address in a static config file otherwise, and an unplanned move takes the first devices offline about six hours later (ADR-0016). List every address a client should try, including the successor before a planned move — the directory's list REPLACES what a client has configured, so a single address here narrows a client that was configured with two. Empty publishes no such entry and leaves every client on its own configuration, which is what a deployment running no account service wants. It is a LOCATION, not a trust root: the client keeps its own out-of-band audience and pinned CA, so an address named here still has to present the identity that client already pins.")
 	admissionPubKey := flag.String("admission-pubkey", "", "admission authority public key (hex, from cmd/admission-issue), trusted for EVERY role. When set, every node (register) and client (list/connect) must present a credential this key signed (issue #42). Empty disables admission only if -admission-authority is also unset — the network then serves anyone. NOTE this flag names a different thing here than it does on bacchus-node: there it is the client's single anchor for verifying an EXIT's credential end-to-end (issue #60); here it is one member of this coordinator's anchored authority set. See ADR-0047.")
 	var admissionAuthorities authorityFlags
 	flag.Var(&admissionAuthorities, "admission-authority", "an admission authority scoped to the roles it may admit, \"role[,role...]:hexkey\" — repeatable, one occurrence per authority (issue #64, ADR-0047). Roles are client, relay, exit. Use it to keep the always-online issuer off the credentials that admit forwarding infrastructure: -admission-authority relay,exit:<operator key> -admission-authority client:<account service key>. Composes with -admission-pubkey, which is the same thing scoped to every role. A credential is admitted only if an authority anchored for the role being taken signed it, so the scoping holds even against an issuer that writes any roles it likes into what it mints.")
@@ -1920,6 +1921,15 @@ func startTurnAndBootstrap(turnCfg turnConfig, keyPath, secretsPath, advertise s
 // separate round trip. Relay entries additionally carry an onion-forward ingress
 // and operator tag when known (issue #124), so a client can later assemble a
 // multi-hop chain (§2/§4) from the same signed directory.
+//
+// It also carries the ACCOUNT SERVICE when -account-service names one
+// (bacchus#193, ADR-0061). That entry is not an entry point and is never dialled
+// as one; it is here because the desktop client has no other channel that can
+// tell it an address moved, and the account service is the first address known
+// to move. It adds no sensitivity to the artifact: coldstart.Snapshot's own doc
+// records that a snapshot carries no secret, and this address is already in
+// every client's config file — what the directory adds is the ability to CHANGE
+// it. See coldstart.Entry.Role on why a location is not a trust root.
 func buildSnapshot(advertise string) coldstart.Snapshot {
 	mu.Lock()
 	defer mu.Unlock()
@@ -1927,6 +1937,11 @@ func buildSnapshot(advertise string) coldstart.Snapshot {
 	prune(now)
 
 	entries := []coldstart.Entry{{Role: "coordinator", ID: "coordinator", Addr: advertise}}
+	// The account service (bacchus#193, ADR-0061), in the order the operator
+	// listed it, right behind the coordinator and ahead of the nodes: a consumer
+	// reads it by role, so position is presentation only, and keeping the two
+	// non-node records together is what makes a printed snapshot legible.
+	entries = append(entries, accountServiceEntries()...)
 	for _, e := range exits {
 		if e.exhausted {
 			continue // declared monthly quota spent (issue #143); see the relay loop below
