@@ -936,6 +936,84 @@ predating #50 connects exactly as it does today — but it does not perform the
 challenge exchange, so enabling the gate on a network with such clients refuses
 them.
 
+## Telling clients that an address moved (issue #193, ADR-0061)
+
+Every address the desktop client dials — the coordinator pool, and the account
+service beside it — used to be a constant in a JSON file on each machine, with no
+way to correct it. That matters because the account service runs on anonymously
+rented infrastructure and **its address will change**: a device renews as soon as
+it enters its 6 h renewal margin, so a service that goes unreachable at *T* takes
+the first devices offline at *T* + ~6 h and the rest by *T* + 48 h. A moved
+**coordinator** is worse — it takes a client offline immediately.
+
+The coordinator already signs a cold-start directory and already serves it, on the
+same UDP port as STUN/TURN (`-turn-addr`). It now carries the account service too,
+and the desktop client reads both roles out of it.
+
+**Coordinator side.** One repeatable flag, empty by default:
+```
+bacchus-coordinator -turn-public-ip <IP> -turn-user <u> -turn-pass <p> \
+    -advertise <host:port> \
+    -account-service https://<account-host>:8443 \
+    -account-service https://<successor-host>:8443
+```
+List **every** address a client should try, in preference order, including the
+successor *before* a planned move — the directory's list REPLACES what a client has
+in its own config, so naming one address here narrows a client that was configured
+with two. `https` only, scheme and host, no path; anything else is refused at
+startup rather than published for every client to choke on. Leave the flag unset
+and no such entry is published, which leaves every client on its own configuration.
+
+What travels is a **location, not a trust root**: the client keeps the audience it
+binds assertions to and the CA it pins the service's TLS identity against, both out
+of band, so an address named here still has to present the identity that client
+already pins.
+
+**Client side.** A client needs an invite to fetch the directory at all. Mint one
+per recipient, exactly as for `cmd/coldstart-bootstrap`:
+```
+# on the coordinator VPS, once, to learn the snapshot-signing key
+bacchus-coordinator -print-bootstrap-pubkey
+
+# one invite per user; appends the secret to the coordinator's secrets file,
+# which is hot-reloaded, so no restart
+bacchus-coldstart-issue -coordinator <host>:3478 -pubkey <BOOTSTRAP_PUBKEY>
+```
+and put the printed `bacchus1:…` string in that user's client config:
+```jsonc
+{
+  "coordinators": ["<host>:8080"],   // still the seed: used until a directory arrives
+  "invite": "bacchus1:...",           // per-recipient, never shared
+  "accountServiceUrls": ["https://<account-host>:8443"],
+  "accountServiceAudience": "...",
+  "accountServiceCa": "/path/to/ca.pem"
+}
+```
+
+> **An invite is per-recipient and must never go into an installer, an image, or a
+> config template.** A coordinator's bootstrap secrets file has no vouch system
+> under it — every entry in it is trusted equally — so one invite baked into a
+> downloadable artifact is a working credential for the whole network, held by
+> everyone who downloads it. Provisioning a device takes **two** out-of-band
+> strings: an invite and a claim code.
+
+Behaviour worth knowing before you rely on it:
+
+- A client with **no** invite is unchanged and fully supported. It dials what is in
+  its config file.
+- The directory **leads** for coordinators and **replaces** for the account service.
+  A snapshot names only the coordinator that signed it, so replacing that list would
+  throw away the rest of your pool; the account service list is stated in full by
+  the flag above, so it is a complete answer.
+- An **expired**, unsigned or wrong-key snapshot is not adopted, and the client falls
+  back to its configured addresses rather than to nothing. The snapshot TTL is five
+  minutes, so the client's on-disk cache serves a rapid reconnect, not a next-day
+  launch.
+- The directory is read at **Connect**. A client already connected across a move
+  keeps the addresses it started with until it reconnects.
+- Re-issuing an invite takes effect at the next Connect: a cached snapshot signed by
+  a key the new invite does not name simply does not verify.
+
 ## Routing the whole device on Linux (issue #37, ADR-0049)
 
 Until now the Linux client was an honest SOCKS5 listener on `127.0.0.1:1080`: it
