@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"net"
 	"strings"
 	"sync"
@@ -40,48 +39,20 @@ import (
 // exercise the actual client. The duplication is still checked independently, by the
 // wire-contract tests that pin the two copies field for field.
 
-// coordinatorUnderTest runs the real packet loop — decode, dispatch to handle — on a
-// loopback socket, and returns the address a client should be pointed at.
+// coordinatorUnderTest runs the real packet loop — servePackets, the same function
+// main() calls, with the DTLS mux installed — on a loopback socket, and returns the
+// address a client should be pointed at.
 //
-// It is the production read path, not a reimplementation of it: the body below is the
-// same decode-and-dispatch main() runs, so a client that can talk to this can talk to
-// a deployed coordinator.
+// It is the production read path, not a reimplementation of it, and since #175 slice
+// 2 that is not a nicety. Before, this file ran its own decode-and-dispatch loop that
+// happened to match main()'s; a client now speaks an ICE connectivity check and then
+// DTLS with NO cleartext fallback (ADR-0062), so a hand-rolled cleartext loop here
+// would be a coordinator no client in this repository can reach — which is precisely
+// the "a fake on both sides of a protocol tests the fakes" failure this file exists
+// to prevent, arriving on the file that exists to prevent it.
 func coordinatorUnderTest(t *testing.T) string {
 	t.Helper()
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	pc = conn
-
-	done := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 65535)
-		for {
-			n, src, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				select {
-				case <-done:
-				default:
-				}
-				return
-			}
-			var m wire
-			if json.Unmarshal(buf[:n], &m) != nil {
-				continue
-			}
-			handle(m, src)
-		}
-	}()
-	t.Cleanup(func() {
-		close(done)
-		conn.Close()
-		wg.Wait()
-	})
-	return conn.LocalAddr().String()
+	return signalingPortUnderTest(t).String()
 }
 
 // registerExitIn puts one exit in the registry with a real 64-hex id, as a register

@@ -66,6 +66,43 @@ func TestAConnectWithNoIssuerCertIsAdmittedOnTheStashedOne(t *testing.T) {
 	}
 }
 
+// TestTheConnectHANDLERResolvesTheStashedIssuerCert drives the real handler rather
+// than calling issuerCertFor from a test, which is the difference between checking
+// that a function works and checking that anything calls it.
+//
+// A mutation commenting out the handler's one line survived every other test in this
+// file, because they all resolved the cert themselves and then asserted on
+// admitDevice. That is the same shape as a fake on both sides of a protocol: each
+// piece self-consistent, and together not wired up.
+func TestTheConnectHANDLERResolvesTheStashedIssuerCert(t *testing.T) {
+	setPC(t)
+	resetRegistry(t)
+	t.Cleanup(func() { resetRegistry(t) })
+	c := mintChain(t, chainWindow{})
+	setDeviceGate(t, c.rootPub, "coord-1")
+	peer := fakePeer(t)
+	src := peer.LocalAddr().(*net.UDPAddr)
+
+	ch := challengeWithCert(t, peer, src, c.issuerCert)
+	m := c.connectWithoutCert(t, "coord-1", ch)
+	m.Nonce, m.Country, m.Mode = "req-1", "NL", "direct"
+	handle(m, src)
+
+	reply, ok := readReply(t, peer, time.Second)
+	if !ok {
+		t.Fatal("the connect handler answered nothing at all")
+	}
+	// There is no exit registered, so the honest answer is a refusal about the
+	// COUNTRY. What must not come back is a refusal about the credential chain,
+	// which is what a handler that never read the stash produces.
+	if reply.Type == "reject" && strings.Contains(reply.Reason, "issuer cert") {
+		t.Fatalf("the connect was refused on the issuer cert (%q) — the handler did not resolve the one its challenge carried, so every enrolled client is refused", reply.Reason)
+	}
+	if reply.Type == "reject" && strings.Contains(reply.Reason, "device-credential challenge") {
+		t.Fatalf("the connect was refused before the chain was checked: %q", reply.Reason)
+	}
+}
+
 // TestAConnectCarryingItsOwnIssuerCertStillSucceeds is the compatibility half. A
 // client that predates #206 puts the cert on the connect; nothing about that stopped
 // working, and the stash is not consulted for it.

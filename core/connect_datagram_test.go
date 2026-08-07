@@ -112,13 +112,13 @@ func TestConnectDatagramFitsASafePath(t *testing.T) {
 		t.Fatal("the coordinator saw no connect at all")
 	}
 	for i, n := range sizes {
-		if n > maxRendezvousPayload {
-			t.Fatalf("connect copy %d is %d bytes, over the %d-byte payload that fits a %d-byte path (it needs a %d-byte IP datagram). This is issue #183: it is delivered on Ethernet and refused on Tailscale, on the IPv6 minimum MTU, and on a clamped mobile link",
-				i+1, n, maxRendezvousPayload, safePathMTU, n+28)
+		if n > maxShapedRendezvousPayload {
+			t.Fatalf("connect copy %d is %d bytes, over the %d-byte payload that fits a %d-byte path once the %d-byte DTLS record around it is counted (the datagram needs %d bytes of IP). This is issue #183 on the shaped hop: delivered on Ethernet and refused on Tailscale, on the IPv6 minimum MTU, and on a clamped mobile link",
+				i+1, n, maxShapedRendezvousPayload, safePathMTU, dtlsRecordOverhead, n+dtlsRecordOverhead+28)
 		}
 	}
-	t.Logf("largest connect this client can build: %d bytes of a %d-byte budget (%d bytes of headroom)",
-		sizes[0], maxRendezvousPayload, maxRendezvousPayload-sizes[0])
+	t.Logf("largest connect this client can build: %d bytes of a %d-byte shaped budget (%d bytes of headroom; %d on the wire once the DTLS record is counted, against a %d-byte path payload)",
+		sizes[0], maxShapedRendezvousPayload, maxShapedRendezvousPayload-sizes[0], sizes[0]+dtlsRecordOverhead, maxRendezvousPayload)
 }
 
 // TestTheFieldsThatMovedOffTheConnectAreWhatOverflowedThePath pins the causality,
@@ -292,11 +292,11 @@ func TestTheIssuerCertRidesTheChallengeAndNotTheConnect(t *testing.T) {
 //
 // The number is measured rather than chosen. Moving the issuer cert off the connect
 // took the largest connect this client can assemble from 1097 bytes to 719, so the
-// headroom under the 1232-byte budget went from 135 to 513. ADR-0057 records that
-// production credentials measured ~34 bytes heavier than these fixtures, and
-// ADR-0059 measured DTLS records at 37 bytes, both of which come out of that 513
-// once slice 2's shaped hop carries this datagram. 400 is the floor that leaves,
-// rounded down.
+// headroom went from 135 bytes under the 1232-byte path budget to 476 under the
+// 1195-byte shaped one — the shaped hop having already spent 37 of them on a DTLS
+// record. ADR-0057 records that production credentials measured ~34 bytes heavier
+// than these fixtures, which comes out of the 476 as well. 400 is the floor that
+// leaves, rounded down.
 //
 // Raising it is a decision about the budget and should read like one. This is not a
 // number to bump because a test went red.
@@ -338,12 +338,12 @@ func TestTheRecoveredHeadroomIsAsserted(t *testing.T) {
 	if len(sizes) == 0 {
 		t.Fatal("the coordinator saw no connect at all")
 	}
-	if got := maxRendezvousPayload - sizes[0]; got < minConnectHeadroom {
-		t.Fatalf("the largest connect is %d bytes, leaving %d of headroom under the %d-byte budget; this build is required to leave at least %d. Something has spent the room issue #206 recovered — if that was deliberate, move minConnectHeadroom and say why in the same change",
-			sizes[0], got, maxRendezvousPayload, minConnectHeadroom)
+	if got := maxShapedRendezvousPayload - sizes[0]; got < minConnectHeadroom {
+		t.Fatalf("the largest connect is %d bytes, leaving %d of headroom under the %d-byte shaped budget; this build is required to leave at least %d. Something has spent the room issue #206 recovered — if that was deliberate, move minConnectHeadroom and say why in the same change",
+			sizes[0], got, maxShapedRendezvousPayload, minConnectHeadroom)
 	}
-	t.Logf("largest connect: %d bytes, %d of headroom under the %d-byte budget (floor %d)",
-		sizes[0], maxRendezvousPayload-sizes[0], maxRendezvousPayload, minConnectHeadroom)
+	t.Logf("largest connect: %d bytes, %d of headroom under the %d-byte shaped budget (floor %d)",
+		sizes[0], maxShapedRendezvousPayload-sizes[0], maxShapedRendezvousPayload, minConnectHeadroom)
 }
 
 // TestConnectStillCarriesTheAdmissionCredentialWhenNoChallengeWasAnswered is the
@@ -602,21 +602,47 @@ func TestTheKernelReallyReturnsASizeRefusalThisBuildRecognises(t *testing.T) {
 	}
 }
 
+// oversizeCountry is a country string that makes the connect around it land just
+// past the UDP maximum once it is wrapped in a DTLS record.
+//
+// The window is narrow and it is narrow for issue #183's own reason: loopback's MTU
+// is 65536, so there is no small path to be had in a test and the only reachable
+// EMSGSIZE is above the UDP maximum. On the shaped hop that maximum applies to the
+// RECORD, so the payload has to be big enough that payload+overhead exceeds 65507
+// and small enough that the record still fits its own 16-bit length field. 65490
+// sits in the middle of that band with about twenty bytes of slack either side, and
+// the base is measured rather than guessed so a new wire field cannot silently walk
+// the target out of the band.
+func oversizeCountry(t *testing.T) string {
+	t.Helper()
+	const payload = 65490
+	base, err := json.Marshal(wire{Type: "connect", Mode: modeDirect, Nonce: strings.Repeat("a", 32)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	n := payload - len(base)
+	if n < 1 {
+		t.Fatalf("a bare connect is already %d bytes", len(base))
+	}
+	return strings.Repeat("x", n)
+}
+
 // TestAConnectRefusedForSizeIsNotReportedAsASilentCoordinator is issue #183's
 // headline behaviour: the client must not turn a datagram it never sent into "no
 // coordinator reachable", which is the mesh-walk trigger and the sentence a user on a
 // censored network will believe and report.
 //
-// The oversize is forced through the country field rather than through a real 1280
-// path, for the reason above: loopback has no small MTU, so the only reachable
-// EMSGSIZE here is above the UDP maximum. What is under test is the classification,
-// which is identical either way.
+// It runs on a SHAPED link, which is what a client now has, and that is the part
+// worth keeping honest: the datagram the kernel refuses is a DTLS record, not the
+// JSON, and the refusal has to travel back out through pion for the client to
+// classify it. Measured, it does — the errno arrives intact and isMessageTooLong
+// recognises it — so #183's diagnosis survives ADR-0062 rather than being assumed to.
 func TestAConnectRefusedForSizeIsNotReportedAsASilentCoordinator(t *testing.T) {
 	coord := newFakeDeviceCoordinator(t)
 	eng, link := newTestClientEngine(t, coord.addr())
 
 	r := eng.attemptWith(context.Background(), link,
-		connectReq{country: strings.Repeat("x", 70000), mode: modeDirect},
+		connectReq{country: oversizeCountry(t), mode: modeDirect},
 		eng.transport, time.Second, nil)
 
 	if r.outcome == coordinatorSilent {

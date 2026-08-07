@@ -1367,6 +1367,29 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.emit(EventInfo, "", "coordinator pool: %d members", len(links))
 	}
 
+	// The client's own path to a coordinator stops being cleartext (issue #175 slice
+	// 2, ADR-0062). Before this, the first packet a client ever sent was plaintext
+	// JSON over raw UDP; a client's links now speak an ICE connectivity check
+	// followed by DTLS on the same 5-tuple, with no fallback to plaintext.
+	//
+	// Shaping happens HERE — after dialling, before any read loop or send — so no
+	// goroutine ever observes a link change shape underneath it, and so that dialling
+	// still puts nothing on the wire. The handshake is minted by the first send to a
+	// member (see shapedLink), which keeps a client's whole fallback set unrevealed
+	// until it rotates to a member, exactly as dialPool's own doc promises.
+	//
+	// A pure FORWARDER's links are deliberately left cleartext for now. Slice 2 is
+	// the client half: a relay or exit is operator-run infrastructure whose register
+	// wire is a different case from a censored user's first packet, and changing both
+	// in one wave would double the blast radius of a change no test in this
+	// repository can prove correct. See ADR-0062's residual.
+	if e.clientOn {
+		for _, l := range e.links {
+			l.shape()
+		}
+		e.emit(EventInfo, "", "rendezvous: coordinator links are DTLS-shaped, with no cleartext fallback (issue #175, ADR-0062)")
+	}
+
 	// A forwarder must be reachable through every pool member, so it greets and
 	// registers with all of them up front (see registerLoop). A client instead
 	// greets lazily — only the member it rotates to in ListExits/Connect —
@@ -1652,12 +1675,10 @@ func (e *Engine) broadcast(m wire) {
 	}
 }
 
-// closeLinks closes every coordinator UDP link, unblocking each read loop.
+// closeLinks closes every coordinator link, unblocking each read loop.
 func (e *Engine) closeLinks() {
 	for _, l := range e.links {
-		if l.conn != nil {
-			_ = l.conn.Close()
-		}
+		l.close()
 	}
 }
 
@@ -2030,7 +2051,10 @@ func (e *Engine) readLoop(l *coordLink) {
 	defer e.wg.Done()
 	buf := make([]byte, 65535)
 	for {
-		n, err := l.conn.Read(buf)
+		// On a shaped link (issue #175 slice 2) this returns the DECRYPTED message
+		// and blocks until the client has actually sent something to this member,
+		// because an association is minted by the first send and not by dialling.
+		n, err := l.read(buf)
 		if err != nil {
 			return // this member's link was closed (Stop) or errored
 		}

@@ -68,8 +68,18 @@ const maxRendezvousPayload = safePathMTU - 40 - 8
 // msgCh, so a slow member can never leak a reply into another member's client
 // attempt — the whole reason the client can rotate cleanly.
 type coordLink struct {
-	raw    string // as configured, e.g. "1.2.3.4:8080"
-	conn   *net.UDPConn
+	raw  string // as configured, e.g. "1.2.3.4:8080"
+	conn *net.UDPConn
+	// shaped is this link's message transport when it speaks the shaped rendezvous
+	// hop — an ICE connectivity check and then DTLS on the same 5-tuple (issue #175
+	// slice 2, ADR-0062) — and nil when it is the cleartext link this has always
+	// been. A client's links are shaped; a pure forwarder's are not yet. See
+	// core/rendezvous_client.go and Engine.Start.
+	//
+	// It wraps conn rather than replacing it: the socket stays CONNECTED, because
+	// ADR-0057 §4 reads a dead peer's ICMP port-unreachable off the next write, and
+	// that is the one signal separating an unreachable coordinator from a silent one.
+	shaped *shapedLink
 	sendMu sync.Mutex
 	msgCh  chan wire // this member's client rendezvous replies
 
@@ -117,6 +127,29 @@ type coordLink struct {
 	// one that changes what the client concludes. Every other write failure is still
 	// LOGGED (see noteSendFailed) and still reads as silence, exactly as before.
 	tooLargeN atomic.Uint64
+
+	// handshakeN counts datagrams this link could not send because the shaped
+	// rendezvous handshake did not complete (ADR-0062), including the ones the memo
+	// suppresses from the log. Same split as tooLargeN and the same reason.
+	//
+	// Unlike tooLargeN it does NOT change what the client concludes, and that
+	// distinction is the point. A member this client cannot handshake with IS
+	// unreachable, so ErrNoCoordinatorReachable is the right answer and rotation is
+	// the right recovery; what this changes is only WHEN the leg gives up. Waiting
+	// out a deadline for a reply to a datagram that was never sent buys nothing, and
+	// with no cleartext fallback that is now a whole leg's budget spent on a member
+	// already known to be unusable.
+	handshakeN atomic.Uint64
+}
+
+// handshakeMark snapshots the failed-handshake count so a caller can tell whether
+// THIS attempt drew one, exactly as unroutableMark and tooLargeMark do.
+func (l *coordLink) handshakeMark() uint64 { return l.handshakeN.Load() }
+
+// handshakeFailed reports whether the shaped rendezvous handshake with this member
+// failed since the caller took `before` from [coordLink.handshakeMark].
+func (l *coordLink) handshakeFailed(before uint64) bool {
+	return l.handshakeN.Load() > before
 }
 
 // answeredUnroutably reports whether this member produced a reply readLoop could not
@@ -277,25 +310,137 @@ func (l *coordLink) noteOversize(e *Engine, msgType string, size int) {
 	if !l.noteOnce("oversize", msgType) {
 		return
 	}
-	e.emit(EventError, "", "this build's %q datagram for coordinator %s is %d bytes, over the %d-byte payload that fits a %d-byte path — it will be delivered on an ordinary Ethernet path and refused on any path at the IPv6 minimum MTU (another VPN, a tunnel, or a clamped mobile link). See issue #183",
-		msgType, l.raw, size, maxRendezvousPayload, safePathMTU)
+	shaped := ""
+	if l.shaped != nil {
+		shaped = fmt.Sprintf(" (%d of which is the DTLS record this hop now travels inside — issue #175)", dtlsRecordOverhead)
+	}
+	e.emit(EventError, "", "this build's %q datagram for coordinator %s is %d bytes, over the %d-byte payload that fits a %d-byte path%s — it will be delivered on an ordinary Ethernet path and refused on any path at the IPv6 minimum MTU (another VPN, a tunnel, or a clamped mobile link). See issue #183",
+		msgType, l.raw, size, l.budget(), safePathMTU, shaped)
+}
+
+// budget is the largest payload this link may put on the wire: the plain rendezvous
+// budget on a cleartext link, and 37 bytes less on a shaped one, because on that one
+// every message travels inside a DTLS record (ADR-0059 §3, ADR-0062).
+//
+// A link reports against the budget it actually speaks rather than against the
+// larger of the two. The 37 bytes are not a rounding error against a datagram that
+// failed on a real path at 1453 bytes and has ~500 to spare only because issue #206
+// moved the issuer cert.
+func (l *coordLink) budget() int {
+	if l.shaped != nil {
+		return maxShapedRendezvousPayload
+	}
+	return maxRendezvousPayload
+}
+
+// shape gives this link the shaped rendezvous transport (ADR-0062). Called by
+// Engine.Start for a client's links, before any read loop or send runs, so nothing
+// ever observes a link change shape underneath it.
+func (l *coordLink) shape() {
+	if l.conn != nil {
+		l.shaped = newShapedLink(l.conn)
+	}
+}
+
+// write puts one datagram on this link in whichever shape it speaks. On a shaped
+// link this is where the handshake happens, on the first send and not before: see
+// shapedLink on why establishment is lazy.
+func (l *coordLink) write(b []byte) (int, error) {
+	if l.shaped != nil {
+		return l.shaped.Write(b)
+	}
+	return l.conn.Write(b)
+}
+
+// read returns the next message from this member, decrypted when the link is shaped.
+func (l *coordLink) read(b []byte) (int, error) {
+	if l.shaped != nil {
+		return l.shaped.Read(b)
+	}
+	return l.conn.Read(b)
+}
+
+// close tears the link down: the transport first, then the socket, because closing
+// the socket is what ends the shaped link's reader goroutine.
+func (l *coordLink) close() {
+	if l.shaped != nil {
+		_ = l.shaped.Close()
+	}
+	if l.conn != nil {
+		_ = l.conn.Close()
+	}
+}
+
+// noteUnshapedReplies reports, once per member, that this coordinator answered in
+// neither shape a shaped link speaks.
+//
+// It exists because ADR-0062 removed the fallback: a coordinator that does not speak
+// the shaped hop is unreachable to this client, exactly as a blocked one is, and the
+// difference between the two is invisible from a timeout. That is issue #5's lesson
+// applied to a condition #5 could not have — a well-formed reply nobody can read is
+// the same non-event as silence, and the client walks the mesh looking for a live
+// coordinator while a healthy one answers throughout.
+func (l *coordLink) noteUnshapedReplies(e *Engine, n int) {
+	if n == 0 || !l.noteOnce("unshaped", "") {
+		return
+	}
+	e.emit(EventError, "", "coordinator %s answered in cleartext, which this build does not accept at this hop: the rendezvous handshake is DTLS-shaped and there is deliberately no fallback to plaintext (issue #175, ADR-0062). This member is being treated as unreachable and the client will rotate to another; if it is one of ours, it is running with -rendezvous-dtls=false or on a build predating the shaped hop",
+		l.raw)
+}
+
+// noteHandshakeFailed reports, once per member, that the shaped rendezvous handshake
+// did not complete.
+//
+// Same discipline as noteSendFailed (issue #183) and the same reason: without it the
+// condition presents to the waiting leg as an unexplained timeout, which is the
+// mesh-walk trigger and the sentence a user on a censored network will believe. It
+// does NOT change what the client concludes — a member it cannot handshake with IS
+// unreachable, so ErrNoCoordinatorReachable is the right answer and rotation is the
+// right recovery. What it changes is whether anyone can tell why.
+func (l *coordLink) noteHandshakeFailed(e *Engine, msgType string, err error) {
+	// Counted before the memo and every time, for noteUnroutable's reason:
+	// suppressing the count as well would make the second refusal look like silence
+	// to the leg waiting on it.
+	l.handshakeN.Add(1)
+	if !l.noteOnce("handshake", msgType) {
+		return
+	}
+	e.emit(EventError, "", "the shaped rendezvous handshake with coordinator %s did not complete (%v), so the %q datagram was not sent. This client speaks DTLS at this hop and has no cleartext fallback by design (issue #175, ADR-0062): a censor dropping the handshake and a coordinator that never learned it are the same silence, and answering that silence with plaintext would send exactly what the shape exists to hide. Rotating to another pool member",
+		l.raw, err, msgType)
 }
 
 func (l *coordLink) send(e *Engine, m wire) {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
 	b, _ := json.Marshal(m)
-	if len(b) > maxRendezvousPayload {
+	if len(b) > l.budget() {
 		l.noteOversize(e, m.Type, len(b))
 	}
 	if l.conn == nil {
 		return
 	}
+	// A shaped link may have been answered in a shape it does not speak since the
+	// last send; report it here, where an engine is in hand, rather than from the
+	// goroutine that owns the socket.
+	if l.shaped != nil {
+		l.noteUnshapedReplies(e, l.shaped.unshapedReplies())
+	}
 	// The whole reason this is not `_, _ = l.conn.Write(b)` — see noteSendFailed
 	// and issue #183. A write error here is a local, definitive fact about a datagram
 	// that never reached the network; dropping it leaves the client to infer, from
 	// the silence that follows, that the coordinator is unreachable.
-	if _, err := l.conn.Write(b); err != nil {
+	if _, err := l.write(b); err != nil {
+		// On a shaped link, a failure with NO live association is the handshake — one
+		// diagnosis rather than two, and the signal a leg reads to stop waiting for a
+		// reply to a request that was never sent. A failure WITH one is an ordinary
+		// send failure and is reported as such, which keeps "this member never
+		// answered the handshake" from being said about a member that did. A size
+		// refusal goes to noteSendFailed either way, because EMSGSIZE is the one
+		// error that changes what the client concludes and the counting lives there.
+		if l.shaped != nil && !l.shaped.live() && !isMessageTooLong(err) && !errors.Is(err, net.ErrClosed) {
+			l.noteHandshakeFailed(e, m.Type, err)
+			return
+		}
 		l.noteSendFailed(e, m.Type, len(b), err)
 	}
 }

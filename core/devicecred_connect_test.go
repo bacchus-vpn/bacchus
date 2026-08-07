@@ -18,6 +18,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/delegation"
 	"github.com/bacchus-vpn/bacchus/core/devicecred"
 	"github.com/bacchus-vpn/bacchus/core/devicestore"
+	"github.com/bacchus-vpn/bacchus/core/rendezvous"
 )
 
 // ---------------------------------------------------------------------------
@@ -103,19 +104,26 @@ func mintTestChain(t *testing.T, now time.Time, credTTL time.Duration) (rootPub 
 // ---------------------------------------------------------------------------
 
 type fakeDeviceCoordinator struct {
-	pc *net.UDPConn
+	pc   *net.UDPConn
+	peer *rendezvous.Peer
 
 	mu            sync.Mutex
 	challengeReqs int
 	challenges    []wire
 	connects      []wire
 	registers     []wire
-	// sizes are the RAW datagram lengths, per message type, as they arrived on the
-	// wire. Recorded because issue #183 is a fact about bytes on a network and not
-	// about a struct: a size assert that re-marshals a wire the test built itself
-	// proves the test's arithmetic, while this proves what attemptWith actually put
-	// on the socket. That distinction is the whole card — #166's +423 bytes were
-	// invisible to every struct-level check in the repository.
+	// sizes are the PAYLOAD lengths, per message type, as they arrived. Recorded
+	// because issue #183 is a fact about bytes on a network and not about a struct: a
+	// size assert that re-marshals a wire the test built itself proves the test's
+	// arithmetic, while this proves what attemptWith actually put on the socket. That
+	// distinction is the whole card — #166's +423 bytes were invisible to every
+	// struct-level check in the repository.
+	//
+	// Payload, not datagram, since the shaped hop landed (ADR-0062): what arrives on
+	// the socket is a DTLS record and what is measured here is what was inside it, so
+	// these are compared against maxShapedRendezvousPayload. The DATAGRAM sizes are
+	// measured separately and independently of both ends, by the logging proxy in
+	// core/rendezvous_client_test.go — which is what issue #183 was found with.
 	sizes           map[string][]int
 	answerChallenge bool
 	emptyChallenge  bool
@@ -128,8 +136,8 @@ func newFakeDeviceCoordinator(t *testing.T) *fakeDeviceCoordinator {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = pc.Close() })
-	f := &fakeDeviceCoordinator{pc: pc, answerChallenge: true, sizes: map[string][]int{}}
-	go f.serve()
+	f := &fakeDeviceCoordinator{pc: pc, peer: servePeer(t, pc), answerChallenge: true, sizes: map[string][]int{}}
+	go f.serve(f.peer)
 	return f
 }
 
@@ -142,6 +150,22 @@ func (f *fakeDeviceCoordinator) sizesOf(msgType string) []int {
 }
 
 func (f *fakeDeviceCoordinator) addr() string { return f.pc.LocalAddr().String() }
+
+// forget drops every association this coordinator holds and starts terminating
+// afresh, which is what a restart or an idle sweep looks like from the client's
+// side. It is on the fake rather than in one test because the far end forgetting is
+// the premise of every re-establishment case (ADR-0062).
+func (f *fakeDeviceCoordinator) forget() {
+	_ = f.peer.Close()
+	p, err := rendezvous.Serve(f.pc)
+	if err != nil {
+		panic("rendezvous.Serve: " + err.Error())
+	}
+	f.mu.Lock()
+	f.peer = p
+	f.mu.Unlock()
+	go f.serve(p)
+}
 
 func (f *fakeDeviceCoordinator) setBehavior(answer, empty bool) {
 	f.mu.Lock()
@@ -184,19 +208,18 @@ func (f *fakeDeviceCoordinator) creds() (challenges, registers []string) {
 	return challenges, registers
 }
 
-func (f *fakeDeviceCoordinator) serve() {
-	buf := make([]byte, 65535)
+func (f *fakeDeviceCoordinator) serve(peer *rendezvous.Peer) {
 	for {
-		n, src, err := f.pc.ReadFromUDP(buf)
+		raw, src, err := peer.ReadFrom()
 		if err != nil {
 			return
 		}
 		var m wire
-		if json.Unmarshal(buf[:n], &m) != nil {
+		if json.Unmarshal(raw, &m) != nil {
 			continue
 		}
 		f.mu.Lock()
-		f.sizes[m.Type] = append(f.sizes[m.Type], n)
+		f.sizes[m.Type] = append(f.sizes[m.Type], len(raw))
 		f.mu.Unlock()
 		switch m.Type {
 		case "challenge":
@@ -229,7 +252,10 @@ func (f *fakeDeviceCoordinator) serve() {
 
 func (f *fakeDeviceCoordinator) send(to *net.UDPAddr, m wire) {
 	b, _ := json.Marshal(m)
-	_, _ = f.pc.WriteToUDP(b, to)
+	f.mu.Lock()
+	peer := f.peer
+	f.mu.Unlock()
+	_, _ = peer.WriteTo(b, to)
 }
 
 // newTestClientEngine starts a client-role engine against addr and returns it

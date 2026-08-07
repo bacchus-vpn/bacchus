@@ -47,14 +47,22 @@ the profiles at, and making one meant making the coordinator a DTLS server. It
 was re-ruled **A2-c: the hop goes genuinely DTLS/WebRTC-shaped**, over three
 slices:
 
-| Slice | What |
-|---|---|
-| **1 — this record** | The shape, the budget, and the **coordinator half**: accept the new shape alongside raw JSON on one port |
-| 2 | The **client half** speaks the new shape; raw JSON becomes the fallback |
-| 3 | Raw JSON deprecated behind the window; the fingerprint profiles apply per `Config.DTLSFingerprint` |
+| Slice | What | State |
+|---|---|---|
+| **1 — this record** | The shape, the budget, and the **coordinator half**: accept the new shape alongside raw JSON on one port | landed |
+| 2 | The **client half** speaks the new shape, with **no fallback to raw JSON** | landed — **ADR-0062** |
+| 3 | The fingerprint profiles apply per `Config.DTLSFingerprint` | open (`#175`) |
 
 The coordinator half is first because it is backward-compatible and deployable on
 its own. The client half is not.
+
+**Slice 2 changed two things this record planned, and ADR-0062 records both.** The
+client half does **not** fall back to raw JSON — §4's "try DTLS, fall back, remember"
+was ruled out, because a censor dropping the handshake and a coordinator predating
+slice 1 produce the same silence, so the fallback would send the cleartext the shape
+exists to remove at exactly the moment it matters. Slice 3 therefore has nothing to
+deprecate: the raw-JSON path on the coordinator is a compatibility window for
+*forwarders*, whose links slice 2 deliberately left cleartext, and not for clients.
 
 ## Decision
 
@@ -169,10 +177,15 @@ Neither is needed, because the two shapes are **self-identifying**:
   `f`, `n`, or ASCII whitespace. **Those sets are disjoint on the first byte
   alone**; `looksLikeDTLS` checks the version too, which turns "unlikely to
   misclassify" into "cannot".
-- **Client side (slice 2) — try DTLS, fall back, remember.** A client attempts
-  DTLS and falls back to raw JSON when the handshake does not complete, per
-  coordinator. That is the per-user failover ladder §4.1 asks for at this hop,
-  arriving as the compatibility mechanism.
+- **Client side (slice 2) — ~~try DTLS, fall back, remember~~. WITHDRAWN by
+  ADR-0062.** This planned a client that attempts DTLS and falls back to raw JSON
+  when the handshake does not complete, per coordinator, and offered it as both the
+  compatibility mechanism and the per-user failover ladder §4.1 asks for. It was
+  ruled out: a censor dropping DTLS and a coordinator predating slice 1 are
+  indistinguishable to that rule, so the fallback reads as *"when the disguise is
+  blocked, send the cleartext the disguise existed to remove"*. The client speaks the
+  shaped hop or it does not reach the coordinator. The per-coordinator memory went
+  with it — with no fallback there is no shape to remember.
 
 So **`handshake.ProtocolVersion` stays at 1 and is not part of this change.** It
 is written down because it is the obvious thing to reach for and it is the wrong

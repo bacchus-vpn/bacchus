@@ -16,6 +16,7 @@ import (
 
 	"github.com/bacchus-vpn/bacchus/core"
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
+	"github.com/bacchus-vpn/bacchus/core/rendezvous"
 )
 
 // This file drives issue #121's first item: the cmd/node supervisor glue in
@@ -75,6 +76,13 @@ type rvWire struct {
 // condition mesh-walk recovery keys on (core/client.go's ErrNoCoordinatorReachable).
 type fakeRendezvous struct {
 	pc *net.UDPConn
+	// peer terminates the shaped rendezvous hop (issue #175 slice 2, ADR-0062). A
+	// client speaks an ICE connectivity check and then DTLS with no cleartext
+	// fallback, so a socket that only answers JSON no longer stands in for a
+	// coordinator. Cleartext passes through unchanged, which is what keeps the
+	// exit-role engine in this test — whose links are not shaped — served by the
+	// same object.
+	peer *rendezvous.Peer
 
 	mu         sync.Mutex
 	silent     bool
@@ -90,7 +98,12 @@ func newFakeRendezvous(t *testing.T, label string) *fakeRendezvous {
 	if err != nil {
 		t.Fatalf("listen fake coordinator %s: %v", label, err)
 	}
-	c := &fakeRendezvous{pc: pc, sid: label + "-session"}
+	peer, err := rendezvous.Serve(pc)
+	if err != nil {
+		t.Fatalf("fake coordinator %s: rendezvous.Serve: %v", label, err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	c := &fakeRendezvous{pc: pc, peer: peer, sid: label + "-session"}
 	go c.serve()
 	t.Cleanup(func() { _ = pc.Close() })
 	return c
@@ -122,9 +135,8 @@ func (c *fakeRendezvous) registeredExit() string {
 }
 
 func (c *fakeRendezvous) serve() {
-	buf := make([]byte, 65535)
 	for {
-		n, src, err := c.pc.ReadFromUDP(buf)
+		raw, src, err := c.peer.ReadFrom()
 		if err != nil {
 			return // closed by test cleanup
 		}
@@ -135,7 +147,7 @@ func (c *fakeRendezvous) serve() {
 			continue
 		}
 		var m rvWire
-		if json.Unmarshal(buf[:n], &m) != nil {
+		if json.Unmarshal(raw, &m) != nil {
 			continue
 		}
 		c.handle(m, src)
@@ -147,7 +159,7 @@ func (c *fakeRendezvous) send(addr *net.UDPAddr, m rvWire) {
 	if err != nil {
 		return
 	}
-	_, _ = c.pc.WriteToUDP(b, addr)
+	_, _ = c.peer.WriteTo(b, addr)
 }
 
 func (c *fakeRendezvous) handle(m rvWire, src *net.UDPAddr) {

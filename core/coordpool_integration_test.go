@@ -29,22 +29,27 @@ func fakePoolCoordinator(t *testing.T, respond bool, countries []wireCountry) st
 	}
 	t.Cleanup(func() { _ = pc.Close() })
 
+	if !respond {
+		// Blackhole: nothing reads the socket, so every datagram — the ICE check,
+		// the ClientHello, everything — is dropped, which is what a client sees when
+		// a censor drops a coordinator's return traffic. Under ADR-0062 the shaped
+		// handshake is what dies here rather than the request, and the client's
+		// conclusion is the same one: this member is unreachable, rotate.
+		return pc.LocalAddr().String()
+	}
+	peer := servePeer(t, pc)
 	go func() {
-		buf := make([]byte, 65535)
 		for {
-			n, src, err := pc.ReadFromUDP(buf)
+			raw, src, err := peer.ReadFrom()
 			if err != nil {
 				return
 			}
-			if !respond {
-				continue // blackhole: a blocked coordinator
-			}
 			var m wire
-			if json.Unmarshal(buf[:n], &m) != nil || m.Type != "list" {
+			if json.Unmarshal(raw, &m) != nil || m.Type != "list" {
 				continue
 			}
 			b, _ := json.Marshal(wire{Type: "countries", Countries: countries})
-			_, _ = pc.WriteToUDP(b, src)
+			_, _ = peer.WriteTo(b, src)
 		}
 	}()
 	return pc.LocalAddr().String()

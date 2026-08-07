@@ -137,15 +137,15 @@ func TestPoolRetryExcludesTheSessionThatFailedValidation(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { _ = pc.Close() })
+	peer := servePeer(t, pc)
 	go func() {
-		buf := make([]byte, 65535)
 		for {
-			n, src, err := pc.ReadFromUDP(buf)
+			raw, src, err := peer.ReadFrom()
 			if err != nil {
 				return
 			}
 			var m wire
-			if json.Unmarshal(buf[:n], &m) != nil || m.Type != "connect" {
+			if json.Unmarshal(raw, &m) != nil || m.Type != "connect" {
 				continue
 			}
 			mu.Lock()
@@ -162,7 +162,7 @@ func TestPoolRetryExcludesTheSessionThatFailedValidation(t *testing.T) {
 				which = len(assigned)
 			}
 			b, _ := json.Marshal(wire{Type: "session", Session: fmt.Sprintf("sess-%d", which), ExitID: assigned[which-1]})
-			_, _ = pc.WriteToUDP(b, src)
+			_, _ = peer.WriteTo(b, src)
 		}
 	}()
 
