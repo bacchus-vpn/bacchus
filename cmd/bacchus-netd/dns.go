@@ -402,9 +402,9 @@ func (h *helper) releaseViaResolvConf(sess *session) {
 // ones that moved. mode here is 0644 — resolv.conf must be world-readable — and
 // os.CreateTemp creates its file 0600, so applying the mode after the bytes is
 // what keeps a half-written resolv.conf from being readable by every local user
-// while it is being written. The three writers that applied 0600 first were safe
-// only because 0600 is not wider than what they started from. core/atomicfile
-// now applies perm after the bytes for everyone.
+// while it is being written. The writers that applied 0600 first were safe only
+// because 0600 is not wider than what os.CreateTemp had already given them.
+// core/atomicfile now applies perm after the bytes for everyone.
 func replaceFile(path string, content []byte, mode os.FileMode) error {
 	return atomicfile.Write(path, content, mode)
 }

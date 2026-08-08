@@ -372,7 +372,7 @@ func (r *RevocationList) Serials() []string {
 // keys, and because a rename installs the mode every time where os.WriteFile
 // applied it only at creation.
 //
-// # Why this is one of the two writers that fsyncs the DIRECTORY
+// # Why this is one of the few writers that fsyncs the DIRECTORY
 //
 // A file's own flush makes the BYTES durable. It does not commit the directory
 // entry, so without a second fsync a machine that loses power immediately after
@@ -390,8 +390,9 @@ func (r *RevocationList) Serials() []string {
 //     cmd/admission-issue has already told the operator the revocation was
 //     saved. There is no loop that notices and no second chance.
 //
-// The cost is one fsync on a human-triggered operation that happens a few times
-// a year. That is not a trade that needs balancing.
+// The cost is one fsync on an operation a human runs, once per revocation, on a
+// path that has already touched the disk. That is not a trade that needs
+// balancing.
 func (r *RevocationList) SaveFile(path string) error {
 	serials := r.Serials()
 	b, err := json.MarshalIndent(revocationFile{Version: revocationFileVersion, Revoked: serials}, "", "  ")
