@@ -90,8 +90,10 @@ usage() {
 	printf 'usage: %s [--expect N] REVISION [JOURNAL_FILE]\n' "${0##*/}" >&2
 	printf '       journalctl -u bacchus-coordinator --since -10min | %s REVISION\n' "${0##*/}" >&2
 	printf '\nREVISION is the commit the fleet was pinned to (>= 7 hex characters).\n' >&2
-	printf '--expect N   how many distinct node ids should appear (a dual-role box is ONE).\n' >&2
-	printf '             A count, never a host list: nothing here prints a hostname.\n' >&2
+	# %s rather than a literal: a printf format beginning with `-` is undefined in
+	# POSIX sh, because printf reads it as an option (shellcheck SC3045).
+	printf '%s\n' '--expect N   how many distinct node ids should appear (a dual-role box is ONE).' >&2
+	printf '%s\n' '             A count, never a host list: nothing here prints a hostname.' >&2
 	printf 'Exit: 0 pinned · 1 drift · 2 usage · 3 no coordinator start in this window\n' >&2
 	printf '      4 a node that should be there did not register in this window\n' >&2
 }

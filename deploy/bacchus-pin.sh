@@ -493,7 +493,7 @@ if unit_cfg=$("$SSH" "$COORDINATOR_TARGET" "systemctl show -p ExecStart -p Worki
 			printf '%s: ExecStart also spells out relative paths, which resolve the same way:\n' "$self" >&2
 			printf '%s\n' "$rel" | sed 's/^/      /' >&2
 		fi
-		printf '%s: Read the `paths:` lines in the journal below for what is actually in effect.\n' "$self" >&2
+		printf '%s: Read the "paths:" lines in the journal below for what is actually in effect.\n' "$self" >&2
 	fi
 else
 	log "  could not read it (not fatal) — check it by hand before trusting a result from this box"
