@@ -29,9 +29,11 @@ record lands on, and both new copies arrived after it was written.** The card
 was filed on 2026-08-06 at 00:51. `clients/fyne/internal/appstate/config.go`
 gained a full copy thirteen hours later in #200, and `core/revocation/cache.go`
 two days after that in #210, byte-for-byte identical to `core/policy`'s and
-saying so in its own comment. Both new copies quote the card by number and both
-decline to consolidate for the reason it names — that the other packages are in
+saying so in its own comment. `clients/fyne`'s cites this card by number and
+declines to consolidate for the reason it gives — the other packages are in
 flight — which is exactly right per copy and is how the count got to nine.
+`core/revocation`'s does not mention it at all, which is the same problem
+arriving without even a note attached.
 
 Two of the copies also carry a hand-maintained list of the OTHER writers in
 their doc comments, and **both lists are already wrong**: `core/coldstart`'s
