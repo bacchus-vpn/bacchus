@@ -1272,7 +1272,9 @@ remote command it would run and touches nothing.
    re-copying that file silently reverts a working configuration and the
    deployment then behaves differently for reasons no diff shows. Units are
    installed once — by hand or by `deploy/install.sh` — and edited in place.
-   This is binaries only, and there is no flag that changes that.
+   This is binaries only, and there is no flag that changes that. It does
+   [compare](#does-each-box-run-the-unit-this-commit-ships-issue-234) them, which
+   is how you find out that a box is missing a line this commit ships.
 2. **It never checks anything out.** It reads the commit the repository is
    already on and refuses if `--commit` disagrees. A script that moved HEAD for
    you could turn a half-finished rebase into a deployment.
@@ -1307,9 +1309,11 @@ re-registers as new and prints a fresh line naming the binary it is running now.
 
 ### Establishing the result
 
-Two checks, asking two different questions. Both run automatically at the end of
-`bacchus-pin.sh`; both are also usable on their own, which is what you want when
-you are checking a deployment somebody else did.
+Four questions, asked separately because they have different answers: which build
+each node is running, which box is missing, whether each box runs the unit this
+commit ships, and whether the coordinator serves what that commit carries. All
+four run at the end of `bacchus-pin.sh`, and each is usable on its own — which is
+what you want when you are checking a deployment somebody else did.
 
 **Which build is each node running?** — from the coordinator's journal, without
 reaching a single node:
@@ -1341,24 +1345,83 @@ carrying one node id and counts **once**.
 | no `coordinator release` line in the window | 3 | the window cannot answer the question; widen it |
 | fewer node ids than `--expect` | 4 | a box that should be there did not register in this window |
 
-Three things it will not tell you, each of which is a limit of a journal rather
-than of the script. It cannot **name** the missing box: this journal names node
-ids and your host list names ssh targets, and nothing maps one to the other.
-`--expect` takes a **count and refuses a host list**, because the script prints no
-hostname at all — that is what makes its output the half of a pin run you can
-paste into an issue, while `bacchus-pin.sh`'s own output names every ssh target
-on every line. And **more** ids than expected is not a failure, because a
-volunteer client serves and registers without being in anybody's host list — so
-`--expect` is a floor, not a roll call, and a volunteer can hold the count up
-while a deployed box is absent.
+**On its own it answers in ids, and that is deliberate.** `--expect` takes a
+**count and refuses a host list**, and the script prints no hostname anywhere —
+that is what makes its output the half of a pin run you can paste into an issue,
+while `bacchus-pin.sh`'s own output names every ssh target on every line. So run
+by hand it cannot name a missing box, and **more** ids than expected is not a
+failure: a volunteer client serves and registers without being in anybody's host
+list, which makes `--expect` a floor rather than a roll call. A volunteer present
+while a deployed box is absent holds that floor up.
+
+### Which box is it? (issue #232)
+
+`bacchus-pin.sh` answers that, because it is the half of the procedure that has
+the host list. Every node states its own id at startup, in its own journal:
+
+```sh
+ssh <node-host> "journalctl -u bacchus-exit --since -5min --no-pager" |
+  sh deploy/bacchus-node-id.sh
+```
+
+That is not a new log line. `core.Engine.Start` has always printed `exit <id>
+(<country>) advertising …` and `relay <id> online`, and `cmd/node` sets no event
+handler, so they go to stderr and systemd files them — the id was in every node's
+journal all along and nothing read it. **Ask a box what it registers as before
+you go looking for it in the coordinator's journal.**
+
+The pin reads that per box, takes the coordinator's side from the fleet check's
+`--ids-to`, and subtracts one from the other. Two consequences:
+
+- **An absent box is named**, with its unit and the id it registers as, on the
+  pin's output — never on the check's, which keeps printing none.
+- **A volunteer stops standing in for it.** The count can read `2 of 2` while one
+  of your two boxes is dead and a stranger's is registered; comparing identities
+  cannot. The pin's verdict follows the roll call.
+
+A box whose own id cannot be read — an older binary, a unit that is down, a
+window that does not reach its last start — falls back to the count, and the run
+says which box and what was lost.
 
 **When a node has not come back**, the pin restarts the node units once and reads
 the journal again. That is a containment for issue #225 — a node brought up
 against the outgoing coordinator never rebuilds the link, which the
 coordinator-last order guarantees on every deploy — and not a fix; it retires when
-a client recovers on its own. It never restarts to answer *drift*, which would
-destroy the evidence, and `--no-restart-absent` keeps the stranded process for
-whoever is diagnosing it.
+a client recovers on its own. It fires on either finding, the count's or the roll
+call's. It never restarts to answer *drift*, which would destroy the evidence, and
+`--no-restart-absent` keeps the stranded process for whoever is diagnosing it.
+The ids are re-read afterwards rather than reused: a relay takes a **fresh random
+id at every start**, so a map from before a restart would report a box that came
+back perfectly as absent.
+
+### Does each box run the unit this commit ships? (issue #234)
+
+The pin never copies a `.service` file and never will. It now **compares** them,
+which is a different thing and was missing: a directive a template gained and a
+live unit lacks was invisible in both directions. That is how issue #222's
+`OnFailure=` rollback handler reached this repository and no box, with every pin
+run afterwards reporting a pinned fleet — correctly, because the binaries were.
+
+```sh
+ssh <box> "systemctl cat bacchus-exit" |
+  sh deploy/bacchus-unit-check.sh deploy/bacchus-exit.service
+```
+
+It compares **directives**, not text — comments, blank lines, ordering and `\`
+continuations normalised away — and sorts what it finds into three:
+
+| | |
+|---|---|
+| **MISSING from the live unit** | shipped here, absent there. The finding. |
+| **only on the box** | the hand-added flags that are the whole reason units are never copied. |
+| **different value** | `ExecStart=` essentially always, for the same reason. |
+
+**It reports and does not fail the run**, exactly like the `WorkingDirectory=`
+warning below: the binaries are pinned, units are configuration this procedure
+does not manage, and a check that failed every run until three units were
+hand-edited would end up switched off. Fixing it is a hand edit that keeps
+everything the unit already has, plus `systemctl daemon-reload` — and for the
+rollback handler, the two files it needs, which `deploy/install.sh` places.
 
 **Is the coordinator serving what that commit carries?** — by behaviour:
 

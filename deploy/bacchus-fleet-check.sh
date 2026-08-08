@@ -2,7 +2,7 @@
 # Answer "is every box on the commit I pinned?" from the coordinator's journal alone,
 # without reaching a single node (issue #205, ADR-0064).
 #
-# usage: bacchus-fleet-check.sh [--expect N] REVISION [JOURNAL_FILE]
+# usage: bacchus-fleet-check.sh [--expect N] [--ids-to FILE] REVISION [JOURNAL_FILE]
 #        journalctl -u bacchus-coordinator --since -10min | bacchus-fleet-check.sh REVISION
 #
 # REVISION is the commit the fleet was pinned to — a git sha of at least 7 characters.
@@ -35,7 +35,24 @@
 #   as a relay or an exit (ADR-0053) and registers exactly like a deployed node, without
 #   being in anybody's host list. The consequence to know: a volunteer present while a
 #   deployed box is absent can hold the count up, so `--expect` is a FLOOR and not a roll
-#   call, and it is the strongest statement a journal supports.
+#   call, and it is the strongest statement a journal supports FROM A JOURNAL ALONE.
+#
+# ---------------------------------------------------------------------------
+# --ids-to: THE SIDE CHANNEL THAT TURNS THE FLOOR INTO A ROLL CALL (issue #232)
+# ---------------------------------------------------------------------------
+# `--ids-to FILE` writes the distinct node ids this window counted, one per line, and
+# changes nothing about stdout. It exists so deploy/bacchus-pin.sh — which HAS the host
+# list, and which can now ask each box for its own id (deploy/bacchus-node-id.sh) — can
+# subtract one set from the other and name the box that did not register. That removes
+# both limits above at once: the missing box gets a name, and a volunteer's registration
+# stops counting towards anybody's floor, because the pin compares identities rather
+# than a count.
+#
+# It is a side channel and not a change to what is printed, deliberately. A node id is
+# public — it is in the coordinator-signed directory and every client holds it — so
+# writing one costs nothing; a HOSTNAME is what would cost this script its one property,
+# and the pairing therefore lives in the pin, which already names ssh targets on every
+# line. Nothing here learns where an id came from.
 #
 # Why this can work at all: until issue #182 a node's build revision was on no wire, so
 # a coordinator logged `release=0.1.0` for a node of any age and pinning the nodes meant
@@ -87,18 +104,21 @@
 set -eu
 
 usage() {
-	printf 'usage: %s [--expect N] REVISION [JOURNAL_FILE]\n' "${0##*/}" >&2
+	printf 'usage: %s [--expect N] [--ids-to FILE] REVISION [JOURNAL_FILE]\n' "${0##*/}" >&2
 	printf '       journalctl -u bacchus-coordinator --since -10min | %s REVISION\n' "${0##*/}" >&2
 	printf '\nREVISION is the commit the fleet was pinned to (>= 7 hex characters).\n' >&2
 	# %s rather than a literal: a printf format beginning with `-` is undefined in
 	# POSIX sh, because printf reads it as an option (shellcheck SC3045).
 	printf '%s\n' '--expect N   how many distinct node ids should appear (a dual-role box is ONE).' >&2
 	printf '%s\n' '             A count, never a host list: nothing here prints a hostname.' >&2
+	printf '%s\n' '--ids-to F   also write the node ids counted, one per line, to F. Ids are public;' >&2
+	printf '%s\n' '             stdout is unchanged. bacchus-pin.sh pairs them with its host list.' >&2
 	printf 'Exit: 0 pinned · 1 drift · 2 usage · 3 no coordinator start in this window\n' >&2
 	printf '      4 a node that should be there did not register in this window\n' >&2
 }
 
 expect=0
+idsfile=""
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	-h | --help)
@@ -111,6 +131,14 @@ while [ "$#" -gt 0 ]; do
 			exit 2
 		}
 		expect="$2"
+		shift 2
+		;;
+	--ids-to)
+		[ "$#" -ge 2 ] || {
+			printf 'bacchus-fleet-check: --ids-to needs a file\n' >&2
+			exit 2
+		}
+		idsfile="$2"
 		shift 2
 		;;
 	--)
@@ -159,6 +187,16 @@ fi
 # to pass) is not quietly compared against 12 characters of it by accident.
 want=$(printf '%.12s' "$want")
 
+# Truncated here rather than by awk's own `>` so that a run finding nothing — a window
+# with no coordinator start, or no registration at all — leaves an EMPTY file rather
+# than the previous run's ids. A caller that read a stale file would name the wrong box.
+if [ -n "$idsfile" ]; then
+	: >"$idsfile" || {
+		printf 'bacchus-fleet-check: cannot write ids to %s\n' "$idsfile" >&2
+		exit 2
+	}
+fi
+
 # A named file becomes this shell's stdin, so the awk below always reads one place.
 if [ "$#" -eq 2 ] && [ "$2" != "-" ]; then
 	[ -r "$2" ] || {
@@ -183,7 +221,7 @@ fi
 # by the shell first; want is passed with -v, which is the reason nothing here needs to
 # interpolate at all.
 # shellcheck disable=SC2016
-awk -v want="$want" -v expect="$expect" '
+awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
 	# The comparison is a PREFIX one: `git rev-parse --short` produces 7-ish characters,
 	# the wire carries 12, and a full sha is 40, so three correct spellings of one commit
 	# would fail an equality test. want is already lowered and capped at 12 by the shell.
@@ -254,6 +292,15 @@ awk -v want="$want" -v expect="$expect" '
 			print "  before it, and the pre-pin values look exactly as convincing. Widen the window" > "/dev/stderr"
 			print "  (journalctl --since) so it covers the coordinator restart, and re-read." > "/dev/stderr"
 			exit 3
+		}
+
+		# The side channel (issue #232), written before any verdict so a caller gets
+		# the ids even when the verdict is drift. Appended because the shell already
+		# truncated the file: an empty file means "this window named no node", which
+		# is a different statement from "the file was not written".
+		if (idsfile != "") {
+			for (i = 0; i < nodes; i++) print order[i] >> idsfile
+			close(idsfile)
 		}
 
 		# One column width for every row, taken from the rows themselves.

@@ -38,7 +38,37 @@ const (
 	relayTarget = "admin@relay-b.example.invalid"
 
 	fakeHead = "2f4f77887c679eaaf41046d27f5fd25dad15ea11"
+
+	// The two node ids the fake fleet's boxes register as. Hex, because a real one
+	// always is — an exit's IS its X25519 public key and a relay's is 6 random bytes
+	// (core/engine.go, randID) — and because deploy/bacchus-node-id.sh keys on that
+	// to keep `exit TCP server on …` and core/pool.go's line about somebody ELSE's
+	// exit out of the answer.
+	exitNodeID  = "a7c0ffee1234"
+	relayNodeID = "a9beefcafe01"
 )
+
+const (
+	nodeIDRelPath     = "deploy/bacchus-node-id.sh"
+	unitCheckRelPath  = "deploy/bacchus-unit-check.sh"
+	exitUnitRelPath   = "deploy/bacchus-exit.service"
+	coordUnitRelPath  = "deploy/bacchus-coordinator.service"
+	rollbackOnFailure = "OnFailure=bacchus-update-rollback@%n.service"
+)
+
+// nodeJournal renders what a node box's OWN journal holds after a start: the lines
+// core.Engine.Start emits through e.emit, which reaches log.Println because cmd/node
+// sets no Config.OnEvent. Rendered here for the fake fleet; the shape is held against
+// the real binary by TestTheNodeStartupLineCarriesTheIdThisScriptReads.
+func nodeJournal(role, id string) string {
+	b := "Aug 08 12:00:00 box bacchus-node[7]: transport webrtc, dtls fingerprint: firefox\n"
+	if role == "exit" {
+		b += "Aug 08 12:00:00 box bacchus-node[7]: exit " + id + " (NL) advertising 192.0.2.10:20000 + direct WebRTC\n"
+		b += "Aug 08 12:00:00 box bacchus-node[7]: exit TCP server on 192.0.2.10:20000\n"
+		return b
+	}
+	return b + "Aug 08 12:00:00 box bacchus-node[7]: relay " + id + " online\n"
+}
 
 // -------------------------------------------------------------------------
 // the fake fleet
@@ -138,18 +168,40 @@ real=$(printf '%s' "$path" | sed "s|/usr/local/bin|$root|")
 cp "$src" "$real"
 if [ -f "$FLEET/corrupt-$target" ]; then printf 'x' >> "$real"; fi
 `, 0o755)
+	// systemctl: `show` answers from $FLEET/unit-show, `cat` from
+	// $FLEET/unit-cat-$TARGET — per host, because the unit comparison (issue #234)
+	// asks every box and the interesting fixtures differ per box.
 	write(t, filepath.Join(bin, "systemctl"), `#!/bin/sh
 printf '%s\t%s\n' "$TARGET" "$*" >> "$FLEET/systemctl.log"
 case "$1" in
 show) cat "$FLEET/unit-show" 2>/dev/null || true ;;
+cat) cat "$FLEET/unit-cat-$TARGET" 2>/dev/null || true ;;
 esac
 `, 0o755)
-	// journalctl: the Nth read of the journal answers from $FLEET/journal.N when
-	// that file exists, and from $FLEET/journal otherwise. One pin run can read
-	// the journal twice — the fleet check, and the re-check after it restarts a
-	// node that did not come back (issue #225) — and a fixed answer could not tell
-	// a restart that worked from one that changed nothing.
+	// journalctl: a NODE box answers from $FLEET/journal-$TARGET (and
+	// $FLEET/journal-$TARGET.2 on the second read of that box, after the containment
+	// restart), because a node's own journal is where it states its id (issue #232).
+	// The COORDINATOR's journal is the Nth read from $FLEET/journal.N when that file
+	// exists and $FLEET/journal otherwise: one pin run reads it twice — the fleet
+	// check, and the re-check after it restarts a node that did not come back (issue
+	// #225) — and a fixed answer could not tell a restart that worked from one that
+	// changed nothing.
+	//
+	// The two counters are separate. Interleaving node reads into the coordinator's
+	// sequence would make journal.2 arrive on whichever ssh happened to be third.
 	write(t, filepath.Join(bin, "journalctl"), `#!/bin/sh
+if [ -f "$FLEET/journal-$TARGET" ]; then
+  c="$FLEET/node-reads-$TARGET"
+  n=$(cat "$c" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > "$c"
+  if [ -f "$FLEET/journal-$TARGET.$n" ]; then cat "$FLEET/journal-$TARGET.$n"; else cat "$FLEET/journal-$TARGET"; fi
+  exit 0
+fi
+case "$*" in
+*bacchus-coordinator*) ;;
+*) exit 0 ;;   # a node box with no fixture answers nothing, rather than eating a coordinator read
+esac
 n=$(cat "$FLEET/journal.reads" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$FLEET/journal.reads"
@@ -199,6 +251,18 @@ exit 0
 	build	vcs.revision=`+head+`
 	build	vcs.modified=false
 `, 0o644)
+
+	// The fake fleet starts out correctly deployed, so a test that wants a gap creates
+	// one rather than every test inheriting one. Each node box states its own id in
+	// its own journal (issue #232), and each box whose unit this repository ships runs
+	// exactly what is shipped (issue #234).
+	write(t, filepath.Join(dir, "journal-"+exitTarget), nodeJournal("exit", exitNodeID), 0o644)
+	write(t, filepath.Join(dir, "journal-"+relayTarget), nodeJournal("relay", relayNodeID), 0o644)
+	root := repoRoot(t)
+	write(t, filepath.Join(dir, "unit-cat-"+coordTarget),
+		"# /etc/systemd/system/bacchus-coordinator.service\n"+string(readFile(t, filepath.Join(root, coordUnitRelPath))), 0o644)
+	write(t, filepath.Join(dir, "unit-cat-"+exitTarget),
+		"# /etc/systemd/system/bacchus-exit.service\n"+string(readFile(t, filepath.Join(root, exitUnitRelPath))), 0o644)
 
 	f.cfg = filepath.Join(dir, "testbed.env")
 	write(t, f.cfg, "COORDINATOR_TARGET="+coordTarget+"\n"+
@@ -632,10 +696,10 @@ func TestPin_RestartsANodeThatDidNotReRegister(t *testing.T) {
 	head := f.head()
 	rev := head[:12]
 	// Two boxes are deployed (NODE_TARGETS) and only one registers.
-	write(t, filepath.Join(f.dir, "journal"), journalOf(rev, registration{"exit", "n7", rev}), 0o644)
+	write(t, filepath.Join(f.dir, "journal"), journalOf(rev, registration{"exit", exitNodeID, rev}), 0o644)
 	// After the restart, both do.
 	write(t, filepath.Join(f.dir, "journal.2"), journalOf(rev,
-		registration{"exit", "n7", rev}, registration{"relay", "n9", rev}), 0o644)
+		registration{"exit", exitNodeID, rev}, registration{"relay", relayNodeID, rev}), 0o644)
 
 	out, code := f.pin()
 	if code != 0 {
@@ -643,6 +707,11 @@ func TestPin_RestartsANodeThatDidNotReRegister(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 of 2 expected node(s) did NOT register") {
 		t.Errorf("the absent node was not reported as its own finding:\n%s", out)
+	}
+	// And it is NAMED, which is the whole of issue #232: the count said one of two,
+	// the roll call says which one.
+	if !strings.Contains(out, relayTarget+" (bacchus-relay) registers as "+relayNodeID) {
+		t.Errorf("the absent box was not named:\n%s", out)
 	}
 	// Every node unit, because which one is missing cannot be known from a journal
 	// that names node ids while the host list names ssh targets.
@@ -682,7 +751,7 @@ func TestPin_DoesNotRestartOnDrift(t *testing.T) {
 func TestPin_NoRestartAbsentLeavesTheStrandedNodeAlone(t *testing.T) {
 	f := newFleet(t)
 	rev := f.head()[:12]
-	write(t, filepath.Join(f.dir, "journal"), journalOf(rev, registration{"exit", "n7", rev}), 0o644)
+	write(t, filepath.Join(f.dir, "journal"), journalOf(rev, registration{"exit", exitNodeID, rev}), 0o644)
 
 	out, code := f.pin("--no-restart-absent")
 	if code != 3 {
@@ -690,6 +759,223 @@ func TestPin_NoRestartAbsentLeavesTheStrandedNodeAlone(t *testing.T) {
 	}
 	if strings.Contains(f.log("systemctl.log"), "restart") {
 		t.Errorf("--no-restart-absent restarted something anyway:\n%s", f.log("systemctl.log"))
+	}
+	// The point of keeping the stranded process is diagnosing it, so the run has to
+	// say which box to go and look at (issue #232, issue #225).
+	if !strings.Contains(out, relayTarget) {
+		t.Errorf("the stranded box was not named, so the flag preserves a process nobody can find:\n%s", out)
+	}
+}
+
+// -------------------------------------------------------------------------
+// the roll call (issue #232)
+// -------------------------------------------------------------------------
+
+// THE case issue #232 was opened for, and the one a count cannot answer at all.
+//
+// A volunteer client serves as a relay or an exit (ADR-0053) and registers exactly
+// like a deployed node without being in anybody's host list. So the journal here
+// carries TWO ids for a two-box NODE_TARGETS and --expect 2 is satisfied — the fleet
+// check says `2 of 2` and `the fleet is pinned`, correctly, from what it can see —
+// while one of the two DEPLOYED boxes never registered and a stranger's box is
+// standing in for it.
+//
+// Only comparing identities catches that, and only the pin can, because only the pin
+// has the host list.
+//
+// MUTATION: drop `|| [ "$roll_absent" -gt 0 ]` from either place it appears in
+// bacchus-pin.sh — the `absent` condition (the containment never fires for a box the
+// count cannot see) or the `rc` condition (the run exits 0 with the box named and the
+// verdict green). Each is half of the false pass, and this covers both.
+func TestPin_AVolunteerCannotStandInForADeployedBox(t *testing.T) {
+	f := newFleet(t)
+	rev := f.head()[:12]
+	// Two ids, matching --expect 2 — but one of them is nobody's box. The relay is
+	// still absent after the containment restart, so the verdict has to hold.
+	write(t, filepath.Join(f.dir, "journal"), journalOf(rev,
+		registration{"exit", exitNodeID, rev},
+		registration{"relay", "beef00volunteer", rev}), 0o644)
+
+	out, code := f.pin()
+	if code != 3 {
+		t.Fatalf("exit %d, want 3 — a volunteer held the count up while a deployed box was absent\n%s", code, out)
+	}
+	// The count really did pass. That is not a bug in the check; it is its limit.
+	if !strings.Contains(out, "2 of 2 expected node(s) registered") {
+		t.Errorf("the fleet check no longer reports what it can see:\n%s", out)
+	}
+	if strings.Contains(out, "did NOT register in this window") {
+		t.Errorf("the check reported an absence it cannot see, which would make this test prove nothing:\n%s", out)
+	}
+	if !strings.Contains(out, "ROLL CALL") || !strings.Contains(out, relayTarget) {
+		t.Errorf("the deployed box that did not register was not named:\n%s", out)
+	}
+	if !strings.Contains(out, "belong to no box in NODE_TARGETS") {
+		t.Errorf("the extra registration is not explained as a volunteer:\n%s", out)
+	}
+	// The containment fires on the roll call's finding too, not only on the count's.
+	for _, want := range []string{exitTarget + "\trestart bacchus-exit", relayTarget + "\trestart bacchus-relay"} {
+		if !strings.Contains(f.log("systemctl.log"), want) {
+			t.Errorf("no %q — the containment never ran for an absence only the roll call saw:\n%s", want, f.log("systemctl.log"))
+		}
+	}
+}
+
+// A box whose own id cannot be read falls back to the count, and says so. Silence
+// here would be the worst outcome: a roll call that quietly drops a box it could not
+// ask reports a complete fleet from an incomplete question.
+func TestPin_SaysSoWhenABoxCannotStateItsId(t *testing.T) {
+	f := newFleet(t)
+	rev := f.head()[:12]
+	// The relay box answers nothing at all — an older binary, or a window that does
+	// not reach its last start.
+	write(t, filepath.Join(f.dir, "journal-"+relayTarget), "-- No entries --\n", 0o644)
+	write(t, filepath.Join(f.dir, "journal"), journalOf(rev,
+		registration{"exit", exitNodeID, rev},
+		registration{"relay", relayNodeID, rev}), 0o644)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — both boxes registered; one of them just could not be asked\n%s", code, out)
+	}
+	if !strings.Contains(out, "no node id in its journal") || !strings.Contains(out, relayTarget) {
+		t.Errorf("the box that could not be asked is not named:\n%s", out)
+	}
+	if !strings.Contains(out, "fall back to the") {
+		t.Errorf("the run does not say what it lost by not being able to ask:\n%s", out)
+	}
+}
+
+// A journal that could not be READ is not evidence that anybody is absent, and this is
+// the way a roll call gets that wrong: the ids file is empty in both cases. An ssh that
+// failed, or a window that does not reach the coordinator's restart, would then name
+// every deployed box and restart the entire fleet to answer a fetch that did not
+// happen — the loudest possible response to the least informative input.
+//
+// MUTATION: drop the `case "$1" in 0|1|4)` guard from roll_call — this goes red with
+// both boxes named and both units restarted.
+func TestPin_AnUnreadableJournalIsNotEvidenceOfAbsence(t *testing.T) {
+	f := newFleet(t)
+	// A window with no `coordinator release` line in it: the check exits 3 and says
+	// so, and it has counted nothing.
+	write(t, filepath.Join(f.dir, "journal"),
+		"Aug 08 12:00:03 box bacchus-coordinator[9]: exit registered: "+exitNodeID+" -> 192.0.2.10:20000 release=0.1.0 build=deadbeefdead\n", 0o644)
+
+	out, code := f.pin()
+	if code != 3 {
+		t.Fatalf("exit %d, want 3 — the window cannot answer the question\n%s", code, out)
+	}
+	if !strings.Contains(out, "Widen the window") {
+		t.Fatalf("the check did not report the case this test is about:\n%s", out)
+	}
+	if strings.Contains(out, "ROLL CALL") {
+		t.Errorf("an unread journal was reported as boxes being absent:\n%s", out)
+	}
+	if strings.Contains(f.log("systemctl.log"), "restart") {
+		t.Errorf("the fleet was restarted to answer a journal that could not be read:\n%s", f.log("systemctl.log"))
+	}
+}
+
+// The map is re-read after the containment restart, not carried across it. A relay
+// without -relay-ingress takes a FRESH RANDOM id at every start (core/engine.go,
+// randID), so the ids read before a restart name processes that no longer exist —
+// and a roll call comparing them would report a box that came back perfectly as
+// absent, on every run that restarted anything.
+//
+// MUTATION: delete the second `read_node_ids` in the containment block — the run
+// exits 3 with the relay named as absent, which is a false failure.
+func TestPin_ReReadsNodeIdsAfterTheContainmentRestart(t *testing.T) {
+	f := newFleet(t)
+	rev := f.head()[:12]
+	const relayAfterRestart = "a9000011112222"
+
+	write(t, filepath.Join(f.dir, "journal"), journalOf(rev, registration{"exit", exitNodeID, rev}), 0o644)
+	// The relay comes back under a DIFFERENT id, as a real one does.
+	write(t, filepath.Join(f.dir, "journal.2"), journalOf(rev,
+		registration{"exit", exitNodeID, rev}, registration{"relay", relayAfterRestart, rev}), 0o644)
+	write(t, filepath.Join(f.dir, "journal-"+relayTarget+".2"), nodeJournal("relay", relayAfterRestart), 0o644)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — the relay came back under a fresh id, which is what a relay does\n%s", code, out)
+	}
+	if !strings.Contains(out, relayAfterRestart) {
+		t.Errorf("the second roll call still used the id from before the restart:\n%s", out)
+	}
+}
+
+// -------------------------------------------------------------------------
+// the units: compared, never copied (issue #234)
+// -------------------------------------------------------------------------
+
+// The failure issue #234 IS. Issue #222 added `OnFailure=` to both server units,
+// merging it put it on no box — bacchus-pin.sh never copies a .service file, and must
+// not — and every pin run afterwards reported a pinned fleet, because nothing compared
+// the two either. It is issue #205's finding in a different place: the repository holds
+// a mechanism the fleet does not have, and nothing reports the difference.
+//
+// It is a report and not a failure: the binaries genuinely are pinned, units are
+// configuration this script deliberately does not manage, and a check that failed every
+// run until three units were hand-edited would be switched off or answered with the copy
+// flag that must not exist.
+//
+// MUTATION: delete the `compare_unit` loop from bacchus-pin.sh — this goes red and
+// every other test in this file keeps passing, which is exactly how a merged mechanism
+// sat on no box for a whole wave.
+func TestPin_ReportsALiveUnitMissingADirectiveItsTemplateShips(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"), journalFor(head[:12], head[:12], head[:12]), 0o644)
+
+	// The live exit unit as it is on the boxes today: the shipped one, minus the
+	// handler wiring, plus a flag somebody added by hand.
+	shipped := string(readFile(t, filepath.Join(repoRoot(t), exitUnitRelPath)))
+	live := strings.ReplaceAll(shipped, rollbackOnFailure, "")
+	live = strings.ReplaceAll(live, "-exit-key ${EXIT_KEY}", "-exit-key ${EXIT_KEY} -admission-cred /etc/bacchus/node.cred")
+	write(t, filepath.Join(f.dir, "unit-cat-"+exitTarget), "# /etc/systemd/system/bacchus-exit.service\n"+live, 0o644)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — the binaries are pinned; the unit gap is reported, not fatal\n%s", code, out)
+	}
+	if !strings.Contains(out, "MISSING from the live unit") || !strings.Contains(out, rollbackOnFailure) {
+		t.Errorf("the directive the box does not have was not reported:\n%s", out)
+	}
+	if !strings.Contains(out, exitTarget) {
+		t.Errorf("the report does not say which box is missing it:\n%s", out)
+	}
+	// The hand-added flag is the reason units are never copied, so it must be shown
+	// as a difference and never as something to fix.
+	if !strings.Contains(out, "-admission-cred /etc/bacchus/node.cred") {
+		t.Errorf("the hand-added flag is not shown, which is the half that explains the no-copy rule:\n%s", out)
+	}
+	// And still nothing was copied.
+	if strings.Contains(f.log("scp.log"), ".service") {
+		t.Errorf("a unit file was copied to answer the gap:\n%s", f.log("scp.log"))
+	}
+}
+
+// The other half of the same run: a box whose unit matches the shipped one draws no
+// warning, so the report above means something when it appears.
+func TestPin_SaysNothingWhenTheLiveUnitMatches(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"), journalFor(head[:12], head[:12], head[:12]), 0o644)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	if strings.Contains(out, "MISSING from the live unit") {
+		t.Errorf("a unit identical to the shipped one was reported as missing something:\n%s", out)
+	}
+	if !strings.Contains(out, "carry the same directives") {
+		t.Errorf("the comparison did not run, so its silence proves nothing:\n%s", out)
+	}
+	// A node unit this repository ships no template for is stated rather than skipped
+	// silently — bacchus-relay is exactly that case today.
+	if !strings.Contains(out, "nothing ships as deploy/bacchus-relay.service") {
+		t.Errorf("a unit with no shipped template was passed over without a word:\n%s", out)
 	}
 }
 
@@ -719,10 +1005,10 @@ func journalOf(coord string, regs ...registration) string {
 // journalFor renders a coordinator journal in which the coordinator started at coord and
 // two nodes then registered at the given revisions.
 func journalFor(coord, exitRev, relayRev string) string {
-	return "Aug 08 11:00:00 box bacchus-coordinator[9]: exit registered: n7 -> 192.0.2.10:20000 country=NL (observed IP) release=0.1.0 build=deadbeefdead\n" +
+	return "Aug 08 11:00:00 box bacchus-coordinator[9]: exit registered: " + exitNodeID + " -> 192.0.2.10:20000 country=NL (observed IP) release=0.1.0 build=deadbeefdead\n" +
 		"Aug 08 12:00:00 box bacchus-coordinator[9]: version fence DISABLED (-min-serving-version 0.0.0) — any node version may serve (issue #36); coordinator release 0.1.0 (revision " + coord + ")\n" +
-		"Aug 08 12:00:03 box bacchus-coordinator[9]: exit registered: n7 -> 192.0.2.10:20000 country=NL (observed IP) release=0.1.0 build=" + exitRev + "\n" +
-		"Aug 08 12:00:04 box bacchus-coordinator[9]: relay registered: n9 (192.0.2.20:41234) country=DE (node hint, unresolved IP) release=0.1.0 build=" + relayRev + "\n"
+		"Aug 08 12:00:03 box bacchus-coordinator[9]: exit registered: " + exitNodeID + " -> 192.0.2.10:20000 country=NL (observed IP) release=0.1.0 build=" + exitRev + "\n" +
+		"Aug 08 12:00:04 box bacchus-coordinator[9]: relay registered: " + relayNodeID + " (192.0.2.20:41234) country=DE (node hint, unresolved IP) release=0.1.0 build=" + relayRev + "\n"
 }
 
 // -------------------------------------------------------------------------
@@ -973,6 +1259,251 @@ func TestFleetCheck_RefusesAnUnusableRevisionArgument(t *testing.T) {
 	}
 }
 
+// --ids-to is the side channel the roll call is built on (issue #232). Two properties:
+// it names every id this window counted, and it does not change stdout — the check's
+// output is the pasteable half of a pin run and gaining a machine-readable section
+// would be the easiest way to lose that without noticing.
+func TestFleetCheck_WritesTheIdsItCountedWithoutChangingItsOutput(t *testing.T) {
+	j := journalOf("2f4f77887c67",
+		registration{"exit", "aaa", "2f4f77887c67"},
+		registration{"relay", "aaa", "2f4f77887c67"},
+		registration{"relay", "bbb", "2f4f77887c67"})
+
+	plain, code := fleetCheck(t, j, "--expect", "2", "2f4f77887c67")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, plain)
+	}
+
+	ids := filepath.Join(t.TempDir(), "ids")
+	withIDs, code := fleetCheck(t, j, "--expect", "2", "--ids-to", ids, "2f4f77887c67")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, withIDs)
+	}
+	if withIDs != plain {
+		t.Errorf("--ids-to changed what is printed:\n--- without ---\n%s\n--- with ---\n%s", plain, withIDs)
+	}
+
+	got := strings.Fields(string(readFile(t, ids)))
+	// A dual-role box is ONE id here too, or the pin would look for a box that does
+	// not exist.
+	if len(got) != 2 || got[0] != "aaa" || got[1] != "bbb" {
+		t.Errorf("ids file holds %q, want [aaa bbb]", got)
+	}
+}
+
+// A run that finds nothing must leave an EMPTY file rather than the previous run's
+// ids. The pin reads this file twice — once before its containment restart and once
+// after — and a stale read names the wrong box, which is worse than naming none.
+func TestFleetCheck_TruncatesTheIdsFileEvenWhenItFindsNothing(t *testing.T) {
+	ids := filepath.Join(t.TempDir(), "ids")
+	if out, code := fleetCheck(t, journalOf("2f4f77887c67",
+		registration{"exit", "aaa", "2f4f77887c67"}), "--ids-to", ids, "2f4f77887c67"); code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	// A window with no coordinator start at all: exit 3, and nothing to report.
+	if out, code := fleetCheck(t, "exit registered: aaa release=0.1.0 build=2f4f77887c67\n",
+		"--ids-to", ids, "2f4f77887c67"); code != 3 {
+		t.Fatalf("exit %d, want 3\n%s", code, out)
+	}
+	if got := strings.TrimSpace(string(readFile(t, ids))); got != "" {
+		t.Errorf("the ids file still holds %q from the previous run", got)
+	}
+}
+
+// -------------------------------------------------------------------------
+// bacchus-node-id.sh: the other half of the pairing (issue #232)
+// -------------------------------------------------------------------------
+
+func nodeID(t *testing.T, journal string, args ...string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("sh", append([]string{filepath.Join(repoRoot(t), nodeIDRelPath)}, args...)...)
+	cmd.Stdin = strings.NewReader(journal)
+	b, err := cmd.CombinedOutput()
+	code := 0
+	var ee *exec.ExitError
+	if err != nil {
+		if !asExitError(err, &ee) {
+			t.Fatalf("running %s: %v\n%s", nodeIDRelPath, err, b)
+		}
+		code = ee.ExitCode()
+	}
+	return string(b), code
+}
+
+func TestNodeID_ReadsBothStartupShapes(t *testing.T) {
+	t.Run("exit", func(t *testing.T) {
+		out, code := nodeID(t, nodeJournal("exit", exitNodeID))
+		if code != 0 || strings.TrimSpace(out) != exitNodeID {
+			t.Fatalf("exit %d, got %q", code, out)
+		}
+	})
+	t.Run("relay", func(t *testing.T) {
+		out, code := nodeID(t, nodeJournal("relay", relayNodeID))
+		if code != 0 || strings.TrimSpace(out) != relayNodeID {
+			t.Fatalf("exit %d, got %q", code, out)
+		}
+	})
+	t.Run("one box, both roles, one id", func(t *testing.T) {
+		out, code := nodeID(t, nodeJournal("exit", exitNodeID)+nodeJournal("relay", exitNodeID))
+		if code != 0 {
+			t.Fatalf("exit %d\n%s", code, out)
+		}
+		if n := len(strings.Fields(out)); n != 1 {
+			t.Errorf("printed %d values for one process, want 1:\n%s", n, out)
+		}
+	})
+}
+
+// A window can hold more than one START, because the pin restarts a node that did not
+// come back and reads this again. The last one is the process that is running; the one
+// before it is a relay identity that no longer exists.
+func TestNodeID_TakesTheLastStartInTheWindow(t *testing.T) {
+	j := nodeJournal("relay", "a900000000aa") + nodeJournal("relay", relayNodeID)
+	out, code := nodeID(t, j)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if strings.TrimSpace(out) != relayNodeID {
+		t.Errorf("got %q, want the id from the LAST start (%s)", strings.TrimSpace(out), relayNodeID)
+	}
+}
+
+// The line shapes are matched WHOLE, and this is why. core/pool.go prints
+// `exit <id> in <country> did not carry traffic` about an exit this node was ASSIGNED
+// — somebody else's id — and it appears on a volunteer box, which runs a client and an
+// exit at once, AFTER the startup lines. A loose `exit <hex>` pattern would take the
+// last one of those and report a stranger's node id as this box's identity, which is
+// worse than reporting none: the roll call would then name a box that is running fine.
+//
+// MUTATION: relax the patterns to /exit [0-9a-f]+/ and /relay [0-9a-f]+/ — this goes
+// red on the first and third cases and every other test here keeps passing.
+func TestNodeID_IgnoresLinesThatAreNotTheStartupLine(t *testing.T) {
+	j := nodeJournal("exit", exitNodeID) +
+		"Aug 08 12:01:00 box bacchus-node[7]: exit deadbeefcafe in NL did not carry traffic — asking for another\n" +
+		"Aug 08 12:01:01 box bacchus-node[7]: exit TCP server on 192.0.2.10:20000\n" +
+		"Aug 08 12:01:02 box bacchus-node[7]: relay abcdef012345 assigned session s1\n"
+	out, code := nodeID(t, j)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if strings.TrimSpace(out) != exitNodeID {
+		t.Errorf("got %q — a line that is not a startup line reached the answer", strings.TrimSpace(out))
+	}
+}
+
+// Nothing to report is its own exit code, and it says which of the three causes to
+// look at. Reporting an empty id as success would put an empty string into the roll
+// call, where it matches nothing and names every box as absent.
+func TestNodeID_ReportsAWindowWithNoStartupLine(t *testing.T) {
+	out, code := nodeID(t, "Aug 08 12:00:00 box bacchus-node[7]: exit TCP server on 192.0.2.10:20000\n")
+	if code != 4 {
+		t.Fatalf("exit %d, want 4\n%s", code, out)
+	}
+	if !strings.Contains(out, "widen journalctl --since") {
+		t.Errorf("the message is not actionable:\n%s", out)
+	}
+	if strings.Contains(out, "192.0.2.10") {
+		t.Errorf("it echoed the input it could not parse; this output is captured into a variable:\n%s", out)
+	}
+}
+
+// -------------------------------------------------------------------------
+// bacchus-unit-check.sh (issue #234)
+// -------------------------------------------------------------------------
+
+func unitCheck(t *testing.T, template, live string) (string, int) {
+	t.Helper()
+	cmd := exec.Command("sh", filepath.Join(repoRoot(t), unitCheckRelPath), template)
+	cmd.Stdin = strings.NewReader(live)
+	b, err := cmd.CombinedOutput()
+	code := 0
+	var ee *exec.ExitError
+	if err != nil {
+		if !asExitError(err, &ee) {
+			t.Fatalf("running %s: %v\n%s", unitCheckRelPath, err, b)
+		}
+		code = ee.ExitCode()
+	}
+	return string(b), code
+}
+
+// The shipped units compared against themselves, which is what a correctly installed
+// box looks like. Both templates, because the coordinator's ExecStart uses `\` line
+// continuations and a comparison that did not join them would report a unit as
+// differing from itself — a check that cries wolf on every run is a check nobody reads.
+func TestUnitCheck_AUnitMatchesItself(t *testing.T) {
+	root := repoRoot(t)
+	for _, rel := range []string{exitUnitRelPath, coordUnitRelPath} {
+		body := string(readFile(t, filepath.Join(root, rel)))
+		out, code := unitCheck(t, filepath.Join(root, rel), "# /etc/systemd/system/x.service\n"+body)
+		if code != 0 {
+			t.Errorf("%s: exit %d, want 0\n%s", rel, code, out)
+		}
+		if !strings.Contains(out, "carry the same directives") {
+			t.Errorf("%s: %s", rel, out)
+		}
+	}
+}
+
+func TestUnitCheck_ReportsTheThreeKindsOfDifference(t *testing.T) {
+	root := repoRoot(t)
+	shipped := string(readFile(t, filepath.Join(root, exitUnitRelPath)))
+	live := strings.ReplaceAll(shipped, rollbackOnFailure, "")
+	live = strings.ReplaceAll(live, "Restart=always", "Restart=always\nStartLimitBurst=5")
+	live = strings.ReplaceAll(live, "RestartSec=2", "RestartSec=9")
+
+	out, code := unitCheck(t, filepath.Join(root, exitUnitRelPath), live)
+	if code != 5 {
+		t.Fatalf("exit %d, want 5\n%s", code, out)
+	}
+	// Missing is the finding; the other two are context, and conflating them is how a
+	// hand-added flag reads as something to fix.
+	if !strings.Contains(out, "MISSING from the live unit") || !strings.Contains(out, rollbackOnFailure) {
+		t.Errorf("the missing directive is not the headline:\n%s", out)
+	}
+	if !strings.Contains(out, "only on the box") || !strings.Contains(out, "StartLimitBurst=5") {
+		t.Errorf("a directive only the box has is not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "RestartSec=") || !strings.Contains(out, "live: 9") {
+		t.Errorf("a directive whose VALUE differs is not reported with both values:\n%s", out)
+	}
+	// And it says what to do without ever offering to do it.
+	if !strings.Contains(out, "BY HAND") || !strings.Contains(out, "daemon-reload") {
+		t.Errorf("the remedy is not stated:\n%s", out)
+	}
+	if strings.Contains(strings.ToLower(out), "scp ") || strings.Contains(out, "install -D -m 0644 deploy/bacchus-exit.service") {
+		t.Errorf("it suggested copying the unit, which is the one thing this must never do:\n%s", out)
+	}
+}
+
+// Comments, blank lines, ordering and the `# /path` header systemctl cat prints are
+// not configuration. A textual diff of these two would be pages of noise, and noise
+// is how a report stops being read.
+func TestUnitCheck_IgnoresCommentsBlankLinesAndOrdering(t *testing.T) {
+	root := repoRoot(t)
+	tmpl := filepath.Join(t.TempDir(), "x.service")
+	write(t, tmpl, "[Unit]\nDescription=x\nOnFailure=h.service\n\n[Service]\nExecStart=/bin/x\nRestart=always\n", 0o644)
+	_ = root
+
+	live := "# /etc/systemd/system/x.service\n; an operator's note\n[Service]\n\nRestart=always\nExecStart=/bin/x\n\n[Unit]\n# another note\nOnFailure=h.service\nDescription=x\n"
+	out, code := unitCheck(t, tmpl, live)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — nothing here is a difference in configuration\n%s", code, out)
+	}
+}
+
+// A unit that is not on the box at all prints nothing, and that is a finding rather
+// than a pass: `systemctl cat` is silent for a unit that does not exist.
+func TestUnitCheck_RefusesAnEmptyLiveUnit(t *testing.T) {
+	out, code := unitCheck(t, filepath.Join(repoRoot(t), exitUnitRelPath), "")
+	if code != 3 {
+		t.Fatalf("exit %d, want 3\n%s", code, out)
+	}
+	if !strings.Contains(out, "does not exist on that box") {
+		t.Errorf("the empty answer is not explained:\n%s", out)
+	}
+}
+
 // -------------------------------------------------------------------------
 // the invariant this repository cannot lose
 // -------------------------------------------------------------------------
@@ -988,7 +1519,7 @@ func TestFleetCheck_RefusesAnUnusableRevisionArgument(t *testing.T) {
 // third-party STUN servers.
 func TestDeployArtifactsNameNoRealHost(t *testing.T) {
 	root := repoRoot(t)
-	for _, rel := range []string{pinRelPath, fleetCheckRelPath, "deploy/testbed.env.example", adrRelPath} {
+	for _, rel := range []string{pinRelPath, fleetCheckRelPath, nodeIDRelPath, unitCheckRelPath, "deploy/testbed.env.example", adrRelPath} {
 		body := string(readFile(t, filepath.Join(root, rel)))
 
 		for _, ip := range ipv4Literal.FindAllString(body, -1) {
