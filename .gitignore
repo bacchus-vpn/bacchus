@@ -28,6 +28,23 @@ bacchus-coordinator
 bacchus-turn
 bacchus-fyne
 
+# `go build ./cmd/<name>` with no -o writes the binary into the working
+# directory under the LAST PATH ELEMENT of the package, which is the command's
+# directory name and not the installed name any of the patterns above match:
+# ./cmd/node builds `node`, ./cmd/release-sign builds `release-sign`. Every
+# command in this repository, so a new one does not have to remember.
+/node
+/coordinator
+/release-sign
+/admission-issue
+/asn-stage
+/bacchus-netd
+/capacity-probe
+/coldstart-bootstrap
+/coldstart-issue
+/coldstart-probe
+/relaychain-probe
+
 # --- third-party runtime binaries (fetched, NOT vendored) ---
 # wintun.dll is proprietary ((c) WireGuard LLC, "licensed, not sold" — see its
 # own LICENSE.txt) and must never land in this AGPL repo. It is a Windows runtime
