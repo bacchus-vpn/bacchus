@@ -238,6 +238,12 @@ here.**
   tests on both sides that share one fixture generator, and it is one field.
 - **−** `bacchus-coordinator.service` names a handler that can do nothing for it
   until `cmd/coordinator` calls `CheckStartup`.
+- **−** **Merging this puts it on no box.** `deploy/bacchus-pin.sh` deliberately
+  never copies a unit file (ADR-0064: the live units carry hand-added flags the
+  templates lack), so the `OnFailure=` line reaches a machine only when someone
+  edits the live unit or re-runs `deploy/install.sh` there. Until then the
+  mechanism is present in the repository and absent from the fleet, which is
+  ADR-0064's own finding wearing different clothes.
 
 ## What this record does not decide
 
