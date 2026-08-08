@@ -78,6 +78,9 @@ const Version = 1
 //     when it landed and moved here by #54, which is the precedent worth naming —
 //     a new verifier registers its tag here rather than beside its own schema, or
 //     this file stops being the one place the whole set can be read.
+//   - TagRevocationsDoc: core/revocation owns the document (issue #199, ADR-0017,
+//     ADR-0063) — the same split, for the same reason: this package signs and opens
+//     the bytes, core/revocation decides what they mean.
 //
 // The values are wire contract, not naming preference: each matches its signer's
 // byte for byte, and the frozen conformance vectors fail loudly if any drifts.
@@ -86,6 +89,7 @@ const (
 	TagPolicyDoc      = "bacchus/policy/v1"
 	TagIssuerCert     = "bacchus/issuer-cert/v1"
 	TagDeviceCred     = "bacchus/device-cred/v1"
+	TagRevocationsDoc = "bacchus/revocations/v1"
 )
 
 // ClockSkew is the tolerance applied to a NotBefore so a verifier whose clock
@@ -126,6 +130,12 @@ const (
 	// consumes the same object against the same root, and building it inside the
 	// policy consumer would mean porting this twice.
 	RoleUpdate Role = "update"
+	// RoleRevocations delegates "may sign the two revocation bundles", verified
+	// offline by a coordinator (core/revocation) — the untrusted-hop mechanism
+	// ADR-0017 specifies and this repository's half of issue #199. Additive: this
+	// value alone does nothing until a caller actually verifies against it (see
+	// core/revocation.Verifier and cmd/coordinator/revocations.go).
+	RoleRevocations Role = "revocations"
 )
 
 // Known reports whether r is a role this build recognises. It is not consulted by
@@ -134,7 +144,7 @@ const (
 // operator tooling that wants to describe a cert rather than admit it.
 func (r Role) Known() bool {
 	switch r {
-	case RolePolicy, RoleUpdate:
+	case RolePolicy, RoleUpdate, RoleRevocations:
 		return true
 	default:
 		return false

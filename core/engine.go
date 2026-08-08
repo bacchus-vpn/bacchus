@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -954,11 +955,27 @@ type wire struct {
 	Version      int                    `json:"version,omitempty"`
 	Capabilities []handshake.Capability `json:"capabilities,omitempty"`
 	Reason       string                 `json:"reason,omitempty"`
-	Cred         string                 `json:"cred,omitempty"`     // admission credential (issue #42)
-	Release      string                 `json:"release,omitempty"`  // product release version, semver (issue #36, ADR-0015): a node stamps it on register so the coordinator can fence stale nodes; the coordinator stamps it on client replies so a client can force-major/skip-minor. Distinct from Version, the wire-shape int (ADR-0016).
-	Relay        string                 `json:"relay,omitempty"`    // relay disposition the coordinator stamps on a relay-mode "session" reply (issue #17, ADR-0033): relayPeer when a Bacchus relay node was assigned to splice client<->exit (the preferred data-plane path), relayTURN when none was available and the client instead reaches the exit directly (its ICE relays through the coordinator's TURN only if it can't hole-punch — the fallback). Empty on direct-mode replies and from coordinators predating #17.
-	RelayTag     string                 `json:"relayTag,omitempty"` // stable opaque tag for the assigned peer relay (issue #56, ADR-0035): the client remembers a tag whose transport dial failed this Connect and skips a later pool member that assigns the SAME relay, instead of re-dialing a known-bad splice. Set only on the peer-relay path; empty for direct/TURN-fallback and from coordinators predating #56. Never a routable address — it reveals nothing the client can't already infer from the relay's ICE candidates (ADR-0009).
-	SpeedCap     uint64                 `json:"speedCap,omitempty"` // a forwarder's DECLARED aggregate speed cap in bits/s (issue #143, ADR-0040): what its operator is willing to carry, not what it can. Self-reported on every register, which is safe because the claim is only ever binding downward — the coordinator applies usable = min(declared, measured) and the measured term is NOT a self-report (see core/capacity). Zero/absent = no declared cap; additive/optional, so a node predating #143 omits it and is treated exactly as it is today. Note there is deliberately NO measured-capacity field on this wire in either direction: a node reporting its own capacity would be reporting the one number it profits from inflating.
+	Cred         string                 `json:"cred,omitempty"`    // admission credential (issue #42)
+	Release      string                 `json:"release,omitempty"` // product release version, semver (issue #36, ADR-0015): a node stamps it on register so the coordinator can fence stale nodes; the coordinator stamps it on client replies so a client can force-major/skip-minor. Distinct from Version, the wire-shape int (ADR-0016).
+	// Build is this node's VCS revision, self-stamped on register (issue #182,
+	// ADR-0063) — the coordinator's coordBuild/describeBuild reasoning applied
+	// to the node side of the comparison it names as its own missing half:
+	// "pairing this against a node still means reading the node's own binary
+	// (go version -m)". A separate field rather than folded into Release for
+	// Release's own reason restated here — Release is parsed as semver
+	// (ADR-0015) and a release ships many commits, so two builds from either
+	// end of one report the SAME release and are not the same binary.
+	//
+	// Empty is the ordinary case, not a suspicious one: the toolchain records
+	// VCS data only from a checkout with a real .git directory, and a build
+	// made in a git WORKTREE — how every lane in this project builds — or
+	// under `go test` carries none. See nodeBuildRevision. It is the coordinator
+	// that decides what, if anything, a MISMATCH against its own revision
+	// means; this field only ever states this node's own value.
+	Build    string `json:"build,omitempty"`
+	Relay    string `json:"relay,omitempty"`    // relay disposition the coordinator stamps on a relay-mode "session" reply (issue #17, ADR-0033): relayPeer when a Bacchus relay node was assigned to splice client<->exit (the preferred data-plane path), relayTURN when none was available and the client instead reaches the exit directly (its ICE relays through the coordinator's TURN only if it can't hole-punch — the fallback). Empty on direct-mode replies and from coordinators predating #17.
+	RelayTag string `json:"relayTag,omitempty"` // stable opaque tag for the assigned peer relay (issue #56, ADR-0035): the client remembers a tag whose transport dial failed this Connect and skips a later pool member that assigns the SAME relay, instead of re-dialing a known-bad splice. Set only on the peer-relay path; empty for direct/TURN-fallback and from coordinators predating #56. Never a routable address — it reveals nothing the client can't already infer from the relay's ICE candidates (ADR-0009).
+	SpeedCap uint64 `json:"speedCap,omitempty"` // a forwarder's DECLARED aggregate speed cap in bits/s (issue #143, ADR-0040): what its operator is willing to carry, not what it can. Self-reported on every register, which is safe because the claim is only ever binding downward — the coordinator applies usable = min(declared, measured) and the measured term is NOT a self-report (see core/capacity). Zero/absent = no declared cap; additive/optional, so a node predating #143 omits it and is treated exactly as it is today. Note there is deliberately NO measured-capacity field on this wire in either direction: a node reporting its own capacity would be reporting the one number it profits from inflating.
 	// SessionCapBps is the RESOLVED per-session speed cap, in bits/s, that the
 	// coordinator stamps on an "assign" and the exit shapes this one session to
 	// (issue #58, ADR-0048). It is the `speed_cap_bps` of the signed policy's tier
@@ -1471,6 +1488,11 @@ func (e *Engine) Start(ctx context.Context) error {
 	// ADR-0015) so a coordinator enforcing a minimum serving version can fence it
 	// when it falls behind. Computed once here — the loop re-sends the same regs.
 	release := version.Current().String()
+	// And its VCS revision (issue #182, ADR-0063), the half of the build/release
+	// comparison a node's own wire never carried before: two builds of one
+	// release are not one binary. Computed once for the identical reason
+	// release is — see nodeBuildRevision for why this is usually empty.
+	build := nodeBuildRevision()
 	// The declared speed cap (issue #143) and the declared monthly quota (issue #49)
 	// are both static for the process's life, so they ride the template. The quota's
 	// spent/unspent BIT is NOT — registerLoop stamps it fresh on every send, because
@@ -1488,14 +1510,14 @@ func (e *Engine) Start(ctx context.Context) error {
 	declaredQuota := uint64(e.cfg.Limits.MonthlyQuota)
 	var regs []wire
 	if e.roles[RoleExit] {
-		regs = append(regs, wire{Type: "register", Role: "exit", ID: e.cfg.ID, Country: e.cfg.Country, Addr: e.cfg.Advertise, Release: release, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota})
+		regs = append(regs, wire{Type: "register", Role: "exit", ID: e.cfg.ID, Country: e.cfg.Country, Addr: e.cfg.Advertise, Release: release, Build: build, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota})
 	}
 	if e.roles[RoleRelay] {
 		// IngressPort is this relay's onion-forward listener port (issue #142). The
 		// coordinator joins it to the source ip it OBSERVES on this register to form
 		// the ingress it advertises, so only the port is ours to state. Zero when this
 		// relay serves no ingress, which leaves it simply not relay-eligible as a hop.
-		regs = append(regs, wire{Type: "register", Role: "relay", ID: e.cfg.ID, Country: e.cfg.Country, Release: release, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota, IngressPort: ingressPort})
+		regs = append(regs, wire{Type: "register", Role: "relay", ID: e.cfg.ID, Country: e.cfg.Country, Release: release, Build: build, SpeedCap: speedCap, DeclaredQuotaBytes: declaredQuota, IngressPort: ingressPort})
 	}
 
 	// One read loop per pool member: a forwarder can be assigned a session by
@@ -1965,6 +1987,58 @@ func (e *Engine) SessionCount() int {
 	e.sessMu.Lock()
 	defer e.sessMu.Unlock()
 	return len(e.sessions)
+}
+
+// nodeBuildRevision reports this binary's VCS revision for the register wire's
+// Build field (issue #182, ADR-0063), in the same short form
+// cmd/coordinator's own coordBuild/describeBuild render for its startup log:
+// up to 12 hex characters of vcs.revision, plus a "-dirty" suffix when the
+// working tree carried uncommitted changes at build time. Terser than
+// describeBuild's human-readable ", uncommitted changes" because this rides
+// the wire and a log line rather than only a startup banner.
+//
+// Empty whenever the toolchain recorded no VCS data — a plain `go build`, or a
+// build made in a git WORKTREE, which is how every lane in this project
+// builds (the toolchain records VCS data only from a checkout with a real
+// .git directory) — and empty must not read as suspicious: it is the ordinary
+// case for most of this project's own builds. It is the coordinator's job to
+// compare this against ITS OWN revision and flag only a MISMATCH; this
+// function only ever reports what this node's own binary carries.
+func nodeBuildRevision() string {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	return renderBuildRevision(bi.Settings)
+}
+
+// renderBuildRevision is nodeBuildRevision's rendering half, split out for the
+// identical reason cmd/coordinator's describeBuild is split from coordBuild: a
+// test binary carries the VCS settings the toolchain gave IT, and there is no
+// way to hand it different ones, so the reading half is untestable and
+// everything about the format lives here instead, where a test can pin it
+// against synthetic settings.
+func renderBuildRevision(settings []debug.BuildSetting) string {
+	var revision string
+	dirty := false
+	for _, s := range settings {
+		switch s.Key {
+		case "vcs.revision":
+			revision = s.Value
+		case "vcs.modified":
+			dirty = s.Value == "true"
+		}
+	}
+	if revision == "" {
+		return ""
+	}
+	if len(revision) > 12 {
+		revision = revision[:12]
+	}
+	if dirty {
+		return revision + "-dirty"
+	}
+	return revision
 }
 
 // registerLoop re-announces this forwarder's role(s) to every pool member on a

@@ -1,0 +1,17 @@
+{
+ "note": "Frozen POSITIVE wire vectors for the root -\u003e revocations delegation -\u003e revocations document chain (ADR-0017, bacchus-payment#77). Every key here is a published throwaway; see internal/devroot. A coordinator's verifier must accept this bundle at `now`, holding root_pub alone, and must parse the expect_* values from it. signer_seed regenerates the document bytes and is NEVER an input to verification — a verifier learns the signer's key from the delegation cert. Pair this with negative_vectors.json: accepting these proves nothing on its own. Regenerate only alongside a deliberate format change: go test ./internal/revocation -update.",
+ "now": "2026-08-15T12:00:00Z",
+ "root_pub": "G3qe/RAaWSSOU+NMl5UUj9/E2nEr2PfgFGzbL9aHisY=",
+ "bundle": {
+  "revocations": "eyJ2IjoxLCJhc19vZiI6IjIwMjYtMDgtMTVUMTI6MDA6MDBaIiwicmV2b2tlZCI6WyIzZjJhNWI2YzAwMTEyMjMzIiwiOTFiZTJmM2MxMTIyMzM0NCJdfQfebuMz4AockIQ5Uy8q3GGM+26WHvrRot/hK3V+c6PJwtOEuTWMFgK+7Xat46vbpkti8/Y+BSQND2Gh2GnBTwg=",
+  "cert": "eyJ2IjoxLCJzZXJpYWwiOiI0YTZlMGMzMWM1MDgyODVhIiwicm9sZSI6InJldm9jYXRpb25zIiwicHViIjoiMEZVRnlvRHpqUHZrSXZhbndGNDBkcllTR1FtZE1LS0lVRE40T3o0cFRNMD0iLCJuYmYiOiIyMDI2LTA4LTE0VDEyOjAwOjAwWiIsImV4cCI6IjIwMjctMDgtMTVUMTI6MDA6MDBaIiwibm90ZSI6IndpcmUgdmVjdG9yIHJldm9jYXRpb25zIHNpZ25lciAtIHRocm93YXdheSByb290In37gu6QFEXU1kwFlMli34LoOKwZrxbJH8ewoUdDqAMZU66Jx3ntdYkb8DJMvzVUPKMmYaw2Ev2C72wcKOV3p70I"
+ },
+ "signer_seed": "gCRZO/chEBXPE0/75/9A1CD4K0/hts/RiHXDpa9Kmg8=",
+ "expect_as_of": "2026-08-15T12:00:00Z",
+ "expect_revoked": [
+  "3f2a5b6c00112233",
+  "91be2f3c11223344"
+ ],
+ "expect_signer_pub": "0FUFyoDzjPvkIvanwF40drYSGQmdMKKIUDN4Oz4pTM0=",
+ "expect_delegation_serial": "4a6e0c31c508285a"
+}

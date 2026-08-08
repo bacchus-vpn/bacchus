@@ -615,6 +615,45 @@ install.
 Both bars are floors rather than schedules: they refuse, they do not refresh anything.
 Performing the refresh is still the manual step above.
 
+### The scheduled drift check (issue #150)
+
+The two bars above only ever fire once somebody pushes, opens a pull request, or cuts a
+release — so a quiet repository can drift past them with nothing noticing. A scheduled
+workflow closes that gap the same way [`bacchus-geoip-refresh.timer`](#keeping-it-fresh-issue-85)
+closes it for the country database above, but it cannot refresh anything the way that timer
+does: ADR-0044's fourth amendment §5 priced a scheduled job that opens a refresh pull
+request against the credential it would need, and the owner ruled against holding one in
+CI (recorded in the ADR's sixth amendment). What runs instead only **detects**:
+
+| file | what it is |
+|---|---|
+| `deploy/bacchus-asn-drift-check.sh` | fetch upstream, stage it through `asn-stage`, compare against the committed table |
+| `.github/workflows/asn-table-drift.yml` | runs the script weekly, and on demand via `workflow_dispatch` |
+
+```
+sh deploy/bacchus-asn-drift-check.sh
+```
+run from the repository root, is exactly what the workflow runs and the way to rehearse it
+by hand against the real feed. It fetches, decompresses, checks a row-count floor, stages
+through `asn-stage` and compares — never writing to `core/asn/table.tsv.gz` on any path,
+including every failure path. Exit **0** means no drift; exit **1** means the check itself
+could not complete (a bad download, a corrupt transfer, a feed too small to be a real
+release) and says nothing about whether the table is stale; exit **2** means the staged
+table differs from the committed one, and the message names the same three commands as
+[above](#refreshing-the-table-per-client-release) for fixing it.
+
+**Expect the workflow to stay red for stretches of ordinary time.** This compares byte for
+byte against a feed upstream rebuilds hourly, not against the calendar, so once the
+committed table is even a day behind it keeps failing on every scheduled run until somebody
+refreshes it — not only once it crosses 90 or 30 days. That is the intended shape of the
+signal: a single workflow staying red until acted on, rather than a pile of filed issues
+(this project's board treats the claim signal as the column a card sits in, and a bot-filed
+issue lands in none of them). No repository write, no stored credential, and no pull
+request are opened at any point — see
+[ADR-0044](adr/0044-as-lookup-seam-and-as-diverse-hop-selection.md)'s sixth amendment for
+the full argument and for why a repository-write credential in CI was refused rather than
+merely left unbuilt.
+
 ## Transport selection
 `-transport` picks the session transport (ADR-0008): `webrtc` (default; UDP/DTLS
 with NAT traversal) or `reality` (TCP :443 under camouflage TLS, issue #16). The
@@ -935,6 +974,84 @@ soft mode: a chain that fails verification is refused.
 predating #50 connects exactly as it does today — but it does not perform the
 challenge exchange, so enabling the gate on a network with such clients refuses
 them.
+
+## Telling clients that an address moved (issue #193, ADR-0061)
+
+Every address the desktop client dials — the coordinator pool, and the account
+service beside it — used to be a constant in a JSON file on each machine, with no
+way to correct it. That matters because the account service runs on anonymously
+rented infrastructure and **its address will change**: a device renews as soon as
+it enters its 6 h renewal margin, so a service that goes unreachable at *T* takes
+the first devices offline at *T* + ~6 h and the rest by *T* + 48 h. A moved
+**coordinator** is worse — it takes a client offline immediately.
+
+The coordinator already signs a cold-start directory and already serves it, on the
+same UDP port as STUN/TURN (`-turn-addr`). It now carries the account service too,
+and the desktop client reads both roles out of it.
+
+**Coordinator side.** One repeatable flag, empty by default:
+```
+bacchus-coordinator -turn-public-ip <IP> -turn-user <u> -turn-pass <p> \
+    -advertise <host:port> \
+    -account-service https://<account-host>:8443 \
+    -account-service https://<successor-host>:8443
+```
+List **every** address a client should try, in preference order, including the
+successor *before* a planned move — the directory's list REPLACES what a client has
+in its own config, so naming one address here narrows a client that was configured
+with two. `https` only, scheme and host, no path; anything else is refused at
+startup rather than published for every client to choke on. Leave the flag unset
+and no such entry is published, which leaves every client on its own configuration.
+
+What travels is a **location, not a trust root**: the client keeps the audience it
+binds assertions to and the CA it pins the service's TLS identity against, both out
+of band, so an address named here still has to present the identity that client
+already pins.
+
+**Client side.** A client needs an invite to fetch the directory at all. Mint one
+per recipient, exactly as for `cmd/coldstart-bootstrap`:
+```
+# on the coordinator VPS, once, to learn the snapshot-signing key
+bacchus-coordinator -print-bootstrap-pubkey
+
+# one invite per user; appends the secret to the coordinator's secrets file,
+# which is hot-reloaded, so no restart
+bacchus-coldstart-issue -coordinator <host>:3478 -pubkey <BOOTSTRAP_PUBKEY>
+```
+and put the printed `bacchus1:…` string in that user's client config:
+```jsonc
+{
+  "coordinators": ["<host>:8080"],   // still the seed: used until a directory arrives
+  "invite": "bacchus1:...",           // per-recipient, never shared
+  "accountServiceUrls": ["https://<account-host>:8443"],
+  "accountServiceAudience": "...",
+  "accountServiceCa": "/path/to/ca.pem"
+}
+```
+
+> **An invite is per-recipient and must never go into an installer, an image, or a
+> config template.** A coordinator's bootstrap secrets file has no vouch system
+> under it — every entry in it is trusted equally — so one invite baked into a
+> downloadable artifact is a working credential for the whole network, held by
+> everyone who downloads it. Provisioning a device takes **two** out-of-band
+> strings: an invite and a claim code.
+
+Behaviour worth knowing before you rely on it:
+
+- A client with **no** invite is unchanged and fully supported. It dials what is in
+  its config file.
+- The directory **leads** for coordinators and **replaces** for the account service.
+  A snapshot names only the coordinator that signed it, so replacing that list would
+  throw away the rest of your pool; the account service list is stated in full by
+  the flag above, so it is a complete answer.
+- An **expired**, unsigned or wrong-key snapshot is not adopted, and the client falls
+  back to its configured addresses rather than to nothing. The snapshot TTL is five
+  minutes, so the client's on-disk cache serves a rapid reconnect, not a next-day
+  launch.
+- The directory is read at **Connect**. A client already connected across a move
+  keeps the addresses it started with until it reconnects.
+- Re-issuing an invite takes effect at the next Connect: a cached snapshot signed by
+  a key the new invite does not name simply does not verify.
 
 ## Routing the whole device on Linux (issue #37, ADR-0049)
 
