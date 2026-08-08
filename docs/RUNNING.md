@@ -148,6 +148,12 @@ binaries to `/usr/local/bin/`, install the units, create `/etc/bacchus/*.env`
 from the templates (real IP + `TURN_PASS`), open the firewall,
 `systemctl enable --now`.
 
+That is a **first** install. Updating an existing deployment to a new commit is
+a different job with different failure modes, and it has its own procedure:
+[Pinning the whole deployment to a commit](#pinning-the-whole-deployment-to-a-commit-issue-205-adr-0064).
+Do not reinstall to update — it re-copies the unit files, which is the one thing
+an update must not do.
+
 ## Installing on Linux (issue #18)
 
 `deploy/install.sh` installs either half of the Linux story and, just as
@@ -1177,6 +1183,160 @@ adapter and its driver are not there. That is hardware verification, no Go test
 can assert it, and it has not been done. The same gap is still open for Windows
 as issue #88.
 
+## Pinning the whole deployment to a commit (issue #205, ADR-0064)
+
+Merging is not deploying. Nothing in this project's workflow puts `main` on a
+box, so between deploys the deployment drifts — one wave per wave, silently —
+and every instruction that says "run it on the testbed" then runs against
+whatever was last copied there by hand. **A result from a stale box is wrong in
+the direction that is hardest to catch: plausible.** It looks like a finding
+about the code and it is a finding about the deployment.
+
+```sh
+# From a CLONE at the commit you intend to deploy (not a git worktree — see below).
+cp deploy/testbed.env.example deploy/testbed.env   # once; it is gitignored
+$EDITOR deploy/testbed.env                          # your hosts and units
+sh deploy/bacchus-pin.sh --commit "$(git rev-parse HEAD)"
+```
+
+That builds both server binaries once, from that one checkout, stamped from
+`VERSION`; stages a checked copy onto every box without replacing anything;
+then installs and restarts **nodes first and the coordinator last**; then
+establishes the result rather than asserting it. `--dry-run` prints every
+remote command it would run and touches nothing.
+
+### The five things it will not do, and why each one matters
+
+1. **It never copies a `.service` file.** The coordinator's live unit carries
+   hand-added flags that are *not* in `deploy/bacchus-coordinator.service`, so
+   re-copying that file silently reverts a working configuration and the
+   deployment then behaves differently for reasons no diff shows. Units are
+   installed once — by hand or by `deploy/install.sh` — and edited in place.
+   This is binaries only, and there is no flag that changes that.
+2. **It never checks anything out.** It reads the commit the repository is
+   already on and refuses if `--commit` disagrees. A script that moved HEAD for
+   you could turn a half-finished rebase into a deployment.
+3. **It never touches `/etc/bacchus`.** Keys, env files and revocation lists are
+   state, not artifacts.
+4. **It refuses a build from a `git worktree`.** The Go toolchain records VCS
+   data only from a checkout with a real `.git` **directory**; a worktree records
+   none, every node then reports `build=unknown`, and the check below has
+   nothing to compare. Clone, check the commit out, build from there.
+5. **It refuses a binary whose release stamp did not land.** Two ways that
+   happens, and they need two different checks: a plain `go build` records no
+   `-ldflags` at all (visible in `go version -m`, checked per binary), while an
+   `-X` naming a symbol that does not resolve is **silently ignored** by the
+   linker — flag recorded, build successful, binary still reporting `0.0.0`, and
+   nothing in the artifact's metadata can tell it from a correct build. For that
+   one the script runs `core/version`'s own read-back
+   (`TestStampMatchesTheVersionFile` with `BACCHUS_REQUIRE_STAMP`, the same check
+   CI runs on every push) against this checkout, before it builds anything.
+
+### The order is part of the check, not a preference
+
+Restart the coordinator **last**. That is not tidiness: it is what makes the
+node check readable at all.
+
+`build=` (issue #182) rides the `registered:` line, and that line fires only for
+a node the coordinator does not already hold in its registry. A node restarts in
+about a second and its entry survives 35s, so **a rolling redeploy can replace
+every binary in the fleet without printing `registered` once** — and a journal
+read afterwards then answers with values from before the deploy, with total
+confidence. Restarting the coordinator empties its registry, so every node
+re-registers as new and prints a fresh line naming the binary it is running now.
+
+### Establishing the result
+
+Two checks, asking two different questions. Both run automatically at the end of
+`bacchus-pin.sh`; both are also usable on their own, which is what you want when
+you are checking a deployment somebody else did.
+
+**Which build is each node running?** — from the coordinator's journal, without
+reaching a single node:
+
+```sh
+ssh <coordinator-host> "journalctl -u bacchus-coordinator --since -10min --no-pager" |
+  sh deploy/bacchus-fleet-check.sh "$(git rev-parse HEAD)"
+```
+
+It reports one line per node and exits non-zero on any drift. It ignores
+everything before the last `coordinator release` startup line in the input — a
+registration made before the coordinator restarted is not evidence about what is
+running now, and it looks exactly as convincing — and it refuses a window
+containing no startup line rather than reading whatever it happens to hold. A
+node reporting `build=unknown` is a **failed** pin, not a pass: a fleet whose
+revision cannot be established is the state this exists to end.
+
+**Is the coordinator serving what that commit carries?** — by behaviour:
+
+```sh
+go run ./cmd/coordinator-probe -addr <coordinator-host>:8080
+```
+
+Read [Why the version string is not the check](#why-the-version-string-is-not-the-check)
+before trusting a green from it, especially the part about which port.
+
+### Why the version string is not the check
+
+On 2026-08-07 the live coordinator was found running a commit two waves old. Its
+startup line read:
+
+```
+coordinator release 0.1.0 (revision a868e6e3c447)
+```
+
+and a current one read:
+
+```
+coordinator release 0.1.0 (revision abe9880ebf17)
+```
+
+`release=0.1.0` is true in both. The obvious check — confirm the releases match
+— returns a clean answer either way, and a check that cannot fail is not a
+check. So `cmd/coordinator-probe` asks the coordinator to *do* something only a
+current build can do: one bare 20-byte STUN Binding Request to its **signaling**
+port. A build carrying issue #175 slice 1 and issue #202 answers it in place; an
+older one hands the datagram to `json.Unmarshal`, fails, and drops it.
+
+**The negative control, without which a green means nothing.** The coordinator's
+own STUN/TURN service on `-turn-addr` answers a Binding Request with
+byte-identical bytes — deliberately, since two ports on one host answering
+differently would be a distinguisher (ADR-0060) — on *every build this project
+has ever shipped*. **Point the probe at the TURN port and it goes green against
+a coordinator of any age**, and no shape check can tell them apart. So the probe
+first establishes the port, with a question only a signaling port answers and
+which every build has answered since issue #8: a `hello` whose protocol version
+cannot match, which draws a `reject`. Four outcomes, four exit codes:
+
+| control | capability | exit | means |
+|---|---|---|---|
+| answered | answered | 0 | this is a signaling port and it serves the shaped rendezvous hop |
+| answered | silent | 1 | stale build — or current and started `-rendezvous-dtls=false`, which removes it from the fleet just as thoroughly |
+| silent | answered | 4 | **not a pass** — this is a TURN port or an unrelated STUN server |
+| silent | silent | 3 | wrong address, a firewall, or nothing running. Says nothing about the build |
+
+Both confirmed on real hardware in both directions, including against a
+coordinator started `-rendezvous-dtls=false` as the negative control.
+
+### One thing to check on the coordinator while you are there
+
+The coordinator's unit has **`WorkingDirectory=` empty**, which for a system
+service means `/`. Every relative path in `ExecStart` therefore resolves under
+the root directory: a `-device-revocations secrets/device-revocations.json`
+becomes `/secrets/device-revocations.json`, which does not exist. That does not
+fail — **a missing revocation file means nothing is revoked**, quietly, which is
+the worst way for a security control to be off. `bacchus-pin.sh` prints the
+unit's effective `ExecStart` and `WorkingDirectory` after a deploy and warns when
+the two combine this way; give it a second look, because the file in this
+repository is not evidence about the running service.
+
+### Cards that need the boxes
+
+**The pin is a precondition, not a first step to improvise.** Anything that
+needs the testbed — the credential chain end to end, the revocation loop, a
+rendezvous change — runs `bacchus-pin.sh` first and confirms both checks pass
+before its own result means anything.
+
 ## What the coordinator says about node builds (issue #114)
 
 A node running a binary built from a different commit than the coordinator
@@ -1272,14 +1432,19 @@ exit's journal (`journalctl -u bacchus-exit`) shows the forwarded connections.
 - Relay needs no inbound/port-forward (dials out + hole-punches).
 - TCP-only via SOCKS; point apps at `127.0.0.1:1080` (or set the system proxy).
 - Stop a systemd binary before replacing it (`text file busy` otherwise).
-- **Rebuild and redeploy the whole deployment from one commit, together.** A node
-  on an older build registers, heartbeats and is assigned work exactly as a
-  current one does, and then drops every session it is given — the coordinator
+- **Rebuild and redeploy the whole deployment from one commit, together** —
+  `deploy/bacchus-pin.sh`, which exists so this stops being advice
+  ([the procedure](#pinning-the-whole-deployment-to-a-commit-issue-205-adr-0064)).
+  A node on an older build registers, heartbeats and is assigned work exactly as
+  a current one does, and then drops every session it is given — the coordinator
   logs a healthy fleet throughout (issue #114). If sessions stop establishing
   after a partial update, that is the first thing to rule out; the four lines
   under [What the coordinator says about node
   builds](#what-the-coordinator-says-about-node-builds-issue-114) are where it
   shows.
+- **Merging is not deploying, and the release number will not tell you.** Two
+  coordinators two waves apart both report `release 0.1.0`. Pin the boxes and
+  run both checks before trusting any result that came off them.
 - Binaries built with a bare `go build` report release `0.0.0` and warn at every
   start. That is fine for development and wrong for anything deployed — stamp
   them from `VERSION`, or install with `deploy/install.sh`, which does it for

@@ -221,22 +221,15 @@ build_one() {
 	verify_stamp "$_out" "$1"
 }
 
-# verify_stamp refuses a binary whose release stamp did not land.
+# verify_stamp refuses a binary whose release stamp is not recorded, or that is not the
+# commit being pinned.
 #
-# Two independent readings, because the failure is silent in both directions:
-#
-#  1. `go version -m` records the -ldflags the build was given. A build made without
-#     them (a plain `go build`) reports release 0.0.0 on the box and warns at every
-#     start, which is correct for development and wrong for anything deployed.
-#
-#  2. `-X` naming a symbol that does not exist is SILENTLY IGNORED by the linker: the
-#     flag is recorded exactly as above, the build succeeds, and the binary reports
-#     0.0.0. Nothing in (1) can see that. What separates the two is that a landed -X
-#     emits a second symbol beside the variable — `…core/version.current.str`, holding
-#     the injected bytes — and an ignored one does not. Confirmed by building the same
-#     package three ways: unstamped, stamped, and stamped at `version.Current` (a
-#     capital C, i.e. an exported function that is not the variable); only the correctly
-#     stamped binary carries the `.str` symbol.
+# `go version -m` records the -ldflags a build was given, which catches a plain
+# `go build` — a binary that reports release 0.0.0 on the box and warns at every start,
+# correct for development and wrong for anything deployed. It does NOT catch an -X
+# naming a symbol that does not resolve: the linker ignores one silently, so the flag is
+# recorded exactly as it would be for a correct build and the binary still reports 0.0.0.
+# That half is checked once, before any build, by verify_symbol_path.
 verify_stamp() {
 	_bin="$1"
 	_name="$2"
@@ -255,16 +248,33 @@ verify_stamp() {
 	printf '%s\n' "$_meta" | grep -q "vcs.modified=false" ||
 		fail "$_name was built from a modified tree. Nothing was deployed."
 
-	if ! "$GO" tool nm "$_bin" 2>/dev/null | grep -q 'core/version\.current\.str$'; then
-		fail "$_name records the release stamp but the linker did not APPLY it — the -X symbol
-       does not resolve, which -X does silently. The binary would report 0.0.0. If a
-       toolchain change has moved this symbol rather than the stamp being genuinely
-       broken, confirm by running the binary and reading its startup line before trusting
-       it. Nothing was deployed."
-	fi
-	log "  $_name: release $version, revision $short, stamp verified"
+	log "  $_name: release $version, revision $short, stamp recorded"
 }
 
+# verify_symbol_path establishes that the -X above names a symbol the linker can
+# actually resolve IN THIS CHECKOUT, by linking it into a test binary and reading the
+# value back out — not by asserting the flag was passed, which is the assertion that
+# cannot see the failure.
+#
+# This is not a new mechanism: core/version.TestStampMatchesTheVersionFile exists for
+# exactly this, ci.yml's "the release stamp reaches the binary" job runs it on every
+# push, and BACCHUS_REQUIRE_STAMP is what turns its skip-when-absent into a failure. It
+# is run again here because CI proves the symbol path resolved at the last PUSH, while
+# what a deploy needs to know is that it resolves in the tree it is about to ship — the
+# same distinction that makes the checks after the deploy worth running.
+verify_symbol_path() {
+	log "confirming the release stamp's symbol path resolves in this checkout"
+	[ "$dry" -eq 0 ] || return 0
+	(cd "$repo" && BACCHUS_REQUIRE_STAMP=1 "$GO" test -count=1 \
+		-ldflags "$stamp" -run TestStampMatchesTheVersionFile ./core/version/ >/dev/null) ||
+		fail "the release stamp does not reach core/version.current in this checkout. A -X naming
+       a symbol the linker cannot resolve — a renamed variable, a moved package, a typo'd
+       module path — is IGNORED SILENTLY: the build would succeed, this script's own
+       metadata check would pass, and every binary would report 0.0.0 for the life of the
+       deployment. Nothing was built."
+}
+
+verify_symbol_path
 build_one bacchus-coordinator ./cmd/coordinator
 build_one bacchus-node ./cmd/node
 

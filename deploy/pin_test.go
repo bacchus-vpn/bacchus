@@ -155,12 +155,11 @@ case "$1 $2" in
   cat "$FLEET/go-version-m"
   exit 0
   ;;
-"tool nm")
-  if [ -f "$FLEET/no-str-symbol" ]; then
-    echo "  ec4a80 D github.com/bacchus-vpn/bacchus/core/version.current"
-  else
-    echo "  ec4a80 D github.com/bacchus-vpn/bacchus/core/version.current"
-    echo "  897b68 R github.com/bacchus-vpn/bacchus/core/version.current.str"
+"test -count=1")
+  # core/version's own stamp read-back, which the pin script runs before building.
+  if [ -f "$FLEET/stamp-does-not-resolve" ]; then
+    echo "--- FAIL: TestStampMatchesTheVersionFile" >&2
+    exit 1
   fi
   exit 0
   ;;
@@ -392,19 +391,24 @@ func TestPin_RefusesAnUnstampedBuild(t *testing.T) {
 	}
 }
 
-// `-X` naming a symbol that does not exist is silently ignored by the linker: the flag
-// is recorded, the build succeeds, and the binary reports 0.0.0 anyway. `go version -m`
-// cannot see that; the missing `.str` symbol can.
-func TestPin_RefusesAStampThatDidNotLand(t *testing.T) {
+// `-X` naming a symbol that does not resolve is silently ignored by the linker: the
+// flag is recorded, the build succeeds, and the binary reports 0.0.0 anyway. No reading
+// of the built binary's metadata can see that, so the check is core/version's own
+// read-back — and it has to run BEFORE anything is built, or the refusal arrives after
+// the work.
+func TestPin_RefusesAStampThatDoesNotResolve(t *testing.T) {
 	f := newFleet(t)
-	write(t, filepath.Join(f.dir, "no-str-symbol"), "", 0o644)
+	write(t, filepath.Join(f.dir, "stamp-does-not-resolve"), "", 0o644)
 
 	out, code := f.pin("--no-verify")
 	if code == 0 {
 		t.Fatalf("exit 0 for a stamp the linker ignored\n%s", out)
 	}
-	if !strings.Contains(out, "did not APPLY it") {
-		t.Errorf("the refusal does not distinguish a recorded stamp from an applied one:\n%s", out)
+	if !strings.Contains(out, "IGNORED SILENTLY") {
+		t.Errorf("the refusal does not distinguish a recorded stamp from a resolved one:\n%s", out)
+	}
+	if f.log("go.log") != "" {
+		t.Errorf("it built binaries before establishing that the stamp resolves:\n%s", f.log("go.log"))
 	}
 }
 
