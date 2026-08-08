@@ -51,9 +51,9 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"time"
 
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 	"github.com/godbus/dbus/v5"
 )
 
@@ -385,31 +385,28 @@ func (h *helper) releaseViaResolvConf(sess *session) {
 	}
 }
 
-// replaceFile writes via a temporary file in the same directory and renames,
-// so a reader never sees a half-written resolv.conf and a crash mid-write
-// cannot leave one. rename(2) within a directory is atomic; write-in-place is
-// not, and this file is read by everything on the machine.
+// replaceFile installs content at path with the given mode, through
+// core/atomicfile: a complete file is staged in the same directory, flushed and
+// renamed over the target, so a reader never sees a half-written resolv.conf and
+// a crash mid-write cannot leave one. rename(2) within a directory is atomic;
+// write-in-place is not, and this file is read by everything on the machine.
+//
+// It gained the FLUSH in issue #188 and that is the only behavioural change: a
+// rename that becomes visible ahead of its bytes leaves /etc/resolv.conf empty,
+// which is not "the previous resolver" but NO resolver — and this is the one
+// caller whose target is a file the whole machine depends on and whose original
+// contents live only in this process's memory until release puts them back.
+//
+// The MODE ORDERING did not change, and it is worth recording that it was right,
+// because this writer looked like the odd one out and the other six were the
+// ones that moved. mode here is 0644 — resolv.conf must be world-readable — and
+// os.CreateTemp creates its file 0600, so applying the mode after the bytes is
+// what keeps a half-written resolv.conf from being readable by every local user
+// while it is being written. The writers that applied 0600 first were safe only
+// because 0600 is not wider than what os.CreateTemp had already given them.
+// core/atomicfile now applies perm after the bytes for everyone.
 func replaceFile(path string, content []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".bacchus-resolv-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name) // no-op once the rename succeeds
-
-	if _, err := tmp.Write(content); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
+	return atomicfile.Write(path, content, mode)
 }
 
 // -------------------------------------------------------------------------

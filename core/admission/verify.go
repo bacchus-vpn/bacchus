@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 )
 
 // ClockSkew is the tolerance applied to a credential's NotBefore so a node
@@ -364,78 +365,42 @@ func (r *RevocationList) Serials() []string {
 //     DELAYED failure that detonates at the next coordinator restart — hours or
 //     weeks later, with nothing connecting it to the revocation that caused it.
 //
-// The temporary file is created IN THE TARGET'S DIRECTORY, which is load-bearing
-// rather than tidy: os.Rename is atomic only within one filesystem, and a rename
-// across one degrades to copy-then-delete, which is exactly the half-written file
-// this exists to prevent.
+// The mechanics — staged in the target's own directory under a unique name,
+// flushed before the rename, cleaned up on every failure path — are
+// core/atomicfile's, and its doc carries the reasoning for each. 0600 because
+// this file is staged in the coordinator's secrets directory beside its signing
+// keys, and because a rename installs the mode every time where os.WriteFile
+// applied it only at creation.
 //
-// The bytes are flushed before the rename rather than after. A rename that
-// becomes visible ahead of the data it points at is a file the coordinator can
-// read as empty, and an empty revocation file does not mean "unchanged" — it
-// means "nothing is revoked".
+// # Why this is one of the few writers that fsyncs the DIRECTORY
 //
-// Three consequences of replacing the file instead of rewriting it, named here
-// because each is a real change from os.WriteFile rather than an implementation
-// detail:
+// A file's own flush makes the BYTES durable. It does not commit the directory
+// entry, so without a second fsync a machine that loses power immediately after
+// the rename can come back holding the PREVIOUS file. Issue #188 ruled that
+// boundary per write rather than per file, and this write is on the far side of
+// it, for a reason that has nothing to do with how important the file is:
 //
-//   - The result is mode 0600 every time. os.WriteFile applied its perm only
-//     when creating, so an existing file kept whatever mode it had; a rename
-//     installs this one's. That only ever narrows.
-//   - A path that is a SYMLINK is replaced rather than written through.
-//   - A writer killed mid-save leaves its staged file behind, which os.WriteFile
-//     never did. They are named ".<target>.tmp*" so they sort beside the file
-//     they were staged for, are hidden from a plain ls, and can never be
-//     mistaken for the list itself.
+//   - Almost every other persistent file here is re-emitted. A policy floor is
+//     re-recorded every ten seconds, a quota checkpoint every few megabytes, a
+//     selection cache on the next success — so a lost rename costs one
+//     generation and the next ordinary write repairs it unprompted.
+//   - This list is not. It is the accumulated record of decisions an operator
+//     made one at a time, and nothing writes it again until the NEXT revocation.
+//     A lost rename un-revokes a credential silently, permanently, and after
+//     cmd/admission-issue has already told the operator the revocation was
+//     saved. There is no loop that notices and no second chance.
 //
-// What this deliberately does NOT do is fsync the directory, so a machine that
-// loses power immediately after the rename can come back holding the PREVIOUS
-// file. That is a different property — whether the rename is durable, not
-// whether the bytes are whole — and its failure restores a complete older list
-// rather than a torn one. Every atomic writer in this repository stops at the
-// same line (core/policy/cache.go, core/capacity/quota.go,
-// core/devicestore/store.go, core/selection/store.go); moving it is a repo-wide
-// change rather than this function's.
+// The cost is one fsync on an operation a human runs, once per revocation, on a
+// path that has already touched the disk. That is not a trade that needs
+// balancing.
 func (r *RevocationList) SaveFile(path string) error {
 	serials := r.Serials()
 	b, err := json.MarshalIndent(revocationFile{Version: revocationFileVersion, Revoked: serials}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("admission: marshal revocation list: %w", err)
 	}
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp")
-	if err != nil {
-		return fmt.Errorf("admission: stage revocation list in %s: %w", dir, err)
-	}
-	staged := tmp.Name()
-	// Removed on every path that does not rename it away, so a failure leaves
-	// the live file untouched AND nothing beside it for the next operator to
-	// wonder about. A no-op once the rename has succeeded.
-	defer func() { _ = os.Remove(staged) }()
-	if err := writeStagedList(tmp, b); err != nil {
-		tmp.Close()
-		return fmt.Errorf("admission: write revocation list %s: %w", staged, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("admission: write revocation list %s: %w", staged, err)
-	}
-	if err := os.Rename(staged, path); err != nil {
-		return fmt.Errorf("admission: install revocation list %s: %w", path, err)
+	if err := atomicfile.WriteDurable(path, b, 0o600); err != nil {
+		return fmt.Errorf("admission: save revocation list: %w", err)
 	}
 	return nil
-}
-
-// writeStagedList fills a staged revocation file and flushes it to stable
-// storage, so everything that can fail has failed before anything is renamed
-// over the file the coordinator reads.
-func writeStagedList(f *os.File, b []byte) error {
-	// 0600 explicitly rather than whatever os.CreateTemp's mode survived the
-	// umask. This file replaces one the previous os.WriteFile named 0600, and it
-	// is staged in the coordinator's secrets directory beside its signing keys.
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		return err
-	}
-	return f.Sync()
 }

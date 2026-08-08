@@ -1,11 +1,15 @@
 package capacity
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -409,26 +413,36 @@ func TestMissingCheckpointIsFirstRun(t *testing.T) {
 // on restart, and the operator has to hear that before the bill does.
 //
 // The fixture blocks only the WRITE, and does so the same way on every platform.
-// An earlier version made the parent a FILE, which also broke the read: Linux
-// reports ENOTDIR there, which is not os.IsNotExist, so NewQuota refused to start
-// and the test never reached the write it exists to exercise. Windows maps the
-// same open to ERROR_PATH_NOT_FOUND, which IS os.IsNotExist, so it passed — the
-// fixture only worked on the platform whose errno hid it. Here the read is a plain
-// ENOENT (a genuine first run everywhere) and the write dies on the temp file.
+// An earlier version made the parent a FILE before NewQuota ran, which also broke
+// the read: Linux reports ENOTDIR there, which is not os.IsNotExist, so NewQuota
+// refused to start and the test never reached the write it exists to exercise.
+// Windows maps the same open to ERROR_PATH_NOT_FOUND, which IS os.IsNotExist, so
+// it passed — the fixture only worked on the platform whose errno hid it.
+//
+// So the parent is squatted AFTER the read, which is the ordering that keeps both
+// halves platform-independent: NewQuota sees a missing directory (a plain ENOENT
+// first run everywhere), and the checkpoint dies in os.MkdirAll, which reports
+// ENOTDIR from its own code on every platform rather than from the OS.
+//
+// It used to squat path+".tmp" instead, which worked because the staged file had
+// a name a test could predict. Issue #188 took that away on purpose: the staged
+// name is now unique per write, so nothing outside the writer can name it. Losing
+// this fixture's old shape is the point of the change, not a casualty of it.
 func TestCheckpointFailureIsSurfacedButNotFatal(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "quota.json")
-	// checkpoint writes path+".tmp" and renames it. A directory squatting on that
-	// name fails the write on every platform (EISDIR / access denied), while the
-	// read of path itself is an ordinary not-exist.
-	if err := os.Mkdir(path+".tmp", 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// The state file lives one level down, in a directory that does not exist yet.
+	stateDir := filepath.Join(t.TempDir(), "state")
+	path := filepath.Join(stateDir, "quota.json")
 
 	l := Limits{MonthlyQuota: 1000, CycleDay: 17}
 	q, err := NewQuota(l, path, epoch)
 	if err != nil {
 		t.Fatalf("a missing checkpoint is a first run, not an error: %v", err)
+	}
+
+	// Now put a FILE where the checkpoint needs a directory. os.MkdirAll stats it,
+	// finds a non-directory and returns ENOTDIR itself, identically everywhere.
+	if err := os.WriteFile(stateDir, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	q.Add(500, epoch)
 	if err := q.Flush(epoch); err == nil {
@@ -576,5 +590,149 @@ func TestQuotaIsConcurrencySafe(t *testing.T) {
 	}
 	if got := q.Used(epoch); got != 80_000 {
 		t.Errorf("Used = %d, want 80000 — a byte was lost or double-counted under concurrency", got)
+	}
+}
+
+// Issue #188: the checkpoint used to stage under a FIXED name (path + ".tmp")
+// and rename without flushing.
+//
+// The predictable-name half is asserted structurally rather than by racing: a
+// file sitting at the old staged name is now untouched by a checkpoint. Under
+// the old writer that file WAS the staging area — truncated, refilled and
+// renamed away — which is exactly why the failure fixture above could use it.
+func TestCheckpointDoesNotStageUnderThePredictableName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quota.json")
+	squatter := path + ".tmp"
+	if err := os.WriteFile(squatter, []byte("not ours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	q := mustQuota(t, Limits{MonthlyQuota: 10 * MB, CycleDay: 17}, path, epoch)
+	q.Add(uint64(1*MB), epoch)
+	if err := q.Flush(epoch); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+
+	b, err := os.ReadFile(squatter)
+	if err != nil {
+		t.Fatalf("the checkpoint consumed %s, so it is still staging under a name another writer can pick: %v", squatter, err)
+	}
+	if string(b) != "not ours" {
+		t.Errorf("%s now holds %q; a checkpoint must stage under a name it created itself", squatter, b)
+	}
+}
+
+// The checkpoint stays 0644 and is the one file in this repository written that
+// wide on purpose. quotaState's doc is the reason — an operator debugging "why
+// is my node not serving" has to be able to cat it — and issue #188's shared
+// writer takes the mode as a parameter precisely so that folding seven writers
+// into one did not quietly narrow this one to match the six secrets.
+func TestCheckpointStaysOperatorReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows expresses file modes through ACLs; os.Chmod only toggles the read-only attribute")
+	}
+	path := filepath.Join(t.TempDir(), "quota.json")
+	q := mustQuota(t, Limits{MonthlyQuota: 10 * MB, CycleDay: 17}, path, epoch)
+	q.Add(uint64(1*MB), epoch)
+	if err := q.Flush(epoch); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o644 {
+		t.Errorf("checkpoint mode %v, want 0644 — the shared writer must not have flattened this to the 0600 the secret-bearing writers use", got)
+	}
+}
+
+// The interleaving half. One process cannot race itself here — checkpoint's
+// caller holds q.mu — so the case that reaches the file is TWO processes sharing
+// a state path, which nothing in this package can prevent and which a fixed
+// staged name turned into a mangled checkpoint rather than a lost update.
+//
+// A mangled checkpoint is the expensive outcome for this file specifically:
+// NewQuota treats an unparseable one as a hard startup error, so the node
+// refuses to start until somebody deletes the file, and deleting it is what
+// forgets the usage the operator is being billed for.
+func TestConcurrentCheckpointsNeverInstallAMixture(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "quota.json")
+
+	// Two quotas at one path, with limits far enough apart that any generation
+	// is unmistakably one writer's — and different enough in length that a
+	// mixture is detectable by content as well as by a parse failure.
+	limits := [2]Limits{
+		{MonthlyQuota: 400 * GB, CycleDay: 17},
+		{MonthlyQuota: 1 * MB, CycleDay: 3},
+	}
+
+	var writers, readers sync.WaitGroup
+	stop := make(chan struct{})
+	var reads atomic.Int64
+
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			b, err := os.ReadFile(path)
+			if err != nil || len(b) == 0 {
+				continue
+			}
+			var st quotaState
+			if err := json.Unmarshal(b, &st); err != nil {
+				t.Errorf("a reader observed %d bytes of unparseable JSON: %v — two checkpoints interleaved into one staged file", len(b), err)
+				return
+			}
+			switch {
+			case st.Limit == uint64(limits[0].MonthlyQuota) && st.CycleDay == limits[0].CycleDay:
+			case st.Limit == uint64(limits[1].MonthlyQuota) && st.CycleDay == limits[1].CycleDay:
+			default:
+				t.Errorf("a reader observed limit=%d cycleDay=%d, which is neither writer's checkpoint", st.Limit, st.CycleDay)
+				return
+			}
+			reads.Add(1)
+		}
+	}()
+
+	for i := range limits {
+		writers.Add(1)
+		go func(i int) {
+			defer writers.Done()
+			q, err := NewQuota(limits[i], path, epoch)
+			if err != nil {
+				t.Errorf("NewQuota: %v", err)
+				return
+			}
+			for n := 0; n < 80; n++ {
+				q.Add(1, epoch)
+				if err := q.Flush(epoch); err != nil {
+					t.Errorf("Flush: %v", err)
+					return
+				}
+			}
+		}(i)
+	}
+	writers.Wait()
+	// The writers are done, so the file certainly exists. Do NOT stop the
+	// reader until it has actually looked at least once: under a loaded machine
+	// — `go test ./...` across every package at once — its goroutine can fail to
+	// be scheduled for the whole few milliseconds the writers take, and a run
+	// where it observed nothing is a green test that checked nothing. Bounded,
+	// so a reader that returned early on a real failure cannot hang the test.
+	for deadline := time.Now().Add(5 * time.Second); reads.Load() == 0 && time.Now().Before(deadline); {
+		runtime.Gosched()
+	}
+	close(stop)
+	readers.Wait()
+
+	if reads.Load() == 0 {
+		t.Error("no reader ever observed the checkpoint; this test proved nothing")
 	}
 }
