@@ -1092,6 +1092,13 @@ sudo systemctl daemon-reload && sudo systemctl enable --now bacchus-netd.socket
 Confirm it: `systemctl status bacchus-netd.socket`, and
 `journalctl -u bacchus-netd -f` while you connect.
 
+**Which build is installed** is `/usr/local/lib/bacchus/bacchus-netd -version`.
+It needs no privilege, starts no listener and does not activate the socket unit,
+and the helper states the same number on the first line of its log. A `0.0.0`
+answer means the binary was built without the stamp above — the helper still
+works, but nothing can tell you which build owns the routing state on that
+machine (issue #223).
+
 ### What changes once it is installed
 
 The settings window stops saying split-tunnel, kill-switch and DNS are "saved

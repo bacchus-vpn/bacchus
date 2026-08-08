@@ -71,14 +71,57 @@ jobs:
       # without it the test SKIPS when the stamp is absent, which is exactly the
       # failure being tested and would report green over nothing. Same shape,
       # and the same reason, as BACCHUS_NETD_REQUIRE_NS in the server job.
-      - name: the release stamp reaches the binary
+      #
+      # THAT IS NOT THE WHOLE CLASS, and issue #223 is the half it missed. A test
+      # that links core/version can only ever prove the SYMBOL PATH resolves. It
+      # cannot see a command that does not reference the package at all, and a -X
+      # aimed at one of those is dropped just as silently: `go list -deps
+      # ./cmd/bacchus-netd` contained no core/version, so deploy/install.sh,
+      # docs/RUNNING.md and this workflow all passed that binary a stamp flag
+      # that did nothing, and every one of them reported success. Two more tests
+      # close it — one asserts every package install.sh stamps links the
+      # package, the other builds bacchus-netd and reads the number back out of
+      # `-version` — and both run here because this job is where the class lives.
+      - name: the release stamp reaches the binaries that claim it
         env:
           BACCHUS_REQUIRE_STAMP: "1"
         run: |
-          go test -count=1 \
+          set -uo pipefail
+          # Output captured so the names below can be checked against it — and
+          # printed on BOTH paths, because a failing `go test` inside a command
+          # substitution under `set -e` would otherwise abort this step with the
+          # failure it was run to show scrolled off into a variable.
+          if ! out=$(go test -count=1 -v \
             -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" \
-            -run 'TestStampMatchesTheVersionFile|TestCurrentIsParseable|TestVersionFileIsCanonical|TestMalformedStamp' \
-            ./core/version/
+            -run 'TestStampMatchesTheVersionFile|TestCurrentIsParseable|TestVersionFileIsCanonical|TestMalformedStamp|TestEveryStampedBuildLinksTheVersionPackage|TestVersionFlag' \
+            ./core/version/ ./cmd/bacchus-netd/ 2>&1); then
+            printf '%s\n' "$out"
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          # A -run filter that matches NOTHING exits 0. So a renamed or deleted
+          # test turns this step into a check of nothing while still reporting
+          # green — the same shape as the ignored -X it exists to catch, which is
+          # why every name is asserted to have run rather than assumed. (A test
+          # that runs and SKIPS still prints "=== RUN", so this does not cover
+          # skips; BACCHUS_REQUIRE_STAMP above is what covers the one skip in
+          # this set that would matter.)
+          for t in TestStampMatchesTheVersionFile \
+                   TestCurrentIsParseable \
+                   TestVersionFileIsCanonical \
+                   TestMalformedStampFailsAtStartup \
+                   TestMalformedStampMessageNamesPreRelease \
+                   TestEveryStampedBuildLinksTheVersionPackage \
+                   TestVersionFlagReportsTheStampedRelease \
+                   TestVersionFlagOnAnUnstampedBuildSaysNoRelease; do
+            if ! printf '%s\n' "$out" | grep -qE "^=== RUN[[:space:]]+$t\$"; then
+              echo "::error::$t did not run, so this step checked less than it claims."
+              echo "::error::A -run filter matching no test exits 0, which is how a renamed or"
+              echo "::error::deleted test disables a check without failing one. Fix the name in"
+              echo "::error::the -run above and in this list, or restore the test."
+              exit 1
+            fi
+          done
       # What only a tag can check is that the tag and the file agree — and they
       # have to, because the file is what goes into the binary while the tag is
       # what everything else names the release by. A v0.3.0 tag on a tree whose

@@ -65,6 +65,34 @@
 // The honest cost, recorded because ADR-0049 §4 asked for it to be: this is
 // more code than the alternative, and the nftables expression encoding is the
 // intricate part it warned about.
+//
+// # Why this helper states a release (issue #223)
+//
+// It imports core/version, prints its release on the first line of its log and
+// answers -version, and that is a decision rather than a default. Until it did,
+// `go list -deps ./cmd/bacchus-netd` did not contain core/version, so the
+// `-ldflags -X …core/version.current=` that deploy/install.sh, docs/RUNNING.md
+// and CI all pass named a symbol this binary had no reference to — and the
+// linker IGNORES that, silently, with a zero exit. Three build paths asserted
+// something false about this binary and nothing anywhere said so.
+//
+// The alternative was to make those build paths stop claiming it, and the reason
+// that is the worse answer is what this component is. It is the one part of a
+// Linux client that outlives the GUI, holds CAP_NET_ADMIN, and owns the routing,
+// firewall and DNS state a routed machine depends on; it is also a role in the
+// signed release channel's manifest (core/update.RoleNetd), so a release
+// replaces it. An operator debugging a routed machine, or checking that an
+// update landed, could otherwise establish which build is running only by
+// hashing the file. "Which netd is on this box" is exactly issue #114's question
+// and this is the cheapest possible answer to it.
+//
+// The cost is that core/version.Current PANICS on a malformed stamp, so this
+// helper now shares that failure mode with cmd/node and cmd/coordinator. It is
+// the right way round for a privileged helper: a netd that refuses to start
+// leaves the client unable to open a session, and the kill-switch is nftables
+// state that survives in the kernel, so the machine that was protected stays
+// protected. Failing loudly costs a connection; a helper that quietly cannot say
+// what it is costs the operator the ability to reason about the box at all.
 package main
 
 import (
@@ -80,6 +108,8 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/bacchus-vpn/bacchus/core/version"
 )
 
 const (
@@ -98,10 +128,23 @@ func main() {
 	allowNoLogin := flag.Bool("allow-without-logind", false,
 		"accept a peer whose logind session cannot be checked. For hosts without systemd-logind, "+
 			"where session ownership cannot be established; the socket's group permission becomes the only gate.")
+	showVersion := flag.Bool("version", false,
+		"print this build's release version and exit. Needs no privilege and starts no listener, so it answers "+
+			"\"which netd is installed here\" without activating the socket unit or touching kernel state.")
 	flag.Parse()
 
 	logger := log.New(os.Stderr, "", log.LstdFlags)
 	logf := func(format string, args ...any) { logger.Printf(format, args...) }
+
+	// The release, before anything that can fail. An unstamped build warns here
+	// (core/version) and reports 0.0.0, which is the honest answer from a binary
+	// nobody told; a malformed stamp panics here rather than three layers down.
+	release := version.Current()
+	if *showVersion {
+		fmt.Println(release)
+		return
+	}
+	logf("bacchus-netd release %s", release)
 
 	if os.Geteuid() != 0 && !hasNetAdmin() {
 		logger.Fatalf("bacchus-netd needs CAP_NET_ADMIN (run it as root, or give the unit AmbientCapabilities=CAP_NET_ADMIN)")
