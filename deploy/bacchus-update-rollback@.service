@@ -1,0 +1,21 @@
+[Unit]
+Description=Roll %i back to its previous binary when an applied release will not start
+Documentation=https://github.com/bacchus-vpn/bacchus/blob/main/docs/adr/0069-the-demotion-watchdog-reaches-outside-the-process.md
+
+# The instance name is the FAILING UNIT'S full name, passed by
+# OnFailure=bacchus-update-rollback@%n.service on the units that can be updated.
+# One template covers all of them, and the binary to restore is read out of the
+# failing unit's own ExecStart rather than written down a second time.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/bacchus/bacchus-update-rollback %i
+
+# NO OnFailure= of its own, and no Restart=. If the rollback itself fails there is
+# nothing further to automate — the previous binary is missing or the rename did
+# not work — and the failure is in the journal, where the operator who now has to
+# replace a binary by hand will find it.
+
+# Deliberately no [Install] section. This unit is never enabled and never wanted by
+# a target; it is pulled in by OnFailure= and by nothing else. Enabling it would
+# run a rollback at boot, which is the one time nothing has failed yet.

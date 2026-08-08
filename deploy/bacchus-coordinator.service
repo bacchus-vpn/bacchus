@@ -2,6 +2,16 @@
 Description=Bacchus coordinator (UDP signaling + STUN/TURN + cold-start bootstrap)
 After=network.target
 
+# See bacchus-exit.service for what this is (issue #222, ADR-0069). It is wired
+# here too, and today it is the ONLY demotion watchdog this unit has: cmd/node
+# calls core/update.CheckStartup at the top of main and cmd/coordinator does not
+# call it at all, so a coordinator has no in-process half to complement. That
+# makes no difference to what happens on this box — with no updater there is no
+# confirmation marker, so this fires and does nothing — and it means the day the
+# coordinator gains an updater, the case that has no in-process remedy is already
+# covered rather than newly missing.
+OnFailure=bacchus-update-rollback@%n.service
+
 [Service]
 # Public advertise address + TURN credentials come from the env file
 # (gitignored). See deploy/coordinator.env.example. Bootstrap signing key +

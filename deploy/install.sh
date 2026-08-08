@@ -784,11 +784,25 @@ install_node() {
 	fi
 }
 
+# install_update_rollback places the supervisor-side half of the demotion
+# watchdog (issue #222, ADR-0069). Both server units name it in OnFailure=, so an
+# install that placed the units without it would leave every failure of those
+# units logging a missing dependency — and would leave the one update failure
+# nothing in-process can reach with no remedy at all.
+#
+# It is a template unit and is deliberately NOT enabled: it is pulled in by
+# OnFailure= and by nothing else, and enabling it would run a rollback at boot.
+install_update_rollback() {
+	install_file "$deploy_dir/bacchus-update-rollback.sh" "$libexec_dir/bacchus-update-rollback" 0755
+	install_file "$deploy_dir/bacchus-update-rollback@.service" "$unit_dir/bacchus-update-rollback@.service" 0644
+}
+
 install_coordinator() {
 	prepare_build_dir
 	bin=$(resolve_binary bacchus-coordinator ./cmd/coordinator)
 	install_file "$bin" "$bin_dir/bacchus-coordinator" 0755
 	install_file "$deploy_dir/bacchus-coordinator.service" "$unit_dir/bacchus-coordinator.service" 0644
+	install_update_rollback
 	install_env_file "$deploy_dir/coordinator.env.example" "$etc_dir/coordinator.env"
 
 	# The country-database refresh belongs to the coordinator host and nowhere
@@ -826,6 +840,7 @@ install_exit() {
 	bin=$(resolve_binary bacchus-node ./cmd/node)
 	install_file "$bin" "$bin_dir/bacchus-node" 0755
 	install_file "$deploy_dir/bacchus-exit.service" "$unit_dir/bacchus-exit.service" 0644
+	install_update_rollback
 	install_env_file "$deploy_dir/node.env.example" "$etc_dir/node.env"
 	ensure_exit_key "$(p "$etc_dir/node.env")"
 
@@ -969,6 +984,13 @@ uninstall_node() {
 	remove_unit bacchus-coordinator.service
 	remove_unit bacchus-geoip-refresh.timer
 	remove_unit bacchus-geoip-refresh.service
+	# The rollback template is never enabled, so there is nothing to disable —
+	# remove_unit's stop/disable are no-ops on it and the file goes.
+	remove_unit 'bacchus-update-rollback@.service'
+	remove_path "$libexec_dir/bacchus-update-rollback"
+	# Empty only if no client install shares it; a non-empty directory makes this
+	# fail and that is the correct outcome.
+	rmdir "$(p "$libexec_dir")" 2>/dev/null || true
 	remove_path "$bin_dir/bacchus-node"
 	remove_path "$bin_dir/bacchus-coordinator"
 	remove_path "$bin_dir/bacchus-geoip-refresh.sh"

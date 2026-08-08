@@ -2,6 +2,23 @@
 Description=Bacchus node (exit role: TCP egress + direct WebRTC endpoint)
 After=network.target
 
+# The half of the demotion watchdog that cannot live in the process (issue #222,
+# ADR-0069). core/update handles "applied, started, and never worked" from inside
+# the binary; it cannot handle "applied, and the process will not start at all",
+# because that process never reaches main. This fires when the unit fails, checks
+# whether an applied release was ever started, and if it was not, renames the
+# previous binary back and starts the unit again.
+#
+# It is a no-op on every other kind of failure — it acts only on a confirmation
+# marker that no process has claimed — which is why it is safe to attach to a unit
+# that fails for a hundred reasons that have nothing to do with an update.
+#
+# %n passes this unit's own name; the helper reads the binary to restore out of
+# this unit's ExecStart. Note that OnFailure= fires on EVERY failed start under
+# Restart=always, not once at the start limit (measured, systemd 259), so the
+# helper is written to be run repeatedly.
+OnFailure=bacchus-update-rollback@%n.service
+
 [Service]
 # Config comes from the env file (gitignored). See deploy/node.env.example.
 # -advertise = host:port relays dial; the exit also accepts DIRECT WebRTC clients,
