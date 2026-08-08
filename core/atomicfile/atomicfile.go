@@ -174,9 +174,16 @@ func WriteDurable(path string, b []byte, perm os.FileMode) error {
 // polarity is also worse than a replacing writer's — losing a rename restores a
 // complete older file, but losing a first-run CREATE leaves no file at all, and
 // all three of those regenerate silently on the next start after having already
-// distributed the public half. ADR-0066 §6 records that; converting them is
-// issue #215, because they live outside the packages that record's change
-// touched.
+// distributed the public half. ADR-0066 §6 records that, and issue #215 called
+// it at all three: cmd/coordinator's bootstrap key, cmd/admission-issue's
+// admission root, and core/devicestore's on-device keypair all call this once
+// the seed is flushed and closed, and all three report a failure rather than
+// swallowing it — the key file is on disk either way, so the next run reads it
+// instead of minting a second.
+//
+// On Windows this is a documented no-op, so those three get Write's guarantees
+// there and not WriteDurable's. See dirsync_windows.go, and issue #228 for the
+// gap that leaves on the one platform that ships first.
 func SyncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {

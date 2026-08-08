@@ -61,6 +61,7 @@ import (
 
 	"github.com/bacchus-vpn/bacchus/core/accounting"
 	"github.com/bacchus-vpn/bacchus/core/admission"
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 	"github.com/bacchus-vpn/bacchus/core/capacity"
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 	"github.com/bacchus-vpn/bacchus/core/geoip"
@@ -2162,6 +2163,16 @@ func reloadSecretsLoop(ctx context.Context, path string, current *atomic.Pointer
 // and a power loss before the bytes are durable leaves every invite carrying it
 // failing snapshot verification against a regenerated key.
 //
+// The DIRECTORY entry is flushed for that same reason, which is #215's half of
+// it (ADR-0066 §5/§6). A file's own Sync makes the bytes durable and commits
+// nothing about the entry naming them, so a power loss straight after a first
+// start can come back with NO key file — and the branch above then reads that as
+// a cold start and generates a second signing key, silently, after the first
+// one's public half has been baked into invites already handed out. A first-run
+// create is the definition of a write nothing re-emits, and it cannot go through
+// atomicfile.Write, because O_EXCL on the real path is the point;
+// atomicfile.SyncDir is exported for exactly this.
+//
 // A partial write is deliberately left in place — the malformed-key branch above
 // refuses it loudly on the next start, where deleting it would silently mint a
 // second signing key and strand every invite already issued.
@@ -2203,6 +2214,14 @@ func loadOrGenerateBootstrapKey(path string) (ed25519.PrivateKey, error) {
 	}
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("close bootstrap key %s: %w", path, err)
+	}
+	// Before the log line below, deliberately: that line is what an operator
+	// reads the pubkey out of to bake into invites, and a directory whose entry
+	// could not be flushed is exactly the case in which it must not be
+	// advertised. The key file is on disk either way, so the next start reads it
+	// rather than generating a second one.
+	if err := atomicfile.SyncDir(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("flush the directory holding %s: %w", path, err)
 	}
 	log.Printf("bootstrap: generated new signing key at %s — public key (bake into client config/invites): %s",
 		path, hex.EncodeToString(pub))

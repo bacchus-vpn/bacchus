@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core/admission"
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 )
 
 func main() {
@@ -199,6 +200,16 @@ func emitCRL(priv ed25519.PrivateKey, revocationsPath string, ttl time.Duration)
 // unclean shutdown before the bytes reach the platter leaves that pubkey
 // distributed and its private half gone.
 //
+// The DIRECTORY entry is flushed for the same reason and is #215's half of it
+// (ADR-0066 §5/§6). A file's own Sync makes the bytes durable and commits
+// nothing about the entry naming them, so a power loss straight after a first
+// run can come back with NO key file — and the branch above then reads that as a
+// cold start and mints a second ROOT SIGNING KEY, silently, after the first
+// one's public half has already been pasted into a coordinator. A first-run
+// create is the definition of a write nothing re-emits, and it cannot go through
+// atomicfile.Write because O_EXCL on the real path is the whole point;
+// atomicfile.SyncDir is exported for exactly this.
+//
 // A partial write is left where it lies: a short file is refused loudly by the
 // malformed-key branch above on the next run, whereas removing it would present
 // the next run with a missing file and mint a second root key silently.
@@ -240,6 +251,14 @@ func loadOrGenerateAdmissionKey(path string) (ed25519.PrivateKey, error) {
 	}
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("close admission key %s: %w", path, err)
+	}
+	// Before the two lines below, deliberately: they are what puts this key's
+	// public half in front of an operator to paste into a coordinator, and a
+	// directory whose entry could not be flushed is exactly the case in which
+	// that pubkey must not be advertised. The key file is on disk either way, so
+	// re-running reads it rather than minting a second root.
+	if err := atomicfile.SyncDir(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("flush the directory holding %s: %w", path, err)
 	}
 	fmt.Fprintf(os.Stderr, "admission: generated new root signing key at %s\n", path)
 	fmt.Fprintf(os.Stderr, "admission: configure the coordinator with -admission-pubkey %s\n", hex.EncodeToString(pub))
