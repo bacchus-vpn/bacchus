@@ -2,12 +2,15 @@
 // a complete copy is staged beside the target, flushed, and renamed over it, so
 // no reader ever observes a partial file and no crash can leave one behind.
 //
-// It exists because this repository had written the same twenty lines nine
-// times — core/policy, core/admission, core/coldstart, core/revocation,
-// core/devicestore, core/capacity, core/selection, cmd/bacchus-netd and
-// clients/fyne's appstate — and three of those nine were subtly wrong in the
-// same two ways (see "The two defects", below). ADR-0066 records the decision
-// to fold them into one, and answers the argument against it.
+// It exists because this repository had written the same twenty lines ten times
+// — core/policy, core/admission, core/coldstart, core/revocation,
+// core/devicestore, core/capacity, core/selection, core/update,
+// cmd/bacchus-netd and clients/fyne's appstate — and three of those ten were
+// subtly wrong in the same two ways (see "The two defects", below). ADR-0066
+// records the decision to fold them into one, and answers the argument against
+// it; the count was nine when that record landed and ten by the time issue #215
+// reached the last of them, because core/update's arrived in the same wave the
+// consolidation did.
 //
 // # What os.WriteFile does instead, and why it is not enough
 //
