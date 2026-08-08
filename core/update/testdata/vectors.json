@@ -1,0 +1,16 @@
+{
+  "note": "FROZEN conformance vector for bacchus/update-manifest/v1 (issue #34, ADR-0052, ADR-0065). Every key here is a PUBLIC THROWAWAY: the root is bacchus-payment's published development root and the signer is derived from signer_seed. No real key material appears in this repository.",
+  "now": "2026-08-08T12:00:00Z",
+  "root_pub": "G3qe/RAaWSSOU+NMl5UUj9/E2nEr2PfgFGzbL9aHisY=",
+  "bundle": {
+    "manifest": "eyJ2IjoxLCJzZXEiOjQyLCJyZWxlYXNlIjoiMS4yLjMiLCJpc3N1ZWQiOiIyMDI2LTA4LTA4VDEwOjAwOjAwWiIsImV4cCI6IjIwMjYtMTAtMDdUMTI6MDA6MDBaIiwibm90ZSI6ImNvbmZvcm1hbmNlIGZpeHR1cmU7IG5vdCBhIHJlbGVhc2UiLCJhcnRpZmFjdHMiOlt7Im9zIjoibGludXgiLCJhcmNoIjoiYW1kNjQiLCJyb2xlIjoibm9kZSIsInNpemUiOjIwOTE4MjcyLCJzaGEyNTYiOiIrSEZXNmdkUXc3Z3Y4SnI0VDZEWXJkand2OFM5QWRlc3g5bkN5OVU0ampzPSJ9LHsib3MiOiJ3aW5kb3dzIiwiYXJjaCI6ImFtZDY0Iiwicm9sZSI6ImNsaWVudCIsInNpemUiOjQxMjg1NjMyLCJzaGEyNTYiOiJVWFZWbk5PbnRoNldJNStKMzU1alRqOG1neWR0UlRDdDVtdER5cC9KaTQ4PSJ9XX3tiX93bCrbglxTv1tNadMxcOO81/cyRTJD36Agf+5p7ylq9ZIKAsHtvN4RAfngZJyPx3SG7XXvnrTzVTvdDQ0H",
+    "cert": "eyJ2IjoxLCJzZXJpYWwiOiIwZjFlMmQzYzRiNWE2OTc4Iiwicm9sZSI6InVwZGF0ZSIsInB1YiI6Im9HYmtYVS9mSDEzeWFvQzB1QVNsVE9aR0hKdzJaNjg4Q3d1RW1WNVFJbzQ9IiwibmJmIjoiMjAyNi0wOC0wN1QxMjowMDowMFoiLCJleHAiOiIyMDI3LTA4LTA4VDEyOjAwOjAwWiIsIm5vdGUiOiJ0ZXN0In27HdvKQoDqJilmVp20pFdGNiUWIcRpq1jBWUwa3B4SnsWcVJLjRCgDzuv2x6Gf2JL7nvPjwJWQml6VT9W6clMB"
+  },
+  "signer_seed": "BACCHUS UPDATE MANIFEST CONFORMANCE SIGNER - PUBLIC THROWAWAY",
+  "expect_release": "1.2.3",
+  "expect_seq": 42,
+  "expect_artifacts": 2,
+  "expect_node_digest": "f87156ea0750c3b82ff09af84fa0d8add8f0bfc4bd01d7acc7d9c2cbd5388e3b",
+  "expect_signer_pub": "oGbkXU/fH13yaoC0uASlTOZGHJw2Z688CwuEmV5QIo4=",
+  "expect_delegation_serial": "0f1e2d3c4b5a6978"
+}

@@ -399,6 +399,207 @@ jobs:
           BACCHUS_ASN_RELEASE_TABLE: "1"
         run: go test -count=1 -v ./core/asn/
 
+  # The fleet binaries, built REPRODUCIBLY, and the artifact rows the offline
+  # signer turns into a manifest (bacchus-vpn/bacchus#34, ADR-0052 section 5,
+  # ADR-0065).
+  #
+  # ADR-0052 measured the reproducibility claim rather than asserting it:
+  # cmd/coordinator built twice with -trimpath and CGO_ENABLED=0 from two
+  # different source directories is byte-identical, and WITHOUT -trimpath the
+  # same two builds differ, with the absolute source path appearing in the
+  # binary 839 times. This job is what turns that measurement into a property
+  # something enforces. It builds every fleet binary TWICE, from two different
+  # paths, and refuses the release if any pair differs.
+  #
+  # Why build twice here rather than trust the flags: a reproducibility claim
+  # whose only evidence is that the right flags were passed is a claim that
+  # stops holding the first time a dependency starts embedding a path, a date
+  # or a hostname, and nothing would say so. The whole point of the property is
+  # that an INDEPENDENT rebuilder can confirm a release; a build that cannot
+  # reproduce itself on one machine will not reproduce on theirs.
+  #
+  # WHAT THIS JOB DOES NOT DO IS SIGN. ADR-0052 section 6: the update key never
+  # sits on a build machine and CI never holds it, because a build machine that
+  # can sign is a build machine that can push code to every node. This produces
+  # artifacts.json - os/arch/role/size/sha256 rows - and the signing is a
+  # separate, deliberate act performed OFFLINE on what this produced
+  # (cmd/release-sign).
+  #
+  # clients/fyne is deliberately absent from the reproducibility check and
+  # present in the rows: it needs cgo and a C toolchain, so reproducing it means
+  # pinning an entire mingw-w64 sysroot, which ADR-0052 section 5 records as a
+  # recorded NO rather than a deferral. Its hash is taken from the one
+  # designated build, in windows-bundle below.
+  fleet-binaries:
+    needs: [verify-version, verify-table]
+    runs-on: ubuntu-latest
+    outputs:
+      semver: ${{ steps.semver.outputs.semver }}
+    steps:
+      - uses: actions/checkout@v7
+      # go.mod, not `stable`. ADR-0052 section 5 wants a PINNED toolchain for
+      # the release build, because the toolchain is an input to the output and
+      # an unpinned one makes the property untestable.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: derive the version
+        id: semver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            semver="${GITHUB_REF_NAME#v}"
+            semver="${semver%%-*}"
+          else
+            # A dry run. 0.0.0 parses, which keeps the stamping path exercised
+            # rather than skipped - the same choice windows-bundle makes.
+            semver="0.0.0"
+          fi
+          echo "semver=$semver" | tee -a "$GITHUB_OUTPUT"
+
+      # Two builds of the same source at two different absolute paths. The
+      # second location is what makes -trimpath's absence VISIBLE: without it
+      # the source path is baked in, so two trees at one path would agree and
+      # prove nothing.
+      - name: build the fleet binaries twice, from two different paths
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          SEMVER: ${{ steps.semver.outputs.semver }}
+        run: |
+          set -euo pipefail
+          # cmd dir -> installed name, which is what deploy/install.sh puts on
+          # disk and therefore what an update replaces. Spelled out rather than
+          # prefixed, because "bacchus-" + "bacchus-netd" is a name nothing
+          # installs.
+          build() {
+            local src="$1" out="$2"
+            mkdir -p "$out"
+            for pair in node:bacchus-node coordinator:bacchus-coordinator bacchus-netd:bacchus-netd; do
+              local cmd="${pair%%:*}" name="${pair##*:}"
+              (cd "$src" && go build -trimpath \
+                -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$SEMVER" \
+                -o "$out/$name" "./cmd/$cmd")
+            done
+          }
+          # The second tree is a copy at an unrelated path, which is exactly the
+          # measurement ADR-0052 section 5 describes.
+          cp -a "$GITHUB_WORKSPACE" /tmp/bacchus-rebuild
+          build "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/dist-fleet/a"
+          build /tmp/bacchus-rebuild "$GITHUB_WORKSPACE/dist-fleet/b"
+
+      - name: the two builds must be byte-identical
+        shell: bash
+        run: |
+          set -euo pipefail
+          differ=0
+          for f in dist-fleet/a/*; do
+            name="$(basename "$f")"
+            ha="$(sha256sum "$f" | cut -d' ' -f1)"
+            hb="$(sha256sum "dist-fleet/b/$name" | cut -d' ' -f1)"
+            if [ "$ha" != "$hb" ]; then
+              echo "::error::$name is NOT reproducible: $ha from one source path, $hb from another."
+              echo "::error::ADR-0052 section 5 commits the fleet binaries to being byte-identical"
+              echo "::error::across source directories with -trimpath and CGO_ENABLED=0. Something in"
+              echo "::error::this build now embeds its environment - a path, a date, a hostname."
+              echo "::error::An independent rebuilder cannot confirm this release, which is the whole"
+              echo "::error::property, so the release is refused rather than shipped with the claim"
+              echo "::error::quietly false."
+              differ=1
+            else
+              echo "$name reproducible: $ha"
+            fi
+          done
+          [ "$differ" = "0" ]
+
+      # The stamp is read back OUT OF THE BINARY rather than trusted. A
+      # -ldflags -X naming a symbol the linker cannot resolve is ignored
+      # SILENTLY, with a zero exit; ci.yml's release-stamp job exists for that
+      # reason and this is the same belt on the release path. An unstamped fleet
+      # binary reports 0.0.0 into the version fence, which is below any floor.
+      #
+      # WHICH BINARIES THIS APPLIES TO IS DERIVED, NOT LISTED, and the reason is
+      # a live example rather than a hypothetical: cmd/bacchus-netd does not
+      # link core/version at all - `go list -deps ./cmd/bacchus-netd` does not
+      # contain it - so the -X above is silently ignored for that binary and no
+      # amount of checking the build log would say so. Asserting a stamp it
+      # cannot carry would refuse every release; not asserting the others would
+      # be the trap this step exists for. So the dependency decides, and if
+      # bacchus-netd ever gains it, this starts applying on its own.
+      - name: the binaries that can state their release must state it
+        shell: bash
+        env:
+          SEMVER: ${{ steps.semver.outputs.semver }}
+        run: |
+          set -euo pipefail
+          for pair in node:bacchus-node coordinator:bacchus-coordinator bacchus-netd:bacchus-netd; do
+            cmd="${pair%%:*}"; name="${pair##*:}"
+            if ! go list -deps "./cmd/$cmd" | grep -qx 'github.com/bacchus-vpn/bacchus/core/version'; then
+              echo "$name does not link core/version, so it carries no release stamp and none is asserted"
+              continue
+            fi
+            if ! strings -a "dist-fleet/a/$name" | grep -qx "$SEMVER"; then
+              echo "::error::$name does not contain the string '$SEMVER', so the release stamp did"
+              echo "::error::not take. -ldflags -X on a symbol the linker cannot resolve is ignored"
+              echo "::error::with a zero exit, which is why this is read back rather than assumed."
+              exit 1
+            fi
+            echo "$name carries $SEMVER"
+          done
+
+      # The rows the OFFLINE signer reads (cmd/release-sign plan -from). This is
+      # the whole handover between CI and the signing ceremony: hashes and
+      # sizes, no key, no signature, no URL. The manifest names hashes and never
+      # locations (ADR-0052 section 1), so nothing here needs to know where the
+      # bytes will be published.
+      - name: the artifact rows for the offline signer
+        shell: bash
+        env:
+          SEMVER: ${{ steps.semver.outputs.semver }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-fleet/blobs
+          {
+            printf '{\n  "release": "%s",\n  "artifacts": [\n' "$SEMVER"
+            first=1
+            for f in dist-fleet/a/*; do
+              case "$(basename "$f")" in
+                bacchus-node)        role=node ;;
+                bacchus-coordinator) role=coordinator ;;
+                bacchus-netd)        role=netd ;;
+                # core/update's roles are a CLOSED vocabulary, checked at
+                # verification: a manifest row naming a role a peer does not know
+                # is refused, not skipped. So a new binary here is a deliberate
+                # change in both places, and this refuses rather than invents one.
+                *) echo "::error::no manifest role for $(basename "$f") - add it to core/update's Role constants first"; exit 1 ;;
+              esac
+              sum="$(sha256sum "$f" | cut -d' ' -f1)"
+              size="$(stat -c%s "$f")"
+              [ "$first" = "1" ] || printf ',\n'
+              first=0
+              printf '    {"os": "linux", "arch": "amd64", "role": "%s", "size": %s, "sha256": "%s"}' "$role" "$size" "$sum"
+              # Published under the digest, because that is the only name a
+              # content-addressed source has. A mirror holding several releases
+              # needs no per-release layout and shares a blob two releases have
+              # in common.
+              cp "$f" "dist-fleet/blobs/$sum"
+            done
+            printf '\n  ]\n}\n'
+          } > dist-fleet/artifacts.json
+          cat dist-fleet/artifacts.json
+
+      - name: upload the fleet artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-fleet
+          path: |
+            dist-fleet/a/*
+            dist-fleet/blobs/*
+            dist-fleet/artifacts.json
+          if-no-files-found: error
+
   windows-bundle:
     # Both gates, not one. They are independent assertions - the tag against
     # VERSION, and the shipped table against the calendar - so they run in
@@ -576,6 +777,40 @@ jobs:
             -SemVer '${{ steps.version.outputs.semver }}' `
             -OutDir dist
 
+      # The client's artifact row for the signed release channel
+      # (bacchus-vpn/bacchus#34, ADR-0065). The update path replaces the BINARY
+      # at the installed path, so the artifact is the bare bacchus-fyne.exe -
+      # not the zip and not the installer, neither of which is a thing a running
+      # client can rename into place.
+      #
+      # THE STAGED PATH IS A COUPLING TO deploy/windows/build-bundle.ps1, which
+      # owns the layout and is not this file's to change. It is read rather than
+      # recomputed, and a missing one fails HERE with a sentence naming the
+      # coupling, so the day that script reorganises its staging directory the
+      # failure is one line to fix rather than a mystery.
+      #
+      # No hash is signed here and no key is present: this produces rows, and
+      # signing is an offline act performed on them (ADR-0052 section 6).
+      - name: the client artifact row for the release channel
+        shell: pwsh
+        env:
+          SEMVER: ${{ steps.version.outputs.semver }}
+        run: |
+          $staged = "dist/stage/bacchus-fyne-${{ steps.version.outputs.version }}-windows-amd64/bacchus-fyne.exe"
+          if (-not (Test-Path $staged)) {
+            throw "no staged client at $staged. deploy/windows/build-bundle.ps1 owns that layout (StageRoot/BundleName) and this step reads it to take the client's hash for the signed release channel. If the staging layout moved, this path moves with it."
+          }
+          $hash = (Get-FileHash $staged -Algorithm SHA256).Hash.ToLower()
+          $size = (Get-Item $staged).Length
+          New-Item -ItemType Directory -Force -Path dist/blobs | Out-Null
+          Copy-Item $staged "dist/blobs/$hash"
+          $row = @{
+            release   = $env:SEMVER
+            artifacts = @(@{ os = "windows"; arch = "amd64"; role = "client"; size = $size; sha256 = $hash })
+          }
+          $row | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 dist/artifacts-windows.json
+          Get-Content dist/artifacts-windows.json
+
       # What the release actually contains, in the log, so a run is answerable
       # from its own output.
       - name: what was produced
@@ -589,15 +824,17 @@ jobs:
         with:
           name: windows-bundle
           # The staging and download directories under dist/ are inputs, not
-          # outputs; only the three published files go up.
+          # outputs; only the published files and the release-channel rows go up.
           path: |
             dist/*.zip
             dist/*.exe
             dist/SHA256SUMS.txt
+            dist/artifacts-windows.json
+            dist/blobs/*
           if-no-files-found: error
 
   publish:
-    needs: windows-bundle
+    needs: [windows-bundle, fleet-binaries]
     # Only a tag PUSH publishes. A manual dispatch is always a dry run, even
     # when dispatched from a tag, because "I wanted to see if it builds" must
     # not be able to mint a release.
@@ -616,6 +853,33 @@ jobs:
         with:
           name: windows-bundle
           path: dist
+      - uses: actions/download-artifact@v7
+        with:
+          name: linux-fleet
+          path: fleet
+
+      # One artifacts.json for the whole release, which is what the offline
+      # signer reads (`release-sign plan -from`). The two halves are produced on
+      # different runners and neither can see the other's, so they are joined
+      # here - the last point before a human takes over.
+      #
+      # The release string must AGREE across the two. It is derived from the tag
+      # in both jobs, so a disagreement means one of those derivations changed
+      # and the manifest would name a release half its artifacts are not.
+      - name: join the artifact rows
+        run: |
+          set -euo pipefail
+          lin="$(jq -r .release fleet/artifacts.json)"
+          win="$(jq -r .release dist/artifacts-windows.json)"
+          if [ "$lin" != "$win" ]; then
+            echo "::error::the fleet job says release $lin and the Windows job says $win."
+            echo "::error::One manifest cannot describe two releases, and a manifest naming a"
+            echo "::error::release half its artifacts are not is a release nobody can apply."
+            exit 1
+          fi
+          jq -s '{release: .[0].release, artifacts: (map(.artifacts) | add)}' \
+            fleet/artifacts.json dist/artifacts-windows.json > artifacts.json
+          cat artifacts.json
 
       - name: write the release notes
         run: |
@@ -645,6 +909,24 @@ jobs:
           ```
           Get-FileHash .\<file> -Algorithm SHA256
           ```
+
+          ---
+
+          **For the signed release channel** (`#34`), this draft also carries
+          the Linux fleet binaries, the bare client executable, and
+          `artifacts.json`. Those are inputs to the signing ceremony and not
+          things to install by hand:
+
+          - the fleet binaries are built `-trimpath`, `CGO_ENABLED=0`, on the
+            toolchain `go.mod` pins, and this run **rebuilt each of them from a
+            second source path and confirmed both were byte-identical**. Anyone
+            may repeat that and get the same hashes.
+          - `artifacts.json` holds the `os/arch/role/size/sha256` rows. Nothing
+            here is signed: the update key never touches a build machine, so
+            signing is a separate offline act performed on these rows
+            (`release-sign plan -from artifacts.json`, then `release-sign sign`).
+          - the blobs are named by their own digest, which is the only name a
+            content-addressed source has.
           EOF
           cat notes.md
 
@@ -670,9 +952,17 @@ jobs:
           if [ "$PRERELEASE" = "true" ]; then
             flags+=(--prerelease)
           fi
+          # The Windows bundle, plus the release channel's inputs: the fleet
+          # binaries, the artifact rows, and the blobs under their digests. A
+          # DRAFT is where artifacts wait for the signing act (ADR-0052 section
+          # 6), and #34 is what finally gives that sentence something to wait
+          # for.
           gh release create "$GITHUB_REF_NAME" \
             "${flags[@]}" \
             --title "Bacchus $VERSION for Windows" \
             --notes-file notes.md \
-            dist/*.zip dist/*.exe dist/SHA256SUMS.txt
+            dist/*.zip dist/*.exe dist/SHA256SUMS.txt \
+            artifacts.json fleet/a/*
           echo "draft release created for $GITHUB_REF_NAME - review it and publish by hand"
+          echo "the manifest is NOT here: sign artifacts.json offline (cmd/release-sign) and publish"
+          echo "manifest.json beside blobs/<digest> on whatever source the fleet is pointed at"

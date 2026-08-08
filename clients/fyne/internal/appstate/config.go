@@ -348,6 +348,17 @@ type Config struct {
 	// by accident. Empty uses DefaultDeviceLabel, which says nothing about
 	// anybody.
 	DeviceLabel string `json:"deviceLabel"`
+
+	// Update is the signed release channel (issue #34, ADR-0052, ADR-0065). One
+	// nested object rather than four more flat keys, because it is a feature most
+	// users never configure and the flat key space above is already long.
+	//
+	// The zero value is updates OFF, which is right for a client installed by hand
+	// from a downloaded artifact and never told where releases live. See
+	// UpdateConfig in update.go for what each field means and for the two rules the
+	// whole path is made of: the client never polls, and it fetches only through its
+	// own tunnel.
+	Update UpdateConfig `json:"update"`
 }
 
 // DefaultDeviceLabel is the device label used when Config.DeviceLabel is empty:

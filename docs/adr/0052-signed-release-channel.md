@@ -655,3 +655,27 @@ in parallel with the build rather than discovered at the end of it.
   in any transcript, and does not start appearing now.
 - **§5's reproducibility split, §7's failure behaviour, or anything about the
   manifest**, none of which either gate touched.
+
+## Amendment (2026-08-08, #34) — the build half landed, and it corrected two things here
+
+**The build half is ADR-0065.** Everything decided above stands; that record
+extends it and does not re-argue it. Three things a reader of this one should know
+before relying on it:
+
+- **§2's "a node learns from the reply to a register it was already sending every
+  ten seconds" is not true of the code.** The coordinator's `register` handler
+  replies only on a REJECT, and `Release` is stamped on the CLIENT replies, which
+  only an engine with a client role observes. A pure forwarder has no announcement
+  to be edge-triggered by, so ADR-0065 §3 gives the node an interval and leaves the
+  client edge-triggered.
+- **§2's manifest-over-the-existing-connection leg is not what was built.** The
+  manifest is fetched from the same untrusted source as the artifact bytes.
+  `#212` fenced that path this wave, but the reason it stayed fenced is that a
+  self-authenticating manifest needs no privileged carrier at all — putting it on
+  the control connection makes the coordinator the *required* participant in
+  patching, which is the residual §2 names about its own design. The coordinator
+  announces and carries nothing.
+- **§5's reproducibility measurement is now enforced.** The release build makes each
+  fleet binary twice from two different source paths and refuses the release if any
+  pair differs. It also found that `cmd/bacchus-netd` does not link `core/version`,
+  so the `-ldflags -X` release stamp is silently ignored for that one binary.
