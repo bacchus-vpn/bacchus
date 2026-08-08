@@ -190,7 +190,7 @@ awk -v want="$want" -v expect="$expect" '
 	}
 
 	# pad right-pads to a width computed from the rows themselves. A fixed column
-	# was fine while the first field was `exit n7`; an exit`s node id IS its X25519
+	# was fine while the first field was `exit n7`; an exit node id IS its X25519
 	# public key (64 hex characters), so the width has to come from the data.
 	# Written out rather than using printf "%-*s", which not every awk accepts.
 	function pad(s, w,   out) {
