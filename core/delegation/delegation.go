@@ -81,6 +81,13 @@ const Version = 1
 //   - TagRevocationsDoc: core/revocation owns the document (issue #199, ADR-0017,
 //     ADR-0063) — the same split, for the same reason: this package signs and opens
 //     the bytes, core/revocation decides what they mean.
+//   - TagUpdateManifest: core/update owns the release manifest (issue #34,
+//     ADR-0052 §1, ADR-0065). Registered here for the reason ADR-0052 gives —
+//     "that package's own stated rule, and the reason its file is the one place
+//     the whole set of domain-separation tags can be audited together" — and it is
+//     the tag whose separation matters most: the object it names authorizes
+//     EXECUTABLE BYTES, so a signature replayable into it from any other context
+//     would be a fleet-wide code push.
 //
 // The values are wire contract, not naming preference: each matches its signer's
 // byte for byte, and the frozen conformance vectors fail loudly if any drifts.
@@ -90,6 +97,7 @@ const (
 	TagIssuerCert     = "bacchus/issuer-cert/v1"
 	TagDeviceCred     = "bacchus/device-cred/v1"
 	TagRevocationsDoc = "bacchus/revocations/v1"
+	TagUpdateManifest = "bacchus/update-manifest/v1"
 )
 
 // ClockSkew is the tolerance applied to a NotBefore so a verifier whose clock
