@@ -88,6 +88,10 @@ func main() {
 	// The signed release channel (issue #34, ADR-0052, ADR-0065). See update.go for
 	// why a node polls and a client does not.
 	upd := registerUpdateFlags()
+	// The account service this node enrolls and renews its device credential
+	// against (issue #170, ADR-0071). See enroll.go for why the claim code is not
+	// a flag.
+	acct := registerAccountFlags()
 	flag.Parse()
 
 	// BEFORE anything else: if a previous START of an applied release never
@@ -98,6 +102,19 @@ func main() {
 	updTarget := updateTarget(*upd.target)
 	if updTarget != "" {
 		checkStartupDemotion(updTarget)
+	}
+
+	// One-shot enrollment (issue #170, ADR-0071): redeem a claim code for this
+	// node's first device credential and quit. It runs before every other startup
+	// check because it PROVISIONS rather than runs — a node being enrolled needs
+	// no exit key, no advertise address and no reachable coordinator, and a
+	// volunteer misconfiguration should not stand between an operator and a
+	// credential.
+	if *acct.enroll {
+		if err := runEnrollment(context.Background(), acct, *deviceCredDir); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 
 	// The volunteer opt-ins (issue #12) add serve roles to whatever -role names, and
@@ -204,6 +221,15 @@ func main() {
 		RelayForwardMaxTotal:   *relayFwdTotal,
 		RelayForwardPeerRate:   relayFwdRate,
 	}
+	// Device-credential renewal through the account service (issue #170,
+	// ADR-0071). Nil when none is configured, which core reads as renewal off;
+	// a configuration that cannot work is fatal here rather than a node that
+	// quietly never renews. Enrollment ships with renewal, per ADR-0046 §6.
+	renew, err := setupAccountService(acct, *deviceCredDir, roles)
+	if err != nil {
+		log.Fatal(err)
+	}
+	cfg.DeviceRenew = renew
 	if limits.SpeedCap != 0 || limits.MonthlyQuota != 0 {
 		// Echo the declared limits back at startup. An operator who mistyped "20Mb"
 		// for "20Mbit", or who has their billing day wrong, should find out here and
