@@ -68,8 +68,15 @@ const maxRendezvousPayload = safePathMTU - 40 - 8
 // msgCh, so a slow member can never leak a reply into another member's client
 // attempt — the whole reason the client can rotate cleanly.
 type coordLink struct {
-	raw  string // as configured, e.g. "1.2.3.4:8080"
-	conn *net.UDPConn
+	raw string // as configured, e.g. "1.2.3.4:8080"
+
+	// linkMu guards the socket, the transport riding it, and the generation
+	// counter that says which of the two a reader was last handed. The three move
+	// TOGETHER and only in relink, which replaces a link that has stopped carrying
+	// (issue #225) — so every reader takes them together and under this lock rather
+	// than reading the fields.
+	linkMu sync.RWMutex
+	conn   *net.UDPConn
 	// shaped is this link's message transport when it speaks the shaped rendezvous
 	// hop — an ICE connectivity check and then DTLS on the same 5-tuple (issue #175
 	// slice 2, ADR-0062) — and nil when it is the cleartext link this has always
@@ -80,8 +87,30 @@ type coordLink struct {
 	// ADR-0057 §4 reads a dead peer's ICMP port-unreachable off the next write, and
 	// that is the one signal separating an unreachable coordinator from a silent one.
 	shaped *shapedLink
+	// gen counts how many sockets this link has had. A read that fails is a
+	// different fact depending on whether the socket it was made on is still this
+	// link's: if the generation has moved, the link was rebuilt underneath the
+	// reader and the right answer is to read the new one, not to report the link
+	// dead. See read.
+	gen uint64
+
 	sendMu sync.Mutex
 	msgCh  chan wire // this member's client rendezvous replies
+
+	// heardN counts every message this link has taken off the wire — of any type,
+	// routable or not, for any role. It is the ONLY positive evidence a client leg
+	// has that the far end of this link is still there, and issue #225 is what
+	// happens without it: a shaped link whose association the coordinator has
+	// forgotten accepts every write (a UDP send into a dead association succeeds
+	// locally and forever) and returns nothing, so a client sends into it for as
+	// long as the process lives and concludes, correctly and uselessly, that the
+	// coordinator is silent.
+	//
+	// Counted here rather than in readLoop because this is the one function every
+	// inbound message passes through, whatever the reader does with it afterwards.
+	// Atomic for unroutableN's reason: a client leg samples it around a wait while
+	// the read loop writes it from its own goroutine.
+	heardN atomic.Uint64
 
 	// unroutable remembers which message types this member has already been
 	// reported for, so readLoop's "never drop silently" rule (see its default
@@ -318,6 +347,16 @@ func (l *coordLink) noteOversize(e *Engine, msgType string, size int) {
 		msgType, l.raw, size, l.budget(), safePathMTU, shaped)
 }
 
+// transport returns this link's socket, its message transport, and the generation
+// both belong to. The three are read together because relink replaces them
+// together; reading the fields separately would let a caller write to one socket
+// and blame the other.
+func (l *coordLink) transport() (*net.UDPConn, *shapedLink, uint64) {
+	l.linkMu.RLock()
+	defer l.linkMu.RUnlock()
+	return l.conn, l.shaped, l.gen
+}
+
 // budget is the largest payload this link may put on the wire: the plain rendezvous
 // budget on a cleartext link, and 37 bytes less on a shaped one, because on that one
 // every message travels inside a DTLS record (ADR-0059 §3, ADR-0062).
@@ -327,7 +366,7 @@ func (l *coordLink) noteOversize(e *Engine, msgType string, size int) {
 // failed on a real path at 1453 bytes and has ~500 to spare only because issue #206
 // moved the issuer cert.
 func (l *coordLink) budget() int {
-	if l.shaped != nil {
+	if _, shaped, _ := l.transport(); shaped != nil {
 		return maxShapedRendezvousPayload
 	}
 	return maxRendezvousPayload
@@ -336,7 +375,13 @@ func (l *coordLink) budget() int {
 // shape gives this link the shaped rendezvous transport (ADR-0062). Called by
 // Engine.Start for a client's links, before any read loop or send runs, so nothing
 // ever observes a link change shape underneath it.
+//
+// Shapedness is a property of the link and not of the socket: relink carries it
+// across a rebuild, so a link that was shaped stays shaped and a forwarder's
+// cleartext link is never silently upgraded by a recovery.
 func (l *coordLink) shape() {
+	l.linkMu.Lock()
+	defer l.linkMu.Unlock()
 	if l.conn != nil {
 		l.shaped = newShapedLink(l.conn)
 	}
@@ -346,28 +391,149 @@ func (l *coordLink) shape() {
 // link this is where the handshake happens, on the first send and not before: see
 // shapedLink on why establishment is lazy.
 func (l *coordLink) write(b []byte) (int, error) {
-	if l.shaped != nil {
-		return l.shaped.Write(b)
+	conn, shaped, _ := l.transport()
+	if shaped != nil {
+		return shaped.Write(b)
 	}
-	return l.conn.Write(b)
+	return conn.Write(b)
 }
 
 // read returns the next message from this member, decrypted when the link is shaped.
+//
+// It retries across a REBUILD rather than reporting one as a failure. relink closes
+// the old socket to end its reader, which fails whatever read was parked on it; if
+// the generation has moved since that read started, the failure is this client's own
+// doing and the next message is on the new socket. Returning the error instead would
+// end the read loop for the member the rebuild was meant to recover — the link would
+// come back with nothing listening to it, which is a quieter version of the bug being
+// fixed (issue #225).
 func (l *coordLink) read(b []byte) (int, error) {
-	if l.shaped != nil {
-		return l.shaped.Read(b)
+	for {
+		conn, shaped, gen := l.transport()
+		var n int
+		var err error
+		if shaped != nil {
+			n, err = shaped.Read(b)
+		} else {
+			n, err = conn.Read(b)
+		}
+		if err == nil {
+			// Counted for every message, before any routing decision: what a waiting
+			// leg needs to know is that this link produced something, not what.
+			l.heardN.Add(1)
+			return n, nil
+		}
+		if _, _, now := l.transport(); now != gen {
+			continue // rebuilt underneath us — read the socket this link has now
+		}
+		return 0, err
 	}
-	return l.conn.Read(b)
+}
+
+// heardMark snapshots the heard count so a caller can tell whether THIS attempt drew
+// anything at all off the link, exactly as unroutableMark and tooLargeMark do for
+// their own conditions.
+func (l *coordLink) heardMark() uint64 { return l.heardN.Load() }
+
+// heardSince reports whether this link produced any message at all since the caller
+// took `before` from [coordLink.heardMark].
+//
+// It is deliberately indiscriminate — a countries reply, a stray assign, a type this
+// build cannot route, all count. The question it answers is not "did this member
+// cooperate" but "is this link still a link", and for that any byte off the far end
+// is proof and none is absence.
+func (l *coordLink) heardSince(before uint64) bool { return l.heardN.Load() > before }
+
+// holdsAssociation reports whether this link is a SHAPED one that currently holds a
+// completed association — i.e. whether there is a live conversation here that could
+// have gone stale underneath this client.
+//
+// A cleartext link never does: it holds no state beyond the socket, so a coordinator
+// restarting under it costs it nothing and there is nothing to rebuild.
+func (l *coordLink) holdsAssociation() bool {
+	_, shaped, _ := l.transport()
+	return shaped != nil && shaped.live()
+}
+
+// relink rebuilds this link on a FRESH socket, re-resolving the configured address
+// and carrying the link's shape across. It is the client's recovery from a link that
+// completed a handshake and then stopped carrying (issue #225).
+//
+// # Why a new socket rather than a new association on the old one
+//
+// Because a re-handshake on the same 5-tuple is SWALLOWED whenever the far end still
+// holds the old association: a coordinator's mux finds the source in its table before
+// it looks at the record type, so the ClientHello is delivered into the very
+// conversation it is trying to replace, and — since every datagram from that source
+// refreshes the entry's idle clock — a client retrying in place holds its own wedge
+// open indefinitely. Measured both ways: on the same fake coordinator, re-handshaking
+// in place drew nothing in ten seconds and twenty-three attempts, while a fresh
+// socket connected on the first.
+//
+// A new source port is not a new condition for the coordinator either. Its register
+// and heartbeat handlers both re-learn a node's observed address on every message,
+// for the case they name themselves — "a node whose address changes under it, a NAT
+// rebinding, a new uplink" — so a rebuilt link presents as something that already
+// happens, and the node's registry entry follows it within one heartbeat.
+//
+// # Why this is not a wire change
+//
+// Nothing about any message changes: not a field, not a type, not the order of the
+// check and the handshake. What changes is which socket the same bytes leave from,
+// which is what a process restart already did — and a process restart is the only
+// thing that recovered this condition on real hardware.
+func (l *coordLink) relink() error {
+	ua, err := net.ResolveUDPAddr("udp", l.raw)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialUDP("udp", nil, ua)
+	if err != nil {
+		return err
+	}
+
+	// sendMu before linkMu, the same order send takes (it holds sendMu and then
+	// reaches transport), so a rebuild can never interleave with a send in flight.
+	l.sendMu.Lock()
+	l.linkMu.Lock()
+	oldConn, oldShaped := l.conn, l.shaped
+	l.conn = conn
+	if oldShaped != nil {
+		l.shaped = newShapedLink(conn)
+	}
+	l.gen++
+	l.linkMu.Unlock()
+	l.sendMu.Unlock()
+
+	// Closed AFTER the swap, so a reader that wakes on the closed socket already
+	// finds the new one in place and re-enters on it rather than reporting the link
+	// dead. See read.
+	//
+	// Closing the old SOCKET is mandatory rather than tidy, and it is the half that
+	// is easy to leave out. A shaped transport's Close does not touch the socket —
+	// coordLink owns that — so its reader goroutine stays parked in a read on it, and
+	// a rebuilt link sharing a socket with the reader of the link it replaced has two
+	// goroutines stealing each other's datagrams. Measured while building this: a
+	// rebuild that kept the socket lost roughly every other reply and recovered
+	// nothing, which reads exactly like the wedge it was meant to clear.
+	if oldShaped != nil {
+		_ = oldShaped.Close()
+	}
+	if oldConn != nil {
+		_ = oldConn.Close()
+	}
+	return nil
 }
 
 // close tears the link down: the transport first, then the socket, because closing
 // the socket is what ends the shaped link's reader goroutine.
 func (l *coordLink) close() {
-	if l.shaped != nil {
-		_ = l.shaped.Close()
+	conn, shaped, _ := l.transport()
+	if shaped != nil {
+		_ = shaped.Close()
 	}
-	if l.conn != nil {
-		_ = l.conn.Close()
+	if conn != nil {
+		_ = conn.Close()
 	}
 }
 
@@ -409,21 +575,52 @@ func (l *coordLink) noteHandshakeFailed(e *Engine, msgType string, err error) {
 		l.raw, err, msgType)
 }
 
+// noteLinkStale reports that the link this client HELD to a member stopped carrying,
+// and that it is being rebuilt.
+//
+// It is deliberately not memoized, unlike every other diagnosis on this type. The
+// others fire per datagram and would flood; this one fires at most once per connect
+// pass, and it is a state change rather than a property — "it happened again" is the
+// information, and a memo would report the first outage of a session and then go
+// quiet through every one after it.
+//
+// The wording is the point as much as the event. This condition presented as
+// "no coordinator reachable" for a hundred minutes on real hardware while the
+// coordinator was up and serving other clients from the same host (issue #225), and
+// refusedForSize's own comment already names that sentence as "the sentence a user on
+// a censored network will believe and report". A user who reads this line should be
+// able to tell that the thing that broke is this client's link and not their network,
+// because the two have opposite answers: one is waited out, the other is a reason to
+// change networks.
+func (l *coordLink) noteLinkStale(e *Engine, why string) {
+	e.emit(EventError, "", "the link this client held to coordinator %s has gone stale and is being rebuilt: it completed a rendezvous handshake, and %s. This is a LOCAL fault — this client's own link, NOT the network and NOT a blocked coordinator — and its ordinary cause is the coordinator restarting underneath a running client, which leaves this side holding a conversation the other end has forgotten and cannot be told about. Reconnecting on a fresh socket; if that coordinator is genuinely unreachable the next attempt will say so instead (issue #225)",
+		l.raw, why)
+}
+
+// noteRelinkFailed reports that a stale link could not be rebuilt. Dialling a UDP
+// socket touches no network, so this is a local resource failure (no descriptors, no
+// route to the family) rather than anything about the member — which is why it is
+// said plainly here instead of being folded into the reachability story.
+func (l *coordLink) noteRelinkFailed(e *Engine, err error) {
+	e.emit(EventError, "", "the stale link to coordinator %s could not be rebuilt (%v); this client keeps the link it has and will try again on the next attempt", l.raw, err)
+}
+
 func (l *coordLink) send(e *Engine, m wire) {
 	l.sendMu.Lock()
 	defer l.sendMu.Unlock()
+	conn, shaped, _ := l.transport()
 	b, _ := json.Marshal(m)
 	if len(b) > l.budget() {
 		l.noteOversize(e, m.Type, len(b))
 	}
-	if l.conn == nil {
+	if conn == nil {
 		return
 	}
 	// A shaped link may have been answered in a shape it does not speak since the
 	// last send; report it here, where an engine is in hand, rather than from the
 	// goroutine that owns the socket.
-	if l.shaped != nil {
-		l.noteUnshapedReplies(e, l.shaped.unshapedReplies())
+	if shaped != nil {
+		l.noteUnshapedReplies(e, shaped.unshapedReplies())
 	}
 	// The whole reason this is not `_, _ = l.conn.Write(b)` — see noteSendFailed
 	// and issue #183. A write error here is a local, definitive fact about a datagram
@@ -437,7 +634,7 @@ func (l *coordLink) send(e *Engine, m wire) {
 		// answered the handshake" from being said about a member that did. A size
 		// refusal goes to noteSendFailed either way, because EMSGSIZE is the one
 		// error that changes what the client concludes and the counting lives there.
-		if l.shaped != nil && !l.shaped.live() && !isMessageTooLong(err) && !errors.Is(err, net.ErrClosed) {
+		if shaped != nil && !shaped.live() && !isMessageTooLong(err) && !errors.Is(err, net.ErrClosed) {
 			l.noteHandshakeFailed(e, m.Type, err)
 			return
 		}
