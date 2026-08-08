@@ -112,21 +112,30 @@ func TestConnectDatagramFitsASafePath(t *testing.T) {
 		t.Fatal("the coordinator saw no connect at all")
 	}
 	for i, n := range sizes {
-		if n > maxRendezvousPayload {
-			t.Fatalf("connect copy %d is %d bytes, over the %d-byte payload that fits a %d-byte path (it needs a %d-byte IP datagram). This is issue #183: it is delivered on Ethernet and refused on Tailscale, on the IPv6 minimum MTU, and on a clamped mobile link",
-				i+1, n, maxRendezvousPayload, safePathMTU, n+28)
+		if n > maxShapedRendezvousPayload {
+			t.Fatalf("connect copy %d is %d bytes, over the %d-byte payload that fits a %d-byte path once the %d-byte DTLS record around it is counted (the datagram needs %d bytes of IP). This is issue #183 on the shaped hop: delivered on Ethernet and refused on Tailscale, on the IPv6 minimum MTU, and on a clamped mobile link",
+				i+1, n, maxShapedRendezvousPayload, safePathMTU, dtlsRecordOverhead, n+dtlsRecordOverhead+28)
 		}
 	}
-	t.Logf("largest connect this client can build: %d bytes of a %d-byte budget (%d bytes of headroom)",
-		sizes[0], maxRendezvousPayload, maxRendezvousPayload-sizes[0])
+	t.Logf("largest connect this client can build: %d bytes of a %d-byte shaped budget (%d bytes of headroom; %d on the wire once the DTLS record is counted, against a %d-byte path payload)",
+		sizes[0], maxShapedRendezvousPayload, maxShapedRendezvousPayload-sizes[0], sizes[0]+dtlsRecordOverhead, maxRendezvousPayload)
 }
 
-// TestTheSecondCopyOfTheAdmissionCredentialIsWhatOverflowedThePath pins the
-// causality, not just the result. The connect fits because the admission credential
-// no longer rides it as well as the challenge; if that stopped being true the test
-// above would still pass on a day the credential happened to be small, and the
-// margin would be gone the next time the account service added a field.
-func TestTheSecondCopyOfTheAdmissionCredentialIsWhatOverflowedThePath(t *testing.T) {
+// TestTheFieldsThatMovedOffTheConnectAreWhatOverflowedThePath pins the causality,
+// not just the result. The connect fits because two fields no longer ride it — the
+// admission credential (issue #183) and the issuer cert (issue #206) — and without
+// this the test above would still pass on a day both happened to be small, with the
+// margin gone the next time the account service added a field.
+//
+// It restores BOTH, and that is a correction #206 forced on the shape this test had.
+// It used to restore the admission credential alone, because at the time that was
+// the whole of the difference; with the issuer cert also gone, the same
+// reconstruction now measures ~1065 bytes and FITS, so a test that still restored
+// one copy would have quietly stopped asserting anything. The claim being protected
+// was never "the credential is 200 bytes over" — it is "what this connect no longer
+// carries is what put it over a real path", and that claim needs every field that
+// left.
+func TestTheFieldsThatMovedOffTheConnectAreWhatOverflowedThePath(t *testing.T) {
 	coord := newFakeDeviceCoordinator(t)
 	eng, link := newTestClientEngine(t, coord.addr())
 
@@ -152,19 +161,36 @@ func TestTheSecondCopyOfTheAdmissionCredentialIsWhatOverflowedThePath(t *testing
 	if sent.Cred != "" {
 		t.Fatalf("the connect carried the admission credential (%d bytes) even though its challenge did — this is the second copy issue #183 is about", len(sent.Cred))
 	}
+	if sent.IssuerCert != "" {
+		t.Fatalf("the connect carried the issuer cert (%d bytes) — it rides the challenge as of issue #206", len(sent.IssuerCert))
+	}
 
-	// The pre-#183 shape, reconstructed from the wire that was actually sent.
-	sent.Cred = admissionEnc
-	b, err := json.Marshal(sent)
+	// The pre-#183/pre-#206 shape, reconstructed from the wire that was actually
+	// sent, one field at a time so each one's cost is a measured number rather than
+	// a share of a total.
+	base, err := json.Marshal(sent)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if len(b) <= maxRendezvousPayload {
-		t.Fatalf("the same connect WITH the admission credential is %d bytes, still inside the %d-byte budget. Either the fixture credential has shrunk below what the account service issues, or this test is no longer measuring what made #183 happen",
-			len(b), maxRendezvousPayload)
+	sent.IssuerCert = issuerCertEnc
+	withCert, err := json.Marshal(sent)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-	t.Logf("with the second copy restored: %d bytes, %d over the %d-byte budget",
-		len(b), len(b)-maxRendezvousPayload, maxRendezvousPayload)
+	if cost := len(withCert) - len(base); cost < 362 {
+		t.Fatalf("putting the issuer cert back on the connect cost %d bytes; ADR-0057 measured 362, so either the fixture cert is smaller than the account service's or this is no longer measuring the field #206 moved", cost)
+	}
+	sent.Cred = admissionEnc
+	both, err := json.Marshal(sent)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if len(both) <= maxRendezvousPayload {
+		t.Fatalf("the same connect WITH both the admission credential and the issuer cert is %d bytes, still inside the %d-byte budget. Either the fixtures have shrunk below what the account service issues, or this test is no longer measuring what made #183 happen",
+			len(both), maxRendezvousPayload)
+	}
+	t.Logf("connect as sent: %d bytes; + issuer cert: %d (+%d, issue #206); + admission credential: %d (%d over the %d-byte budget, issue #183)",
+		len(base), len(withCert), len(withCert)-len(base), len(both), len(both)-maxRendezvousPayload, maxRendezvousPayload)
 }
 
 // TestChallengeCarriesTheAdmissionCredentialAndTheConnectDoesNot is the wire contract
@@ -199,12 +225,125 @@ func TestChallengeCarriesTheAdmissionCredentialAndTheConnectDoesNot(t *testing.T
 		if c.Cred != "" {
 			t.Fatalf("connect copy %d still carries the admission credential", i+1)
 		}
-		// The device-credential fields must still be there: what moved is the
-		// admission credential, and only it.
-		if c.Challenge == "" || c.DeviceCred == "" || c.IssuerCert == "" || c.DeviceAssert == "" {
+		// The device-credential fields that stayed must still be there. The issuer
+		// cert is deliberately not among them — it moved to the challenge under
+		// issue #206, which TestTheIssuerCertRidesTheChallengeAndNotTheConnect pins.
+		if c.Challenge == "" || c.DeviceCred == "" || c.DeviceAssert == "" {
 			t.Fatalf("connect copy %d lost a device-credential field: %+v", i+1, c)
 		}
 	}
+}
+
+// TestTheIssuerCertRidesTheChallengeAndNotTheConnect is issue #206's wire contract,
+// stated as one assertion over both messages of one exchange — the shape
+// TestChallengeCarriesTheAdmissionCredentialAndTheConnectDoesNot established for the
+// admission credential, applied to the field ADR-0057 named as the next lever.
+//
+// Unlike the admission credential this is UNCONDITIONAL, and the asymmetry is worth
+// pinning rather than assuming. The credential has to ride a connect whenever no
+// challenge was answered, because the coordinator may have no state for this source
+// and admission would refuse it. The issuer cert has no such case: it only ever went
+// out on a connect that presentDeviceCredential had already succeeded for, so a
+// connect with no answered challenge never carried one to begin with.
+func TestTheIssuerCertRidesTheChallengeAndNotTheConnect(t *testing.T) {
+	coord := newFakeDeviceCoordinator(t)
+	eng, link := newTestClientEngine(t, coord.addr())
+
+	now := time.Now()
+	_, issuerCertEnc, credEnc, devicePriv := mintTestChain(t, now, 48*time.Hour)
+	eng.deviceKey = devicePriv
+	if err := eng.deviceStore.Put(devicestore.Credential{
+		Device:     credEnc,
+		IssuerCert: issuerCertEnc,
+		Admission:  prodSizedAdmissionCred(t),
+	}); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+
+	eng.attemptWith(context.Background(), link, connectReq{country: "NL", mode: modeDirect}, eng.transport, time.Second, nil)
+
+	certs := coord.issuerCerts()
+	if len(certs) == 0 {
+		t.Fatal("no challenge was sent")
+	}
+	if certs[0] != issuerCertEnc {
+		t.Fatalf("the challenge carried issuerCert=%q; want the stored one — with it on neither message the coordinator holds no tier-one cert and refuses every connect", certs[0])
+	}
+	_, connects := coord.snapshot()
+	if len(connects) == 0 {
+		t.Fatal("the coordinator saw no connect at all")
+	}
+	for i, c := range connects {
+		if c.IssuerCert != "" {
+			t.Fatalf("connect copy %d still carries the issuer cert (%d bytes)", i+1, len(c.IssuerCert))
+		}
+		// What is left of the chain must still be on the connect: the assertion and
+		// the credential are per-device and per-connect, and moving THEM would move a
+		// proof away from the thing it proves.
+		if c.Challenge == "" || c.DeviceCred == "" || c.DeviceAssert == "" {
+			t.Fatalf("connect copy %d lost a device-credential field: %+v", i+1, c)
+		}
+	}
+}
+
+// minConnectHeadroom is the slack this build's largest connect must leave under the
+// rendezvous budget, and it exists so that a field added later cannot spend the room
+// issue #206 recovered without somebody deciding to.
+//
+// The number is measured rather than chosen. Moving the issuer cert off the connect
+// took the largest connect this client can assemble from 1097 bytes to 719, so the
+// headroom went from 135 bytes under the 1232-byte path budget to 476 under the
+// 1195-byte shaped one — the shaped hop having already spent 37 of them on a DTLS
+// record. ADR-0057 records that production credentials measured ~34 bytes heavier
+// than these fixtures, which comes out of the 476 as well. 400 is the floor that
+// leaves, rounded down.
+//
+// Raising it is a decision about the budget and should read like one. This is not a
+// number to bump because a test went red.
+const minConnectHeadroom = 400
+
+// TestTheRecoveredHeadroomIsAsserted is the other half of issue #206's "done when",
+// and it is the half ADR-0057 did not have. That record pinned the connect against
+// maxRendezvousPayload, which catches the moment the datagram stops fitting and not a
+// byte sooner — so a field that spent 130 of the 135 bytes then available would have
+// shipped green. #206 bought roughly 378 bytes back; this is what stops them being
+// spent one silent field at a time.
+func TestTheRecoveredHeadroomIsAsserted(t *testing.T) {
+	coord := newFakeDeviceCoordinator(t)
+	eng, link := newTestClientEngine(t, coord.addr())
+
+	now := time.Now()
+	_, issuerCertEnc, credEnc, devicePriv := mintTestChain(t, now, 48*time.Hour)
+	eng.deviceKey = devicePriv
+	if err := eng.deviceStore.Put(devicestore.Credential{
+		Device:     credEnc,
+		IssuerCert: issuerCertEnc,
+		Admission:  prodSizedAdmissionCred(t),
+	}); err != nil {
+		t.Fatalf("seed device store: %v", err)
+	}
+
+	// The same largest-possible connect TestConnectDatagramFitsASafePath builds: a
+	// chained relay request with an excluded session and the full device chain.
+	req := connectReq{
+		mode:    modeRelay,
+		exclude: []string{"0123456789abcdef"},
+		plan: &chainPlan{hops: []relayHop{
+			{id: "3b1f0c9d2e7a4b6c8d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e"},
+		}},
+	}
+	eng.attemptWith(context.Background(), link, req, eng.transport, time.Second, nil)
+
+	sizes := coord.sizesOf("connect")
+	if len(sizes) == 0 {
+		t.Fatal("the coordinator saw no connect at all")
+	}
+	if got := maxShapedRendezvousPayload - sizes[0]; got < minConnectHeadroom {
+		t.Fatalf("the largest connect is %d bytes, leaving %d of headroom under the %d-byte shaped budget; this build is required to leave at least %d. Something has spent the room issue #206 recovered — if that was deliberate, move minConnectHeadroom and say why in the same change",
+			sizes[0], got, maxShapedRendezvousPayload, minConnectHeadroom)
+	}
+	t.Logf("largest connect: %d bytes, %d of headroom under the %d-byte shaped budget (floor %d)",
+		sizes[0], maxShapedRendezvousPayload-sizes[0], maxShapedRendezvousPayload, minConnectHeadroom)
 }
 
 // TestConnectStillCarriesTheAdmissionCredentialWhenNoChallengeWasAnswered is the
@@ -463,21 +602,47 @@ func TestTheKernelReallyReturnsASizeRefusalThisBuildRecognises(t *testing.T) {
 	}
 }
 
+// oversizeCountry is a country string that makes the connect around it land just
+// past the UDP maximum once it is wrapped in a DTLS record.
+//
+// The window is narrow and it is narrow for issue #183's own reason: loopback's MTU
+// is 65536, so there is no small path to be had in a test and the only reachable
+// EMSGSIZE is above the UDP maximum. On the shaped hop that maximum applies to the
+// RECORD, so the payload has to be big enough that payload+overhead exceeds 65507
+// and small enough that the record still fits its own 16-bit length field. 65490
+// sits in the middle of that band with about twenty bytes of slack either side, and
+// the base is measured rather than guessed so a new wire field cannot silently walk
+// the target out of the band.
+func oversizeCountry(t *testing.T) string {
+	t.Helper()
+	const payload = 65490
+	base, err := json.Marshal(wire{Type: "connect", Mode: modeDirect, Nonce: strings.Repeat("a", 32)})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	n := payload - len(base)
+	if n < 1 {
+		t.Fatalf("a bare connect is already %d bytes", len(base))
+	}
+	return strings.Repeat("x", n)
+}
+
 // TestAConnectRefusedForSizeIsNotReportedAsASilentCoordinator is issue #183's
 // headline behaviour: the client must not turn a datagram it never sent into "no
 // coordinator reachable", which is the mesh-walk trigger and the sentence a user on a
 // censored network will believe and report.
 //
-// The oversize is forced through the country field rather than through a real 1280
-// path, for the reason above: loopback has no small MTU, so the only reachable
-// EMSGSIZE here is above the UDP maximum. What is under test is the classification,
-// which is identical either way.
+// It runs on a SHAPED link, which is what a client now has, and that is the part
+// worth keeping honest: the datagram the kernel refuses is a DTLS record, not the
+// JSON, and the refusal has to travel back out through pion for the client to
+// classify it. Measured, it does — the errno arrives intact and isMessageTooLong
+// recognises it — so #183's diagnosis survives ADR-0062 rather than being assumed to.
 func TestAConnectRefusedForSizeIsNotReportedAsASilentCoordinator(t *testing.T) {
 	coord := newFakeDeviceCoordinator(t)
 	eng, link := newTestClientEngine(t, coord.addr())
 
 	r := eng.attemptWith(context.Background(), link,
-		connectReq{country: strings.Repeat("x", 70000), mode: modeDirect},
+		connectReq{country: oversizeCountry(t), mode: modeDirect},
 		eng.transport, time.Second, nil)
 
 	if r.outcome == coordinatorSilent {

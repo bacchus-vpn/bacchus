@@ -50,16 +50,16 @@ func fakeConnectCoordinator(t *testing.T, reply func(mode string) (wire, bool)) 
 	}
 	t.Cleanup(func() { _ = pc.Close() })
 
+	peer := servePeer(t, pc)
 	go func() {
-		buf := make([]byte, 65535)
 		var seq int
 		for {
-			n, src, err := pc.ReadFromUDP(buf)
+			raw, src, err := peer.ReadFrom()
 			if err != nil {
 				return
 			}
 			var m wire
-			if json.Unmarshal(buf[:n], &m) != nil || m.Type != "connect" {
+			if json.Unmarshal(raw, &m) != nil || m.Type != "connect" {
 				continue
 			}
 			seq++
@@ -71,7 +71,7 @@ func fakeConnectCoordinator(t *testing.T, reply func(mode string) (wire, bool)) 
 				out.Session = fmt.Sprintf("s%d", seq) // unique per mint
 			}
 			b, _ := json.Marshal(out)
-			_, _ = pc.WriteToUDP(b, src)
+			_, _ = peer.WriteTo(b, src)
 		}
 	}()
 	return pc.LocalAddr().String()

@@ -29,15 +29,19 @@ import (
 // leaves the rest of the budget for awaitSession rather than starving it.
 const deviceChallengeTimeout = 5 * time.Second
 
-// deviceConnectFields are the four wire fields a connect carries to answer the
+// deviceConnectFields are the wire fields a connect carries to answer the
 // coordinator's device-credential gate. The zero value carries none of them —
 // json:"...,omitempty" on every one means splicing a zero value into a connect
 // is byte-identical to a build that predates #50.
+//
+// The ISSUER CERT is deliberately not among them (issue #206, ADR-0062). It rides
+// the "challenge" instead: it is 362 bytes, it is identical for every device from
+// one issuer, and re-sending it on every connect bought nothing. ADR-0057 named it
+// as the next lever after the admission credential and this is that lever pulled.
 type deviceConnectFields struct {
-	challenge  string // echoed back, standard base64 — the coordinator's own encoding
-	cred       string // "bacchusd1:" envelope
-	issuerCert string // "bacchusi1:" envelope
-	assert     string // standard base64 signature
+	challenge string // echoed back, standard base64 — the coordinator's own encoding
+	cred      string // "bacchusd1:" envelope
+	assert    string // standard base64 signature
 }
 
 // presentDeviceCredential answers coordinator link l's device-credential gate
@@ -85,7 +89,22 @@ func (e *Engine) presentDeviceCredential(ctx context.Context, l *coordLink, time
 	// coordinator's client-admission gate, which guards this message like every other
 	// client message — so nothing was added to this datagram; what changed is that the
 	// SECOND copy, on the connect, is now conditional. See connectAdmissionCred.
-	l.send(e, wire{Type: "challenge", Cred: e.admissionCred()})
+	//
+	// The ISSUER CERT rides here too now (issue #206, ADR-0062), and unlike the
+	// admission credential this one is a genuine MOVE rather than a conditional one:
+	// the connect never carries it again. It can be unconditional because the issuer
+	// cert only ever went out on a connect this function had already succeeded for —
+	// every field below is empty when ok is false, so a connect with no answered
+	// challenge carried no cert to begin with. The coordinator holds it beside the
+	// nonce it just issued (cmd/coordinator/devicecred.go stashIssuerCert) and reads
+	// it back when the connect that answers that nonce arrives.
+	//
+	// Growing THIS datagram by 362 bytes to shrink the connect by the same amount is
+	// the trade, and it is not a wash: the challenge has room and the connect does not.
+	// The challenge carries the admission credential and nothing else, so it measured
+	// ~443 bytes against the same 1232-byte budget; the connect is the datagram that
+	// went over a real path at 1453 (issue #183).
+	l.send(e, wire{Type: "challenge", Cred: e.admissionCred(), IssuerCert: held.IssuerCert})
 
 	budget := deviceChallengeTimeout
 	if budget > timeout {
@@ -106,10 +125,9 @@ func (e *Engine) presentDeviceCredential(ctx context.Context, l *coordLink, time
 	}
 
 	return deviceConnectFields{
-		challenge:  base64.StdEncoding.EncodeToString(challenge),
-		cred:       held.Device,
-		issuerCert: held.IssuerCert,
-		assert:     base64.StdEncoding.EncodeToString(sig),
+		challenge: base64.StdEncoding.EncodeToString(challenge),
+		cred:      held.Device,
+		assert:    base64.StdEncoding.EncodeToString(sig),
 	}, true
 }
 

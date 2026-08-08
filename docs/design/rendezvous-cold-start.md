@@ -162,11 +162,11 @@ So this table, rather than prose, and it is kept honest as the slices land:
 
 | §4.1 requirement | State |
 |---|---|
-| First contact is DTLS-shaped rather than cleartext | **Coordinator half built** (ADR-0059, `#175` slice 1). It accepts DTLS alongside raw JSON on one signaling port. The **client** still sends cleartext — that is slice 2 |
-| Actually STUN/WebRTC-shaped, not merely DTLS-shaped | **Coordinator half built** (ADR-0060, `#202`). The signaling port answers any well-formed Binding Request with the same two attributes the TURN port on `-turn-addr` already answers with — byte-identical by construction, since two ports on one host answering differently would be a distinguisher in itself. The **client** emits no prefix yet: that is slice 2, and the responder is deliberately deployed first because a client whose check goes unanswered stalls its own handshake. `core/ice_fingerprint.go` gains its first caller at this hop when slice 2 lands |
+| First contact is DTLS-shaped rather than cleartext | **Built, both halves** (ADR-0059 `#175` slice 1, ADR-0062 slice 2). The signaling port accepts DTLS alongside raw JSON, and the **client speaks it with no fallback to plaintext** — a censor dropping the handshake and a coordinator predating slice 1 are the same silence, so a fallback would send the cleartext the shape exists to remove at exactly the moment it matters. A coordinator that does not speak it is unreachable to a current client, which is what `-rendezvous-dtls=false` now costs |
+| Actually STUN/WebRTC-shaped, not merely DTLS-shaped | **Built, both halves** (ADR-0060 `#202`, ADR-0062 `#175` slice 2). The port answers any well-formed Binding Request with the same two attributes the TURN port on `-turn-addr` already answers with — byte-identical by construction, since two ports on one host answering differently would be a distinguisher in itself — and the client now emits the check before its ClientHello, through the same `core/coldstart` codec for the same reason. `core/ice_fingerprint.go` has its first caller at this hop. The response **decides nothing**: gating on it would be the probe the two open questions below are about |
 | Randomize the DTLS/ICE fingerprint | **Not applied at this hop** — slice 3. The profiles exist and `dtls.Config` takes their hooks directly; what is missing is a `dtls.Config` counterpart to `dtlsProfile.apply`, which takes a `*webrtc.SettingEngine` |
 | Do not rely on QUIC mimicry | Held — nothing here uses QUIC |
-| **A transport pool with per-user failover at this hop** | **Not built.** `#175` stays open for it. The hop still has one protocol, no probe, no race and no per-`NetworkKey()` learning — every one of which the data plane has had since ADR-0028 |
+| **A transport pool with per-user failover at this hop** | **Not built.** `#175` stays open for it. The hop still has one protocol, no probe, no race and no per-`NetworkKey()` learning — every one of which the data plane has had since ADR-0028. ADR-0062 makes the last one *smaller* rather than closer: with no fallback there is no per-coordinator shape to remember, so `NetworkKey()` has nothing to store until there is something to race |
 
 Two of `#175`'s design questions are deliberately **still open** and were not
 answered to get here, because the shape ruled (S1/S2) adds no probe: what a probe
@@ -177,8 +177,10 @@ One correction this work produced, recorded because the wrong version of it is t
 intuitive one: **`handshake.ProtocolVersion` is not the compatibility mechanism
 for a shape change at this hop and must not be used as one.** `handshake.Check`
 rejects a mismatch in *both* directions, so bumping it is a fleet break rather
-than a window. The window is a first-bytes demux on the coordinator and
-try-then-fall-back on the client — see ADR-0059 §4.
+than a window. The window is a first-bytes demux on the coordinator — see ADR-0059
+§4. Its other half, try-then-fall-back on the client, was **withdrawn** before it
+was built (ADR-0062): so the window is one-sided, and what it now covers is
+*forwarders*, whose links slice 2 deliberately left cleartext, rather than clients.
 
 ### 4.2 Seed — the cold bootstrap (a fresh client with nothing)
 

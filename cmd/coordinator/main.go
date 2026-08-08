@@ -577,7 +577,7 @@ func main() {
 	deviceRevocationsState := flag.String("device-revocations-state", "secrets/device-revocations-state.json", "path to this coordinator's persistent state for the DEVICE-namespace signed bundle (issue #199): the last VERIFIED bundle, so a restart does not begin holding only whatever the untrusted hop happens to be serving at that instant, and the newest as_of ever accepted, which is what refuses a rollback. That floor cannot be re-derived from signed data, so write access to this file is equivalent to rolling this namespace's revocations back to an older generation — keep it with the other secrets.")
 	admissionRevocationsSource := flag.String("admission-revocations-source", "", "where to fetch the signed ADMISSION-namespace revocation bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at. Required when -revocations-root-pubkey is set AND admission is enabled (-admission-pubkey or -admission-authority); re-fetched and re-verified from scratch every 10s.")
 	admissionRevocationsState := flag.String("admission-revocations-state", "secrets/admission-revocations-state.json", "path to this coordinator's persistent state for the ADMISSION-namespace signed bundle (issue #199) — the admission-namespace counterpart to -device-revocations-state; see it for what this protects and why it belongs with the other secrets.")
-	rendezvousDTLS := flag.Bool("rendezvous-dtls", true, "also accept DTLS-shaped rendezvous on -addr, alongside raw JSON, on the same port (issue #175, ADR-0059). The two shapes are told apart by the DTLS record header, which no JSON document can produce, so this REFUSES NOTHING a coordinator accepted before and is safe to deploy ahead of any client that speaks it. Replies go back in whichever shape the peer arrived in. Turn it OFF only to shed the one cost it adds: a bounded table of per-source DTLS associations, which a spoofed-source flood can hold slots in for the length of a handshake timeout (it cannot get further — DTLS's cookie exchange is answered from a source that never replies).")
+	rendezvousDTLS := flag.Bool("rendezvous-dtls", true, "accept the shaped rendezvous handshake on -addr — a STUN connectivity check and DTLS, alongside raw JSON, on the same port (issues #175/#202, ADR-0059/0060). READ THIS BEFORE TURNING IT OFF. It was written as a free valve for shedding the per-source association table under a spoofed-source flood, and it is no longer free: since #175 slice 2 (ADR-0062) the client speaks this shape and has DELIBERATELY NO CLEARTEXT FALLBACK, because a censor dropping the handshake and a coordinator that never learned it are the same silence, and answering that silence with plaintext would send exactly what the shape exists to hide. So switching this off does not degrade this coordinator, it REMOVES it: no current client can reach it at all, they rotate away on the existing 30-second cooldown, and this coordinator's share of the pool goes to its peers. The cost it still sheds is real but small — a bounded table of per-source DTLS associations that a spoofed-source flood can hold slots in for the length of a handshake timeout, and no further, because DTLS's own cookie exchange is never answered from a spoofed source. Under attack, shedding the whole coordinator to save that table is almost certainly the wrong trade; the right lever is upstream filtering.")
 	printBootstrapPub := flag.Bool("print-bootstrap-pubkey", false, "load (or generate) the snapshot-signing key at -bootstrap-key, print its public key (hex) to stdout, and exit. Provision this to mesh-walk clients (bacchus-node -mesh-pubkey) so they can verify coordinator-signed snapshots recovered via a peer (issue #31, design §4.3). Couriers get the same key inside their -courier-invite.")
 	flag.Parse()
 
@@ -1054,7 +1054,14 @@ func handle(m wire, src *net.UDPAddr) {
 		// answers it does not have to carry a second copy of the largest field on the
 		// wire (issue #183, ADR-0057). issueDeviceChallenge keeps it only when there
 		// was an authority to verify it against — see stashCred.
-		c := issueDeviceChallenge(src, m.Cred)
+		//
+		// The issuer cert on this message is stashed the same way and for the same
+		// reason (issue #206, ADR-0062): 362 bytes, identical for every device from one
+		// issuer, and previously re-sent on every connect. Its gate is the anchored
+		// ROOT rather than admission, because that is the authority that can speak for
+		// it — see stashIssuerCert, which also records why reusing stashCred's gate
+		// would refuse every connect on an admission-off deployment.
+		c := issueDeviceChallenge(src, m.Cred, m.IssuerCert)
 		if c == "" {
 			// Either the gate is off — in which case a client that asks anyway gets an
 			// empty challenge and simply has nothing to sign — or the store is at
@@ -1072,6 +1079,13 @@ func handle(m wire, src *net.UDPAddr) {
 		// verified below is a credential, wherever it arrived, and the rest of this
 		// handler should see the one this connect is actually being judged on.
 		m.Cred = admissionCredFor(m, src)
+		// The issuer cert is resolved the same way and in the same place (issue #206,
+		// ADR-0062). Unlike the credential above it is not a conditional move: a
+		// current client puts it on the "challenge" and never on a connect, so this is
+		// where the connect gets it back. Resolved here rather than inside admitDevice
+		// so that one function keeps verifying a chain it was handed rather than
+		// deciding where the chain came from.
+		m.IssuerCert = issuerCertFor(m, src)
 		// Client admission (issue #42): matchmaking is gated too, so a leaked
 		// exit list can't be turned into a live session without a credential.
 		cred, ok := admit(m, src, admission.RoleClient, "")

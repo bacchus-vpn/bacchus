@@ -92,6 +92,25 @@ func VerifyIssuerCert(rootPub ed25519.PublicKey, signed []byte, now time.Time, r
 	return cert, nil
 }
 
+// VerifyIssuerCert is [VerifyIssuerCert] against the root and revocation list this
+// verifier already holds — tier one on its own, without the credential and
+// assertion the full descent needs.
+//
+// It exists because a coordinator now receives the issuer cert a round trip BEFORE
+// the connect that spends it (issue #206, ADR-0062): the cert rides the "challenge"
+// so the connect need not carry 362 bytes that are identical for every device from
+// one issuer. Something has to decide whether those bytes are worth keeping, and the
+// only honest answer is the root's — anything else stores an attacker-chosen string
+// keyed on a spoofable UDP source.
+//
+// It is deliberately NOT a substitute for [Verifier.Verify]. The connect re-verifies
+// the whole chain against the clock and revocation list AT CONNECT TIME, so a cert
+// revoked inside the challenge's lifetime is still refused; this call only decides
+// what may be held in the meantime.
+func (v *Verifier) VerifyIssuerCert(signed []byte, now time.Time) (IssuerCert, error) {
+	return VerifyIssuerCert(v.rootPub, signed, now, v.revoked)
+}
+
 // Presentation is what a device sends to prove it may connect: its short-lived
 // credential, the issuer cert that credential chains through, and an assertion
 // proving it holds the matching private key.

@@ -211,16 +211,16 @@ func chainCoordinator(t *testing.T, reply func(m wire) (wire, bool)) (addr strin
 
 	var mu sync.Mutex
 	var got []wire
+	peer := servePeer(t, pc)
 	go func() {
-		buf := make([]byte, 65535)
 		var seq int
 		for {
-			n, src, err := pc.ReadFromUDP(buf)
+			raw, src, err := peer.ReadFrom()
 			if err != nil {
 				return
 			}
 			var m wire
-			if json.Unmarshal(buf[:n], &m) != nil || m.Type != "connect" {
+			if json.Unmarshal(raw, &m) != nil || m.Type != "connect" {
 				continue
 			}
 			mu.Lock()
@@ -235,7 +235,7 @@ func chainCoordinator(t *testing.T, reply func(m wire) (wire, bool)) (addr strin
 				out.Session = fmt.Sprintf("chain-s%d", seq)
 			}
 			b, _ := json.Marshal(out)
-			_, _ = pc.WriteToUDP(b, src)
+			_, _ = peer.WriteTo(b, src)
 		}
 	}()
 	return pc.LocalAddr().String(), func() []wire {

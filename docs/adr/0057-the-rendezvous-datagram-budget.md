@@ -247,6 +247,25 @@ move made twice. #175 argues the coordinator hop needs a transport ladder anyway
 and #183 agrees with it from the other direction; that stays #175's card and this
 record does not pre-empt it.
 
+> **The lever was pulled, 2026-08-07 — #206, ADR-0062.** It became a precondition
+> rather than an option: ADR-0059 measured DTLS records at 37 bytes against the 135
+> above, leaving ~64 of real headroom, and nothing could spend that before the cert
+> moved. It measured **378 bytes on the wire** (the 362 plus its JSON key and
+> punctuation), taking the largest connect from **1097 to 719** and the headroom from
+> 135 to **476 under the 1195-byte shaped budget**. Unlike §2's move it is
+> unconditional: the connect never carries the cert again, because it only ever went
+> out on a connect whose challenge had already been answered. `minConnectHeadroom`
+> now pins a floor of 400, which is the check this record's own test did not have —
+> asserting against `maxRendezvousPayload` catches the moment the datagram stops
+> fitting and not a byte sooner.
+
+> **§4's `EMSGSIZE` diagnosis survives the shaped hop, measured rather than assumed
+> (ADR-0062 §6).** The datagram the kernel refuses is now a DTLS record, and the
+> refusal has to travel back out through pion for this client to classify it; it
+> does, errno intact. A size refusal deliberately does not retire the association —
+> `EMSGSIZE` is a fact about this host's path, and retiring one over it would turn a
+> local path limit into a member lost for minutes.
+
 **What is now pinned.** A test asserts the connect's size against
 `maxRendezvousPayload` on bytes actually written to a socket, and a second asserts
 that restoring the second credential copy exceeds it — so the fix cannot be undone

@@ -17,11 +17,14 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 )
 
-// wire's Challenge/DeviceCred/IssuerCert/DeviceAssert fields (issue #50/#51,
-// ADR-0045) are built by presentDeviceCredential and awaited by awaitChallenge,
-// both in core/devicecred_connect.go — kept out of this already-large file, but
-// splicing into attemptWith's connect message right here, the one chokepoint
-// every client path (single-transport and pool) funnels through.
+// wire's Challenge/DeviceCred/DeviceAssert fields (issue #50/#51, ADR-0045) are
+// built by presentDeviceCredential and awaited by awaitChallenge, both in
+// core/devicecred_connect.go — kept out of this already-large file, but splicing
+// into attemptWith's connect message right here, the one chokepoint every client
+// path (single-transport and pool) funnels through.
+//
+// The fourth field, IssuerCert, is no longer among them: it rides the "challenge"
+// and the coordinator holds it beside the nonce (issue #206, ADR-0062).
 
 // CountryInfo is one country the coordinator will assign exits in, and the whole of
 // what a client learns about the network's shape (issue #146, ADR-0042).
@@ -93,10 +96,23 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 		default:
 		}
 		e.drainMsgCh(l)
+		hsMark := l.handshakeMark()
 		e.greet(l)
 		mark := l.unroutableMark()
 		sendMark := l.tooLargeMark()
 		l.sendN(e, wire{Type: "list", Cred: e.admissionCred()}, 3)
+		// Nothing left this host, because the shaped handshake with this member did
+		// not complete (ADR-0062). Waiting `per` for a reply to a request that was
+		// never sent buys nothing — the member is still deprioritized below and the
+		// rotation still runs, so what this changes is only how long an unusable
+		// member costs. It is deliberately NOT the requestTooLarge branch's shape:
+		// that one is a fault of this host and says nothing about the member, this
+		// one says the member is unreachable, which is exactly what the rotation and
+		// the health memo below are for.
+		if l.handshakeFailed(hsMark) {
+			e.markUnhealthy(l.raw)
+			continue
+		}
 		if countries, ok := e.awaitCountries(ctx, l, per); ok {
 			// The reply advertised the network's release; if this client is too
 			// old (force-major) surface that rather than a stale country list (#36).
@@ -913,6 +929,7 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 	// drew (issue #5 for the reply side, issue #183 for the send side).
 	mark := l.unroutableMark()
 	sendMark := l.tooLargeMark()
+	hsMark := l.handshakeMark()
 
 	// Device-credential presentation (issue #50/#51, ADR-0045): answers the
 	// coordinator's connect-time entitlement gate when this client has a
@@ -938,9 +955,20 @@ func (e *Engine) attemptWith(ctx context.Context, l *coordLink, req connectReq, 
 		ExcludeSessions: req.exclude,
 		Challenge:       fields.challenge,
 		DeviceCred:      fields.cred,
-		IssuerCert:      fields.issuerCert,
 		DeviceAssert:    fields.assert,
 	}, 3)
+
+	// Nothing left this host: the shaped rendezvous handshake with this member did
+	// not complete (ADR-0062), so there is no request for a reply to answer. The
+	// outcome is the SAME one silence produces — a member this client cannot
+	// handshake with is unreachable, so the rotation, the health memo and
+	// ErrNoCoordinatorReachable all still apply, and mesh-walk is still the right
+	// recovery when every member is in this state. Only the waiting is skipped, and
+	// only because it can no longer tell us anything. The diagnosis is on the event
+	// coordLink.noteHandshakeFailed already emitted.
+	if l.handshakeFailed(hsMark) {
+		return attemptResult{outcome: coordinatorSilent}
+	}
 
 	reply, res := e.awaitSession(ctx, l, sessionTimeout)
 	switch res {

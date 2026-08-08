@@ -37,22 +37,22 @@ func unroutableCoordinator(t *testing.T, replyType string) string {
 		t.Fatalf("listen: %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
+	peer := servePeer(t, ln)
 	go func() {
-		buf := make([]byte, 65535)
 		for {
-			n, src, err := ln.ReadFromUDP(buf)
+			raw, src, err := peer.ReadFrom()
 			if err != nil {
 				return
 			}
 			var m wire
-			if json.Unmarshal(buf[:n], &m) != nil {
+			if json.Unmarshal(raw, &m) != nil {
 				continue
 			}
 			if m.Type == "hello" {
 				continue // a matching hello draws no reply; see cmd/coordinator
 			}
 			b, _ := json.Marshal(wire{Type: replyType})
-			_, _ = ln.WriteToUDP(b, src)
+			_, _ = peer.WriteTo(b, src)
 		}
 	}()
 	return ln.LocalAddr().String()

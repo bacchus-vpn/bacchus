@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/bacchus-vpn/bacchus/core/rendezvous"
 )
 
 // fakeCoordinator is a local duplicate of the one in
@@ -75,6 +77,13 @@ type fakeWireCountry struct {
 // real coordinator's relay path.
 type fakeCoordinator struct {
 	conn *net.UDPConn
+	// peer terminates the shaped rendezvous hop (issue #175 slice 2, ADR-0062). A
+	// client speaks an ICE connectivity check and then DTLS with no cleartext
+	// fallback, so a socket that only answers JSON no longer stands in for a
+	// coordinator anywhere. It passes cleartext through unchanged, so the exit-role
+	// engine on the other side of this fake — whose links are not shaped — is served
+	// by the same object.
+	peer *rendezvous.Peer
 
 	mu       sync.Mutex
 	exit     *fakeExit
@@ -90,7 +99,12 @@ func newFakeCoordinator(t *testing.T) *fakeCoordinator {
 		t.Fatalf("fakeCoordinator: listen: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	c := &fakeCoordinator{conn: conn, sessions: map[string]*net.UDPAddr{}}
+	peer, err := rendezvous.Serve(conn)
+	if err != nil {
+		t.Fatalf("fakeCoordinator: rendezvous.Serve: %v", err)
+	}
+	t.Cleanup(func() { _ = peer.Close() })
+	c := &fakeCoordinator{conn: conn, peer: peer, sessions: map[string]*net.UDPAddr{}}
 	go c.serve()
 	return c
 }
@@ -98,14 +112,13 @@ func newFakeCoordinator(t *testing.T) *fakeCoordinator {
 func (c *fakeCoordinator) addr() string { return c.conn.LocalAddr().String() }
 
 func (c *fakeCoordinator) serve() {
-	buf := make([]byte, 65535)
 	for {
-		n, src, err := c.conn.ReadFromUDP(buf)
+		raw, src, err := c.peer.ReadFrom()
 		if err != nil {
 			return // closed (t.Cleanup)
 		}
 		var m fakeWire
-		if json.Unmarshal(buf[:n], &m) != nil {
+		if json.Unmarshal(raw, &m) != nil {
 			continue
 		}
 		switch m.Type {
@@ -173,5 +186,5 @@ func (c *fakeCoordinator) send(dst *net.UDPAddr, m fakeWire) {
 	if err != nil {
 		return
 	}
-	_, _ = c.conn.WriteToUDP(b, dst)
+	_, _ = c.peer.WriteTo(b, dst)
 }
