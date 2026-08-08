@@ -19,7 +19,13 @@
   `writeStagedConfig` deleted), and `SyncDir` at the three seed writers —
   `cmd/coordinator/main.go` (`loadOrGenerateBootstrapKey`),
   `cmd/admission-issue/main.go` (`loadOrGenerateAdmissionKey`),
-  `core/devicestore/devicestore.go` (`LoadOrGenerateKey`)
+  `core/devicestore/devicestore.go` (`LoadOrGenerateKey`). Issue #229 split
+  `core/update` per §5: `core/update/atomic.go` (`writeAtomic`,
+  `writeAtomicDurable`), `core/update/state.go` (`State.write`, `writeMarker`),
+  `core/update/apply.go` (`Apply`'s marker cleanup). Issue #228 changed no code:
+  `core/atomicfile/dirsync_windows.go`, `core/atomicfile/atomicfile.go`
+  (`WriteDurable`, `SyncDir`) and `core/devicestore/devicestore.go` say what is
+  and is not established on Windows, and issue #238 carries the run
 
 ## Context
 
@@ -169,9 +175,16 @@ Applied:
 | `core/capacity` checkpoint | no | Re-written every `granularity()` bytes or 30s, on the data path, on SD-card hardware. A lost rename costs less than the crash loss the design already accepts. |
 | `core/devicestore`, `core/selection` | no | Re-written on the next renewal or the next success; losing one costs a renewal or a round of discovery. |
 | `cmd/bacchus-netd` resolv.conf | no | Held for the length of a session and restored on release; the previous generation is the state the machine was already in. |
+| `core/update` state file (#229) | **only when the floor RISES** | `core/policy`'s row, unchanged, for the same value under a different name: `MinSeq` is the only thing in that package that cannot be re-derived from signed data. Every check re-records it; a raise is not re-emitted, and losing one walks this peer back onto a burned release (ADR-0052 §7). `ClearPending` is a re-record and costs at worst a re-download. |
+| `core/update` confirmation marker (#229) | **yes** | Written once per apply, before anything moves, and the only record that the release being published is on probation. Nothing re-emits it, so losing it is a demotion that never happens — ADR-0052 §7's worst-of-three failure. `Apply` syncs the same directory a few operations later on the path that SUCCEEDS, which covers neither the path that fails nor `CheckStartup`'s claim write. |
 
 `core/policy`'s split is what makes the rule worth stating as "per write": the
 same file, the same function, and the answer differs by what the write means.
+The last two rows arrived with the amendments below rather than with this
+record, and they are in the table rather than only in an amendment for the
+reason the Context section gives about hand-maintained lists: a row an
+implementer has to scroll past the Consequences to find is a row that goes
+stale.
 
 ### 6. The create case is different, and keeps its own card
 
@@ -288,3 +301,85 @@ which is the flattening §3 said the parameter existed to prevent.
 
 The observation in Consequences — `cmd/coordinator` rewriting an identical policy state
 file every ten seconds — is still unacted on, and still belongs to whoever owns that loop.
+
+## Amendment (issues #229 and #228, 2026-08-09): the last two rows, and what Windows documents
+
+The amendment above named two things it did not anticipate and gave each a card.
+Both are answered here. `#229` is applied and closed; `#228` is answered as far
+as documentation can answer it and stays open behind a hardware run.
+
+**`core/update` gets §5's rows (`#229`).** The two rows are in the table above.
+Issue #215 moved this package's tenth copy of the atomic-write shape onto
+`core/atomicfile.Write`, which was the state of the package rather than a ruling
+about it — the split needed a change at call sites that lane did not own.
+`State.write` now takes the discriminator from its three callers, exactly the
+arrangement `core/policy.Cache.writeAtomic` and `core/revocation.Cache` arrived
+at, and `writeMarker` takes the durable form unconditionally. Nothing is less
+durable than it was: this package had never fsynced a directory from that path.
+
+One consequence that is not obvious from the rule. `WriteDurable` installs the
+file and THEN reports a directory-fsync failure, so `Apply` can now be handed an
+error with the marker already on disk; it removes the marker on that path, for
+the same reason it removes it on every other failure — an unstarted marker with
+no previous binary beside it is precisely what `deploy/bacchus-update-rollback.sh`
+acts on (ADR-0069), and an apply that published nothing must not leave one. The
+marker's ENCODING is untouched; that is a contract with a shell reader and it
+changes with that reader or not at all.
+
+**What Windows documents, and the one step it does not (`#228`).** The question
+was whether NTFS needs a separate step for the create case, or whether the seed
+writers' existing `f.Sync()` already commits the entry. Read rather than assumed:
+
+- `FlushFileBuffers` — what Go's `File.Sync` calls — is `NtFlushBuffersFileEx`
+  with flags 0, documented as *"File data and metadata in the file cache will be
+  written, and the underlying storage is synchronized to flush its cache.
+  Windows file systems supported: NTFS, ReFS, FAT, exFAT."* The sibling
+  `FLUSH_FLAGS_FILE_DATA_ONLY` (*"No metadata is written"*) is the explicit
+  opt-out that makes metadata the default rather than a wording accident.
+- Win32's File Caching page: *"File system metadata is always cached. Therefore,
+  to store any metadata changes to disk, the file must either be flushed or be
+  opened with `FILE_FLAG_WRITE_THROUGH`."*
+
+**Those are the same lever, and the seed writers already pull it.** That is the
+part of `#228`'s framing this amendment corrects: Windows is not a platform where
+a second, stronger call is being skipped. There is no stronger call documented to
+make.
+
+What Microsoft does not say is whether *the file's* metadata includes the entry
+in the file's PARENT directory — which is the entire question, since losing that
+entry is what leaves no file at all. NTFS journals metadata write-ahead and the
+index-entry insert belongs to the same create transaction, so it is very likely
+covered; that is an inference about internals, not a guarantee given to an
+application, and no in-process test can tell the two apart. **Issue #238** is the
+power-loss run that can, and `#228` stays open behind it (wave ruling: a
+durability claim that cannot be demonstrated is a blocker card, not a close).
+
+**No code changed for `#228`, and two claims did.** `dirsync_windows.go` carried
+two statements that the documentation does not support, and both are corrected
+where they were:
+
+- *"a directory handle is never [opened for writing]"* was the stated reason for
+  the no-op. The real reason is the handle `os.Open` hands it: `FlushFileBuffers`
+  requires `GENERIC_WRITE` and `os.Open` requests none.
+  `NtFlushBuffersFileEx` excludes directory handles from exactly one of its four
+  flush modes and from none of the others.
+- *"Windows expresses it at the rename instead — `MoveFileEx` with
+  `MOVEFILE_WRITE_THROUGH`"*. That flag's documented guarantee is *"that a move
+  performed as a copy and delete operation is flushed to disk before the function
+  returns. The flush occurs at the end of the copy operation."* A same-volume
+  rename is not a copy and delete, so it is not a documented answer for a
+  rename's directory entry and was never one for a create.
+
+**And the "server-side only" premise is gone.** That file said both
+`WriteDurable` callers were operator tools on the coordinator host. Two things
+make that false: `clients/fyne`'s coldstart directory cache has reached
+`WriteDurable` through `coldstart.SaveCache` since the client learned that
+addresses move (ADR-0061), and `core/update`'s two writes above join it on every
+peer that can update itself, the client included. Together with
+`core/devicestore`'s `SyncDir` on the connect path, the honest statement is that
+**several client-side durable writes are `Write`-durable and no more on Windows**,
+which is now said at `WriteDurable` itself rather than only at `SyncDir` — a
+caller reads the name it reaches for.
+
+None of it is a regression. It is the gap `#215` closed on Linux and could not
+close there, stated rather than implied by a function that returns nil.

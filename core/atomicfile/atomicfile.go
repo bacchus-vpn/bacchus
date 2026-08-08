@@ -158,6 +158,15 @@ func Write(path string, b []byte, perm os.FileMode) error {
 // until the next decision — a revocation list, a secrets ledger — because there
 // the lost rename is silent, unrepaired, and means the operator was told an
 // action took effect when it did not.
+//
+// ON WINDOWS THIS IS EXACTLY Write. SyncDir is a documented no-op there, so a
+// caller reaching for this name on that platform gets the bytes flushed and the
+// rename not, which is the guarantee it was reaching past. It is said here as
+// well as at SyncDir because this is the name callers pick, and callers on that
+// platform now exist: clients/fyne's coldstart directory cache and core/update's
+// floor raise and confirmation marker both reach this from the desktop client.
+// See dirsync_windows.go for what Windows does and does not document about it,
+// and issue #228 for the gap.
 func WriteDurable(path string, b []byte, perm os.FileMode) error {
 	if err := Write(path, b, perm); err != nil {
 		return err
@@ -185,8 +194,12 @@ func WriteDurable(path string, b []byte, perm os.FileMode) error {
 // instead of minting a second.
 //
 // On Windows this is a documented no-op, so those three get Write's guarantees
-// there and not WriteDurable's. See dirsync_windows.go, and issue #228 for the
-// gap that leaves on the one platform that ships first.
+// there and not WriteDurable's. dirsync_windows.go holds what Windows documents
+// instead — briefly, that flushing the FILE's handle is the only lever Windows
+// gives an application, that the seed writers already pull it, and that whether
+// it reaches the entry in the file's PARENT directory is the one step Microsoft
+// does not state. Issue #228 is the gap; issue #238 is the power-loss run that
+// can close it.
 func SyncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
