@@ -178,6 +178,14 @@ func Apply(target, staged string, a Artifact, release string) error {
 	}
 	marker := Marker{Release: release, Previous: PreviousPath(target), Artifact: a.Name()}
 	if err := writeMarker(MarkerPath(target), marker); err != nil {
+		// The marker write is durable since issue #229, and core/atomicfile
+		// reports a directory-fsync failure AFTER the file itself is installed —
+		// so this path can now be reached with a marker on disk belonging to an
+		// apply that is about to abort. Removed for the same reason every other
+		// failure path below removes it: an unstarted marker with no previous
+		// binary beside it is exactly what deploy/bacchus-update-rollback.sh acts
+		// on, and an apply that published nothing must not leave one.
+		_ = os.Remove(MarkerPath(target))
 		return err
 	}
 

@@ -46,12 +46,24 @@ type Marker struct {
 	Started bool `json:"started"`
 }
 
+// writeMarker installs the marker at path.
+//
+// The encoding is part of a contract with a second reader in another language:
+// deploy/bacchus-update-rollback.sh matches this file with grep and sed, and
+// names this function and encoding/json's MarshalIndent as what produces it
+// (ADR-0069). Field names, JSON shape and indentation therefore change together
+// with that script or not at all.
+//
+// The DURABILITY is this function's own, and it is writeAtomicDurable by
+// ADR-0066 §5: nothing re-emits a confirmation marker, and losing one is a
+// demotion that never happens. See writeAtomicDurable for the full argument and
+// for the window Apply's own syncDir does not cover.
 func writeMarker(path string, m Marker) error {
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("update: marshal marker: %w", err)
 	}
-	if err := writeAtomic(path, b, 0o600); err != nil {
+	if err := writeAtomicDurable(path, b, 0o600); err != nil {
 		return err
 	}
 	return nil
@@ -177,40 +189,67 @@ func (s *State) read() (stateFile, error) {
 // RaiseFloor records that a manifest at seq was accepted. The floor only ever
 // RATCHETS: a lower seq is ignored rather than rejected, because re-reading the
 // same manifest on every check is the steady state and must not be an error.
+//
+// Whether the write is durable is decided by whether it actually raises: almost
+// every call re-records a floor the next check will re-record again, and the
+// rare one that moves it is the one nothing re-emits. See write.
 func (s *State) RaiseFloor(seq uint64) error {
 	f, _ := s.read()
-	if seq > f.MinSeq {
+	raises := seq > f.MinSeq
+	if raises {
 		f.MinSeq = seq
 	}
-	return s.write(f)
+	return s.write(f, raises)
 }
 
 // SetPending records a staged artifact, raising the floor at the same time.
+//
+// In the ordinary flow the floor has already been raised by RaiseFloor earlier
+// in the same check, so this write does not move it and is not durable — the
+// raise was already made durable where it happened. The test is on this write's
+// own effect rather than on the caller, because that is what ADR-0066 §5's rule
+// is about and because a future caller may reach this first.
 func (s *State) SetPending(p Pending) error {
 	f, _ := s.read()
-	if p.Seq > f.MinSeq {
+	raises := p.Seq > f.MinSeq
+	if raises {
 		f.MinSeq = p.Seq
 	}
 	f.Pending = &p
-	return s.write(f)
+	return s.write(f, raises)
 }
 
 // ClearPending forgets a staged artifact, recording the release that was applied
-// when one was. It does not lower the floor.
+// when one was. It does not lower the floor, and never raises it, so it is never
+// a durable write — see writeAtomic for what a lost ClearPending costs.
 func (s *State) ClearPending(appliedRelease string) error {
 	f, _ := s.read()
 	f.Pending = nil
 	if appliedRelease != "" {
 		f.AppliedRelease = appliedRelease
 	}
-	return s.write(f)
+	return s.write(f, false)
 }
 
-func (s *State) write(f stateFile) error {
+// write installs the state file, 0600 because write access to it is the ability
+// to roll this peer back one generation.
+//
+// raisesFloor is ADR-0066 §5's discriminator, threaded from the three callers
+// because the answer belongs to the WRITE and not to this file: the same
+// function, the same bytes on the way out, and a different durability depending
+// on what the write means. It is the arrangement core/policy.Cache.writeAtomic
+// arrived at for MinSeq and core/revocation.Cache for MinAsOf, and it is here
+// for the same reason — this is the third file in the repository whose whole
+// purpose is a rollback floor that cannot be re-derived from signed data.
+func (s *State) write(f stateFile, raisesFloor bool) error {
 	f.Version = stateVersion
 	b, err := json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return fmt.Errorf("update: marshal state: %w", err)
 	}
-	return writeAtomic(s.path, b, 0o600)
+	install := writeAtomic
+	if raisesFloor {
+		install = writeAtomicDurable
+	}
+	return install(s.path, b, 0o600)
 }
