@@ -43,9 +43,9 @@ import (
 // that rule differ from each other (state.go's floor is re-recorded on every
 // check, its RAISE is not, and the confirmation marker is not re-emitted at all).
 // Splitting it is a change at those call sites, which are outside the files this
-// change owns; issue #215's closing notes carry the analysis so it is one edit
-// rather than a re-derivation. Nothing here is made less durable than it was:
-// this package has never fsynced a directory from this path.
+// change owns; issue #229 carries the analysis so it is one edit rather than a
+// re-derivation. Nothing here is made less durable than it was: this package has
+// never fsynced a directory from this path.
 func writeAtomic(path string, b []byte, mode fs.FileMode) error {
 	if err := atomicfile.Write(path, b, mode); err != nil {
 		return fmt.Errorf("update: %w", err)
