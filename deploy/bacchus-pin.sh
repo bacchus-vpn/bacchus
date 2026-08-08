@@ -18,6 +18,12 @@
 #   live configuration and the deployment then works differently for reasons no diff
 #   shows. Units are installed once, by hand or by deploy/install.sh, and edited in
 #   place. This is binaries only.
+#
+#   It does COMPARE them, which is a different thing and was missing (issue #234): a
+#   directive a template gained and a live unit lacks was invisible in both directions,
+#   which is how issue #222's OnFailure= rollback shipped to a repository and reached no
+#   box while every pin run reported a pinned fleet. See deploy/bacchus-unit-check.sh.
+#   The comparison copies nothing and does not fail the run — it reports.
 # * It never checks anything out. It reads the commit the repository is ALREADY on and
 #   refuses if `--commit` disagrees, so moving HEAD stays the operator's deliberate act
 #   and a half-finished rebase cannot become a deployment.
@@ -510,14 +516,122 @@ for entry in $NODE_TARGETS; do
 	expected_nodes=$((expected_nodes + 1))
 done
 
+# ---------------------------------------------------------------------------
+# THE ROLL CALL (issue #232): the two namespaces finally meet, and they meet HERE
+# ---------------------------------------------------------------------------
+# The coordinator's journal names node IDS; NODE_TARGETS names SSH TARGETS. Until now
+# nothing mapped one to the other, so an absent box was reported as a count — `2 of 3
+# expected node(s) registered` — and finding out which one cost a `systemctl status` per
+# box, the per-box work this script exists to end.
+#
+# Both halves are now readable. Each box states its own id at startup (core.Engine.Start
+# prints `exit <id> (<country>) advertising …` and `relay <id> online`, and cmd/node sets
+# no Config.OnEvent so those go through log.Println into the journal) — read with
+# deploy/bacchus-node-id.sh. The coordinator's side comes from the fleet check's
+# `--ids-to`. Subtracting one from the other names the box.
+#
+# THE PAIRING LIVES IN THIS SCRIPT, and that is a decision rather than an accident. The
+# fleet check prints no hostname, which is what makes its output the half of a run that
+# is safe to paste into a public issue; naming a box means naming a host, and this
+# script's output already names ssh targets on every line. So the check keeps answering
+# in ids, this holds the map, and neither gains the other's property.
+#
+# It removes the SECOND limit too, and that one is easier to miss: a volunteer client
+# serves as a relay or an exit (ADR-0053) and registers exactly like a deployed node
+# without being in anybody's host list, so a volunteer present while a deployed box is
+# absent holds the COUNT up and the check passes. A roll call compares identities, so a
+# registration that belongs to no deployed box cannot stand in for one that is missing.
+# `--expect` is still passed: it is what answers when a box's own id could not be read,
+# and it is what the check gives an operator running it by hand.
+#
+# The map is rebuilt after the containment restart below rather than carried across it.
+# A relay without -relay-ingress takes a FRESH RANDOM id at every start (core/engine.go,
+# randID), so a map read before a restart names an identity that no longer exists and
+# would report a box that came back perfectly as absent. An exit's id is its X25519
+# public key and does not move; the map cannot tell which kind it is holding.
+node_ids="$stage/node-ids"
+registered_ids="$stage/registered-ids"
+id_unknown=0
+
+read_node_ids() {
+	: >"$node_ids"
+	id_unknown=0
+	for entry in $NODE_TARGETS; do
+		_t=$(node_target "$entry")
+		_u=$(node_unit "$entry")
+		# stderr is dropped because bacchus-node-id.sh explains itself at length and
+		# cannot name the box; the one line below does both, once per box.
+		_id=$("$SSH" "$_t" "journalctl -u $_u --since '-5 min' --no-pager" 2>/dev/null |
+			sh "$script_dir/bacchus-node-id.sh" 2>/dev/null) || _id=""
+		if [ -z "$_id" ]; then
+			id_unknown=$((id_unknown + 1))
+			log "  $_t ($_u): no node id in its journal — this box cannot be named in the roll call"
+			continue
+		fi
+		printf '%s|%s|%s\n' "$_t" "$_u" "$_id" >>"$node_ids"
+		log "  $_t ($_u): $_id"
+	done
+	if [ "$id_unknown" -gt 0 ]; then
+		printf '%s: %d box(es) did not state a node id. A node prints one at startup, per serving\n' "$self" "$id_unknown" >&2
+		printf '%s: role; a box on a binary older than that, a unit that is down, or a journal window\n' "$self" >&2
+		printf '%s: that does not reach the last start all produce this. Those boxes fall back to the\n' "$self" >&2
+		printf '%s: count (--expect), which cannot name them and which a volunteer can hold up.\n' "$self" >&2
+	fi
+}
+
+roll_absent=0
+roll_extra=0
+
+# roll_call compares the ids the boxes state with the ids the coordinator saw. It NAMES
+# what it finds, which is the whole point, and it is silent when it has nothing to add.
+roll_call() {
+	roll_absent=0
+	roll_extra=0
+	[ -s "$node_ids" ] || return 0
+	[ -f "$registered_ids" ] || return 0
+
+	while IFS='|' read -r _t _u _id; do
+		[ -n "$_id" ] || continue
+		grep -qxF "$_id" "$registered_ids" && continue
+		if [ "$roll_absent" -eq 0 ]; then
+			printf '%s: ROLL CALL: a box that IS deployed did not register in this window.\n' "$self" >&2
+		fi
+		roll_absent=$((roll_absent + 1))
+		printf '%s:   %s (%s) registers as %s — that id is not in the coordinator journal\n' "$self" "$_t" "$_u" "$_id" >&2
+	done <"$node_ids"
+
+	while read -r _rid; do
+		[ -n "$_rid" ] || continue
+		cut -d'|' -f3 "$node_ids" | grep -qxF "$_rid" && continue
+		roll_extra=$((roll_extra + 1))
+	done <"$registered_ids"
+
+	if [ "$roll_absent" -gt 0 ]; then
+		printf '%s: This is NOT drift: every node that did register is reported above, on the build it\n' "$self" >&2
+		printf '%s: is running. It is a box that is not answering — down, unable to reach this\n' "$self" >&2
+		printf '%s: coordinator, or the state a deploy guarantees (issue #225: a node brought up against\n' "$self" >&2
+		printf '%s: the OUTGOING coordinator never rebuilds the link, because the coordinator restarts\n' "$self" >&2
+		printf '%s: last by design). Start with: systemctl status on the box named above.\n' "$self" >&2
+	fi
+	if [ "$roll_extra" -gt 0 ] && [ "$id_unknown" -eq 0 ]; then
+		log "$roll_extra registration(s) belong to no box in NODE_TARGETS — a volunteer serving as a"
+		log "  relay or an exit (ADR-0053). Not a failure, and it no longer counts towards the floor:"
+		log "  the check above compares numbers, this compares identities."
+	fi
+}
+
 fleet_check() {
 	"$SSH" "$COORDINATOR_TARGET" "journalctl -u $COORDINATOR_UNIT --since '-5 min' --no-pager" |
-		sh "$script_dir/bacchus-fleet-check.sh" --expect "$expected_nodes" "$head"
+		sh "$script_dir/bacchus-fleet-check.sh" --expect "$expected_nodes" --ids-to "$registered_ids" "$head"
 }
+
+log "asking every node box what it registers as (issue #232)"
+read_node_ids
 
 log "reading the coordinator's journal for every node's build"
 fleet_rc=0
 fleet_check || fleet_rc=$?
+roll_call
 
 # ---------------------------------------------------------------------------
 # A node that did not come back is restarted ONCE — a containment, not a fix
@@ -538,14 +652,23 @@ fleet_check || fleet_rc=$?
 #   * It does NOT change the restart order, and must not. `build=` rides the
 #     `registered:` line, which fires only for a node the coordinator does not already
 #     hold, so coordinator-last is what makes the reading fresh at all.
-#   * It restarts EVERY node unit, because which one is missing cannot be known from
-#     here — the journal names node ids and this file names ssh targets. That is cheap
-#     precisely here and nowhere else: this script restarted every one of them about
-#     twenty seconds ago, so the sessions at risk are at most that old.
+#   * It restarts EVERY node unit, even now that the roll call can usually NAME the
+#     absent one. Restarting only the named box would be wrong whenever the roll call is
+#     incomplete — a box whose own id could not be read is exactly a box that may be the
+#     one that is down — and this is cheap precisely here and nowhere else, because this
+#     script restarted every one of them about twenty seconds ago.
 #
-# Only on exit 4. Drift (exit 1) is never restarted away: a box on the wrong binary is
-# still on the wrong binary afterwards, and restarting it would destroy the evidence.
-if [ "$fleet_rc" -eq 4 ] && [ "$restart_absent" -eq 1 ]; then
+# The trigger is either finding: the check's exit 4 (fewer ids than expected) OR the
+# roll call naming a deployed box that is missing. They are not the same condition — a
+# volunteer holds the COUNT up while the roll call still sees the gap, which is issue
+# #232's whole point. Drift (exit 1) is never restarted away either way: a box on the
+# wrong binary is still on the wrong binary afterwards, and restarting it would destroy
+# the evidence.
+absent=0
+if [ "$fleet_rc" -eq 4 ] || [ "$roll_absent" -gt 0 ]; then
+	absent=1
+fi
+if [ "$absent" -eq 1 ] && [ "$fleet_rc" -ne 1 ] && [ "$restart_absent" -eq 1 ]; then
 	log "a node did not re-register — restarting every node unit ONCE (issue #225 containment, not a fix)"
 	for entry in $NODE_TARGETS; do
 		_t=$(node_target "$entry")
@@ -558,18 +681,75 @@ if [ "$fleet_rc" -eq 4 ] && [ "$restart_absent" -eq 1 ]; then
 		log "waiting ${settle}s for the restarted nodes to register"
 		sleep "$settle"
 	fi
+	# The map is rebuilt, not reused: a relay takes a fresh random id at every start,
+	# so the ids read before the restart describe processes that no longer exist.
+	log "asking every node box what it registers as, again"
+	read_node_ids
 	log "re-reading the coordinator's journal"
 	fleet_rc=0
 	fleet_check || fleet_rc=$?
-	if [ "$fleet_rc" -eq 0 ]; then
+	roll_call
+	if [ "$fleet_rc" -eq 0 ] && [ "$roll_absent" -eq 0 ]; then
 		printf '%s: NOTE: the fleet is complete only AFTER a node restart this script had to do itself.\n' "$self" >&2
 		printf '%s: That is issue #225 — a node whose coordinator went away never rebuilds the link — and\n' "$self" >&2
 		printf '%s: every deploy reproduces it, because the coordinator restarts last by design.\n' "$self" >&2
 	fi
 fi
 
-if [ "$fleet_rc" -ne 0 ]; then
+if [ "$fleet_rc" -ne 0 ] || [ "$roll_absent" -gt 0 ]; then
 	rc=3
+fi
+
+# ---------------------------------------------------------------------------
+# The units — compared, never copied (issue #234)
+# ---------------------------------------------------------------------------
+# The no-copy rule above is correct and stays. What was missing is that nothing compared
+# the two either, so a directive a template GAINED and a live unit lacks was invisible:
+# issue #222 added `OnFailure=bacchus-update-rollback@%n.service` to both server units,
+# merging it put it on no box, and every pin run afterwards reported a pinned fleet. That
+# is issue #205's finding in a different place — the repository holds a mechanism the
+# fleet does not have, and nothing reports the difference.
+#
+# This REPORTS and does not fail the run, for the same reason the WorkingDirectory
+# warning above does not: units are configuration this script deliberately does not
+# manage, the binaries genuinely are pinned, and a check that failed every pin until
+# somebody hand-edited three units would either be switched off or answered by adding
+# the copy flag that must not exist. It is loud, it says exactly what to type, and it
+# says it on every run until the box carries the line.
+unit_gap=0
+
+compare_unit() {
+	_target="$1"
+	_unit="$2"
+	_tmpl="$script_dir/${_unit%.service}.service"
+	log "unit $_unit on $_target"
+	if [ ! -r "$_tmpl" ]; then
+		log "  nothing ships as deploy/${_unit%.service}.service — no template to compare against"
+		return 0
+	fi
+	if ! _live=$("$SSH" "$_target" "systemctl cat $_unit" 2>/dev/null); then
+		log "  could not read it (not fatal) — compare it by hand before trusting this box"
+		return 0
+	fi
+	_urc=0
+	printf '%s\n' "$_live" | sh "$script_dir/bacchus-unit-check.sh" "$_tmpl" || _urc=$?
+	if [ "$_urc" -eq 5 ]; then
+		unit_gap=$((unit_gap + 1))
+	fi
+	return 0
+}
+
+log "comparing every live unit with the one this commit ships (copying nothing)"
+for entry in $NODE_TARGETS; do
+	compare_unit "$(node_target "$entry")" "$(node_unit "$entry")"
+done
+compare_unit "$COORDINATOR_TARGET" "$COORDINATOR_UNIT"
+
+if [ "$unit_gap" -gt 0 ]; then
+	printf '%s: WARNING: %d live unit(s) are missing a directive this commit ships. The binaries\n' "$self" "$unit_gap" >&2
+	printf '%s: ARE pinned — this is not drift and it does not fail the run — but a mechanism that\n' "$self" >&2
+	printf '%s: is present here and absent there is exactly issue #205, and it stays that way until\n' "$self" >&2
+	printf '%s: somebody edits those units by hand. Nothing was copied; see the lines above.\n' "$self" >&2
 fi
 
 log "probing the deployed coordinator's capability"
