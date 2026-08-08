@@ -73,7 +73,7 @@ func main() {
 	admissionCRL := flag.String("admission-crl", "", "client: path to a signed revocation bundle, minted by cmd/admission-issue -crl (issue #69). The client rejects an exit whose credential appears in it, even if not yet expired, and re-reads this file on an interval to pick up an operator's rotated bundle without a restart (issue #90). Requires -admission-pubkey. Overrides the bundle carried in a coldstart invite. Empty does not check revocation (fail-open)")
 	requireCRL := flag.Bool("require-crl", false, "client: refuse to start when an admission anchor is configured (-admission-pubkey, or one carried in a coldstart invite) but no CRL is, instead of the default fail-open-on-revocation (issue #91). Opt-in; guards against a hostile or buggy coordinator stripping the CRL from a v3 invite. Has no effect without an anchor")
 	relayAdmissionPubKey := flag.String("relay-admission-pubkey", "", "client: a SECOND, independent admission authority public key, hex (issue #26) — the anchor used to verify each RELAY HOP's admission credential when chaining (-relay-hops 2+), extending the -admission-pubkey end-to-end check from the exit to every intermediate hop. Empty does not verify hops (fail-open), independent of -admission-pubkey: configuring one does not turn on checking for the other. Revocation is checked against the SAME bundle -admission-crl/-admission-crl-path configure; there is no separate flag for it. A hop whose credential fails this check fails the whole chain")
-	deviceCredDir := flag.String("device-cred-dir", "", "client: directory to persist this device's own keypair and the device credential + issuer cert issued for it across restarts (issue #50/#51/#53) — a DIFFERENT credential from -admission-cred; see core/devicecred's package doc. Empty means in-memory only: a fresh device identity every restart and nothing to present, ever, so this node connects exactly as one predating #50 does. The credential itself is not obtained here (enrollment is account-service work, tracked separately, issue #9) — this only says where to keep whatever gets provisioned into it")
+	deviceCredDir := flag.String("device-cred-dir", "", "client: directory to persist this device's own keypair and the device credential + issuer cert issued for it across restarts (issue #50/#51/#53) — a DIFFERENT credential from -admission-cred; see core/devicecred's package doc. Empty means in-memory only: a fresh device identity every restart and nothing to present, ever, so this node connects exactly as one predating #50 does — and it is REFUSED alongside -account-service, because a claim code spent on an identity the process takes with it cannot be spent again (issue #170, ADR-0071). The credential is obtained by -enroll, or provisioned into this directory by any other means; this only says where it lives")
 	courierListen := flag.String("courier-listen", "", "relay/exit: UDP address to serve mesh-walk recovery snapshots on (issue #31, design §4.3). A node caches the coordinator-signed snapshot and hands it, verbatim, to a recovering client that can no longer reach any coordinator — a courier, never an author. Empty disables the courier.")
 	courierInvite := flag.String("courier-invite", "", "relay/exit: bacchus1: invite (from cmd/coldstart-issue) the courier uses to fetch and refresh the snapshot it serves; supplies the coordinator address, fetch secret, and snapshot public key. Required with -courier-listen.")
 	meshPeers := flag.String("mesh-peers", "", "client: comma-separated peer courier addresses to walk when every coordinator is unreachable (issue #31). A relay/exit from a prior session, running -courier-listen. Empty disables mesh-walk recovery (fail cold, as before).")
@@ -88,16 +88,44 @@ func main() {
 	// The signed release channel (issue #34, ADR-0052, ADR-0065). See update.go for
 	// why a node polls and a client does not.
 	upd := registerUpdateFlags()
+	// The account service this node enrolls and renews its device credential
+	// against (issue #170, ADR-0071). See enroll.go for why the claim code is not
+	// a flag.
+	acct := registerAccountFlags()
 	flag.Parse()
 
 	// BEFORE anything else: if a previous START of an applied release never
 	// confirmed it, put the previous binary back and exit so the supervisor starts
 	// it. This start is that release's trial when it is the first one (ADR-0069).
-	// Unconditional — the marker was written by a run that may have been configured
-	// differently — and with no marker it is one stat.
+	// The marker was written by a run that may have been configured differently, so
+	// nothing about the configuration below exempts it — and with no marker it is
+	// one stat.
+	//
+	// A ONE-SHOT is exempt, and that is not a configuration exemption. -enroll and
+	// -list do one thing and quit: neither ever reaches a serving state, so neither
+	// reaches confirmAfter below, so neither can ever clear the marker it would
+	// have claimed. ADR-0069's probation turns on `started`, and a one-shot that
+	// claimed it would leave the applied release recorded as having had its turn
+	// without having taken it — after which the first REAL start finds
+	// started=true and demotes a build nothing has actually tried. Provisioning a
+	// freshly deployed node is exactly when that happens.
+	oneShot := *acct.enroll || *doList
 	updTarget := updateTarget(*upd.target)
-	if updTarget != "" {
+	if updTarget != "" && !oneShot {
 		checkStartupDemotion(updTarget)
+	}
+
+	// One-shot enrollment (issue #170, ADR-0071): redeem a claim code for this
+	// node's first device credential and quit. It runs before every other startup
+	// check because it PROVISIONS rather than runs — a node being enrolled needs
+	// no exit key, no advertise address and no reachable coordinator, and a
+	// volunteer misconfiguration should not stand between an operator and a
+	// credential.
+	if *acct.enroll {
+		if err := runEnrollment(context.Background(), acct, *deviceCredDir); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
 
 	// The volunteer opt-ins (issue #12) add serve roles to whatever -role names, and
@@ -204,6 +232,15 @@ func main() {
 		RelayForwardMaxTotal:   *relayFwdTotal,
 		RelayForwardPeerRate:   relayFwdRate,
 	}
+	// Device-credential renewal through the account service (issue #170,
+	// ADR-0071). Nil when none is configured, which core reads as renewal off;
+	// a configuration that cannot work is fatal here rather than a node that
+	// quietly never renews. Enrollment ships with renewal, per ADR-0046 §6.
+	renew, err := setupAccountService(acct, *deviceCredDir, roles)
+	if err != nil {
+		log.Fatal(err)
+	}
+	cfg.DeviceRenew = renew
 	if limits.SpeedCap != 0 || limits.MonthlyQuota != 0 {
 		// Echo the declared limits back at startup. An operator who mistyped "20Mb"
 		// for "20Mbit", or who has their billing day wrong, should find out here and
