@@ -17,8 +17,8 @@
 //     domain resolves to *after* the lockdown is already armed, which
 //     refreshKillSwitchAllowIP folds in live rather than waiting for the
 //     next connect. This only holds because splittunnel.go's arm() and
-//     learn() share one lock across the exact moment arming happens (issue
-//     #73) — without that, an address learned right around arming could
+//     learn() share one lock across the exact moment arming happens
+//     (old #73) — without that, an address learned right around arming could
 //     miss both the initial allowlist snapshot and the live refresh,
 //     leaving it wrongly blocked rather than working under lockdown,
 //   - loopback (the local SOCKS server) and DHCP (to keep the lease alive).

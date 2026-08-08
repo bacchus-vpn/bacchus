@@ -151,7 +151,7 @@ func (e *linuxEnforcer) Recover() {
 	e.os.recoverKillSwitch()
 }
 
-// ReserveUnderlay forwards to the current excluder. Issue #109's ordering
+// ReserveUnderlay forwards to the current excluder. Old #109's ordering
 // guarantee — the address is excluded BEFORE the dial that uses it — comes from
 // reserve() being synchronous on the dial path, and that is preserved here: no
 // queue, no goroutine, and mu is released before the call so a slow socket

@@ -2,8 +2,8 @@
 // stack (gVisor's netstack — pure Go, Apache-2.0, no GPL dependency) and
 // forwards each intercepted flow into the client's own local SOCKS5 listener,
 // exactly as if it were a SOCKS5-aware application: TCP flows use SOCKS5
-// CONNECT (handleTCP/dialSOCKS), UDP flows use SOCKS5 UDP ASSOCIATE (issue
-// #41, handleGeneralUDP/dialSOCKSUDPAssociate in udprelay.go). Both reuse the
+// CONNECT (handleTCP/dialSOCKS), UDP flows use SOCKS5 UDP ASSOCIATE
+// (old #41, handleGeneralUDP/dialSOCKSUDPAssociate in udprelay.go). Both reuse the
 // same WebRTC-tunnelled SOCKS server in core/client.go, which now answers
 // both SOCKS commands (core/udprelay.go) — this file has no tunnel-internal
 // knowledge either way, just standard SOCKS5 client behavior.
@@ -215,7 +215,7 @@ func handleTCP(r *tcp.ForwarderRequest, socksAddr string, policy *bypassPolicy) 
 
 // handleUDP dispatches an intercepted UDP flow: DNS (port 53) keeps its
 // pre-existing DNS-over-TCP special case (handleDNSUDP); everything else is
-// general UDP forwarding (issue #41, handleGeneralUDP) — QUIC/HTTP3, VoIP,
+// general UDP forwarding (old #41, handleGeneralUDP) — QUIC/HTTP3, VoIP,
 // games, or any other UDP application, tunnelled the same way TCP already is.
 func handleUDP(r *udp.ForwarderRequest, socksAddr, dnsUpstream string, policy *bypassPolicy) {
 	if r.ID().LocalPort == 53 {
@@ -257,7 +257,7 @@ func handleDNSUDP(r *udp.ForwarderRequest, socksAddr, dnsUpstream string, policy
 	}
 }
 
-// handleGeneralUDP bridges one intercepted non-DNS UDP flow (issue #41) to
+// handleGeneralUDP bridges one intercepted non-DNS UDP flow (old #41) to
 // either a direct local UDP dial or the tunnel's SOCKS5 UDP ASSOCIATE, per
 // policy — mirrors handleTCP exactly, including why "direct" only actually
 // leaves the machine when an exclusion route already exists for it

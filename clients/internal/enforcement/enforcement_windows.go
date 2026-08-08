@@ -93,7 +93,7 @@ func (e *windowsEnforcer) Recover() { e.os.recoverKillSwitch() }
 // down to the session, so a dial before bring-up and a failover dial after it
 // land in one set rather than two.
 //
-// Issue #109's ordering guarantee — the address is excluded *before* the dial
+// Old #109's ordering guarantee — the address is excluded *before* the dial
 // that uses it, never after — comes from reserve() being synchronous on the
 // dial path. That is preserved here: no queue, no goroutine, no deferred
 // install, and mu is released before the call so a slow PowerShell shell-out

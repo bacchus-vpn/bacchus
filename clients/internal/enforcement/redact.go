@@ -1,4 +1,4 @@
-// Log redaction for OS-command diagnostics (issue #140).
+// Log redaction for OS-command diagnostics (old #140).
 //
 // Every platform's osNet implementation logs failing OS commands — that is
 // what made the IPv6-loopback firewall rejection visible at all — and every
@@ -59,7 +59,7 @@ func RedactAddresses(s string) string { return redactIPs(s) }
 
 // redactIPs replaces every IP-literal-shaped substring in s with "<ip>".
 // Applied to anything derived from an OS command or its output before it
-// reaches the client's log (issue #140). Matches uniformly rather than trying
+// reaches the client's log (old #140). Matches uniformly rather than trying
 // to single out "sensitive" addresses from the client's own local
 // gateway/TUN ones — that's what keeps it robust against whatever call site
 // is added next, at the cost of also redacting addresses that were already
