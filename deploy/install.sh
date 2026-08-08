@@ -855,6 +855,13 @@ $progname: This exit's EXIT_KEY is its permanent identity and is stored only in
 $progname: $(p "$etc_dir/node.env"). Back that file up if you want this exit to keep
 $progname: the same id across a rebuild. It was never printed and never left
 $progname: this host.
+
+$progname: Keep it to ONE copy on this box (issue #227). Edit that file in place
+$progname: and put any backup somewhere that is not this machine: a second copy
+$progname: beside it — a .save, a .bak, a copy taken before an edit — is a second
+$progname: private key with none of the attention the live one gets, and a name
+$progname: like .save is one restore away from reinstating an identity the signed
+$progname: directory does not name.
 EOF
 }
 

@@ -302,6 +302,28 @@ and not echoed even under `sh -x` — the generator runs in a subshell with trac
 disabled, and `deploy/install-test.sh` asserts exactly that. Back that file up if
 you want the exit to keep its identity across a rebuild; nothing else has a copy.
 
+**Exactly one copy per node, and keeping it that way is an operator rule rather
+than something the installer can enforce** (issue #227). The key is a secret *and*
+an identity — a node's id is its public half — so a second copy on the same box
+has the same value as the live one and none of its attention: it is not rotated
+when the live one is, not destroyed when the node is decommissioned, and not in
+any inventory. It arrives the ordinary way, as a `node.env.save` or a `.bak` or a
+copy taken before an edit, and it bites the ordinary way: `.save` is a name that
+says *restore me*, and a restore — or an `EnvironmentFile=` glob that widens from
+`*.env` to `node.env*` — reinstates an identity the signed directory does not
+name, after which the node is quietly unreachable as a relay hop instead of
+failing loudly. Edit the file in place, and keep the backup off the machine.
+
+If you do find a second copy, compare the two by hash before removing it rather
+than printing either. Two different keys means the other file holds a *previous*
+identity, which may still appear in an old signed directory or a cached snapshot,
+and that is worth knowing before it is destroyed:
+
+```sh
+grep -hs '^EXIT_KEY=' /etc/bacchus/node.env      | sha256sum
+grep -hs '^EXIT_KEY=' /etc/bacchus/node.env.save | sha256sum
+```
+
 ### Testing it
 
 `deploy/install-test.sh` runs install → verify → uninstall → verify-clean for
