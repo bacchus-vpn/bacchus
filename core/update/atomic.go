@@ -54,7 +54,7 @@ import (
 //     every check does. The next check writes the same MinSeq again, so a lost
 //     rename costs one generation of a file this peer was legitimately holding a
 //     moment ago and repairs itself unprompted. That is core/policy's argument
-//     unchanged, and MinSeq plays the part MinSeq plays there.
+//     unchanged, down to the field name it is about.
 //   - ClearPending. A lost rename restores a Pending record naming a staged file
 //     Apply has already renamed onto the target, so the next check re-verifies a
 //     path that is gone, forgets it and re-downloads — a wasted download, not a
@@ -97,9 +97,9 @@ func writeAtomic(path string, b []byte, mode fs.FileMode) error {
 // — core/atomicfile.WriteDurable's own posture, and the opposite of syncDir
 // below. The difference is what the caller can still do about it: syncDir's
 // callers run AFTER a rename that has already published a binary, where
-// unwinding a successful publish would be worse than the lost fsync. Both of
-// these run BEFORE anything moves, so reporting costs one skipped update and
-// leaves the decision with the caller.
+// unwinding a successful publish would be worse than the lost fsync. Both of the
+// writes above run BEFORE anything moves, so reporting costs one skipped update
+// and leaves the decision with the caller.
 func writeAtomicDurable(path string, b []byte, mode fs.FileMode) error {
 	if err := atomicfile.WriteDurable(path, b, mode); err != nil {
 		return fmt.Errorf("update: %w", err)
