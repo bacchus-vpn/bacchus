@@ -206,6 +206,13 @@ func checkOnce(ctx context.Context, u *update.Updater) {
 // for was written by a PREVIOUS run that may have been configured differently, and
 // because with no marker it is one stat.
 //
+// It demotes when a previous START OF THE APPLIED RELEASE did not confirm, which
+// is not the same as "a release was applied and not confirmed" — an apply runs in
+// the old binary, so this process's own start is the release's trial and returns
+// nil. core/update.CheckStartup carries the whole argument; ADR-0069 records why
+// the distinction is the difference between a channel that delivers a release and
+// one that rolls every release back on the restart that hands over to it.
+//
 // A demotion exits with a distinct status. Under Restart=always the supervisor
 // re-execs the restored binary two seconds later; continuing would mean the new
 // release still running while the path claims the old one, which is the worst of

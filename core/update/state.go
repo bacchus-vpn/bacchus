@@ -17,14 +17,33 @@ const stateVersion = 1
 // Marker is the confirmation marker written beside a target before an apply and
 // cleared once the new binary proves itself. See Apply and CheckStartup.
 //
-// It is small on purpose. Everything in it is for a human reading a log line after
-// a demotion; nothing in it is trusted to make a decision, because a marker is a
-// file an attacker with write access could author, and the only thing this build
-// does on finding one is put a binary IT wrote back where it already was.
+// It is small on purpose. Everything in it EXCEPT Started is for a human reading a
+// log line after a demotion; nothing in it is trusted to make a decision beyond
+// the two this package makes on it, because a marker is a file an attacker with
+// write access could author — and both decisions only ever put a binary THIS build
+// wrote back where it already was, or leave it alone.
 type Marker struct {
 	Release  string `json:"release"`
 	Previous string `json:"previous"`
 	Artifact string `json:"artifact"` // content-addressed name, for the log line
+
+	// Started records that a process of the applied release has reached
+	// CheckStartup. False means no process of it has ever run: either the apply's
+	// handover has not happened yet, or the binary cannot execute at all.
+	//
+	// It is the field that makes the marker a PROBATION rather than a trap. Without
+	// it the marker means only "an apply happened and was not confirmed", which the
+	// applied release's own first start satisfies — so the first start would demote
+	// every release, including every release that works. See CheckStartup.
+	//
+	// It is also the discriminator between the two watchdogs, and that is why it is
+	// on disk rather than in memory. A started marker belongs to the in-process
+	// check: a process reached main, so a crash loop puts it through CheckStartup
+	// again and the demotion happens there. An UNSTARTED marker on a unit that has
+	// given up restarting is the one case nothing in the process can reach — the
+	// binary never got as far as main — and it is what deploy/bacchus-update-rollback.sh
+	// acts on. Neither can act on the other's case, so they cannot fight.
+	Started bool `json:"started"`
 }
 
 func writeMarker(path string, m Marker) error {
