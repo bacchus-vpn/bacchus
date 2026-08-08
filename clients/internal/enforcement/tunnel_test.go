@@ -184,8 +184,8 @@ func startForTest(t *testing.T, f *fakeOS, p Policy) (*tunnel, error) {
 // physical interface; if the split-default route is installed before the
 // coordinator/STUN/TURN exclusions exist, the session's own transport is
 // captured by the route it just installed and the connection dies with it
-// (issue #6). Same reasoning for the bypass set (issue #64's exclude half)
-// and for the pool's already-dialled underlays (issue #109).
+// (old #6). Same reasoning for the bypass set (old #64's exclude half)
+// and for the pool's already-dialled underlays (old #109).
 func TestBringUpExcludesTheControlPlaneBeforeTheRouteFlips(t *testing.T) {
 	f := newFakeOS()
 	tn, err := startForTest(t, f, testPolicy(false, BypassModeExclude, []string{"198.51.100.0/24"}))
@@ -196,7 +196,7 @@ func TestBringUpExcludesTheControlPlaneBeforeTheRouteFlips(t *testing.T) {
 
 	ops := f.seq()
 	mustBefore(t, ops, "exclude 192.0.2.10", "splitDefault",
-		"a coordinator captured by the tunnel's own default route kills the session carrying it (issue #6)")
+		"a coordinator captured by the tunnel's own default route kills the session carrying it (old #6)")
 	mustBefore(t, ops, "exclude 198.51.100.0/24", "splitDefault",
 		"a bypass destination must be carved out before anything can capture it, never after")
 	mustBefore(t, ops, "createTUN", "splitDefault",
@@ -375,7 +375,7 @@ func TestCloseReleasesDNSOnceEgressIsBack(t *testing.T) {
 		"the resolver goes back before the routes it was resolving through are pulled")
 }
 
-// TestIncludeModeNeverInstallsASplitDefault is issue #64, which is the bug
+// TestIncludeModeNeverInstallsASplitDefault is old #64, which is the bug
 // this mode exists because of: include mode captures nothing by default and
 // pulls only the listed set in. Installing a split-default here recaptures
 // every "direct" dial straight back into the tunnel it was meant to avoid.
@@ -389,7 +389,7 @@ func TestIncludeModeNeverInstallsASplitDefault(t *testing.T) {
 
 	ops := f.seq()
 	if i := indexOf(ops, "splitDefault"); i >= 0 {
-		t.Errorf("include mode installed a split-default route (issue #64): everything not in the include set would loop back into the tunnel\nsequence: %v", ops)
+		t.Errorf("include mode installed a split-default route (old #64): everything not in the include set would loop back into the tunnel\nsequence: %v", ops)
 	}
 	if indexOf(ops, "include 198.51.100.0/24") < 0 {
 		t.Errorf("include mode never routed its include set into the tunnel adapter, so nothing would be captured at all\nsequence: %v", ops)

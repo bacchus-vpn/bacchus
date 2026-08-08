@@ -1,4 +1,4 @@
-// Package accounting implements the v1 metering stub (issue #20): a client
+// Package accounting implements the v1 metering stub (old #20): a client
 // and an exit each sign a claim of "N bytes over interval T" so that neither
 // side can unilaterally inflate the count a receipt records. This proves the
 // accounting hook is buildable; it is deliberately not fraud-proof. Co-signing
@@ -70,11 +70,11 @@ type Receipt struct {
 	// the ONE datum a capacity sample needs that the byte count does not carry, and
 	// the one part of a receipt that is NOT co-signed: the exit cannot verify "I wanted
 	// more", so it is deliberately absent from canonical() and unprotected by the
-	// co-signature (issue #158, an ADR-0021 amendment; the weakness is §8.2). It is
+	// co-signature (old #158, an ADR-0021 amendment; the weakness is §8.2). It is
 	// instead bound to the co-signing client by SignReport when a capacity-report
 	// carries this receipt to the coordinator, so a NODE holding the receipt cannot
 	// forge or flip it. omitempty keeps a receipt from a peer that never sets it, and
-	// every receipt predating #158, byte-for-byte unchanged on disk and on the wire.
+	// every receipt predating old #158, byte-for-byte unchanged on disk and on the wire.
 	Saturated bool `json:"saturated,omitempty"`
 }
 
@@ -130,7 +130,7 @@ func appendString(b []byte, s string) []byte {
 	return append(b, s...)
 }
 
-// capacityReportDomain separates a capacity-report signature (issue #158) from the
+// capacityReportDomain separates a capacity-report signature (old #158) from the
 // receipt co-signature. Both cover the receipt's claim bytes; a distinct domain tag
 // (and the appended saturation byte) means the client's receipt ClientSig can never be
 // replayed as a report signature, nor vice versa.
@@ -155,7 +155,7 @@ func reportCanonical(r Receipt) []byte {
 }
 
 // SignReport produces the client's signature over a receipt and its saturation bit,
-// for the capacity-report that carries the receipt to the coordinator (issue #158, an
+// for the capacity-report that carries the receipt to the coordinator (old #158, an
 // ADR-0021 amendment). It is a SECOND signature, separate from the receipt's
 // co-signature: the co-signature proves the throughput both parties agreed to, this
 // proves WHO asserted the (un-co-signable) saturation bit.
@@ -170,7 +170,7 @@ func SignReport(key ed25519.PrivateKey, r Receipt) []byte {
 
 // VerifyReport checks a capacity-report signature against the receipt's client
 // accounting key, so a coordinator accepts a saturation bit only from the client that
-// co-signed the receipt (issue #158). It does NOT re-check the co-signature — call
+// co-signed the receipt (old #158). It does NOT re-check the co-signature — call
 // Receipt.Verify for that. The two are separate proofs: Verify covers the throughput,
 // this covers the saturation bit riding beside it.
 func VerifyReport(r Receipt, sig []byte) error {
@@ -305,7 +305,7 @@ func ClientCosign(rw io.ReadWriter, key ed25519.PrivateKey, localBytes uint64) (
 // cosign the exit's claimed byte count for one interval. Co-signing only
 // stops *unilateral* inflation if the client actually checks the claim
 // against what it saw itself -- a client that signs whatever the exit sends
-// defeats the whole point (issue #20: "best-effort proof, not trustless
+// defeats the whole point (old #20: "best-effort proof, not trustless
 // accounting").
 //
 // The default is exact match: client and exit are counting the same wire
@@ -394,7 +394,7 @@ func (c *Counter) Delta() uint64 {
 
 // TakeSaturated reports whether the interval just closing was demand-saturated and
 // clears the flag for the next one, partitioning saturation into the same
-// non-overlapping intervals Delta partitions the byte count into (issue #158). The
+// non-overlapping intervals Delta partitions the byte count into (old #158). The
 // client reads it once per accounting interval and stamps the result onto the receipt's
 // Saturated bit. Nil-safe (an unmetered client reports unsaturated).
 func (c *Counter) TakeSaturated() bool {
@@ -406,13 +406,13 @@ func (c *Counter) TakeSaturated() bool {
 
 // WatchSaturation wraps the client's tunnel-write side so that a single write which
 // blocks for at least d — the tunnel applying backpressure while the application still
-// had bytes to send — marks the current interval saturated (issue #158, design §5.3).
+// had bytes to send — marks the current interval saturated (old #158, design §5.3).
 //
 // It watches the UPLOAD direction only, and that is deliberate: a blocked write to the
 // tunnel is UNAMBIGUOUS evidence the client wanted to move more than the node's link
 // carried. The download direction is not — a slow tunnel READ could be the node
 // throttling OR the remote server simply being slow, and blaming the node for the
-// latter would defame it — so it is left to a follow-up (#160, design §8.2/§9.4). The
+// latter would defame it — so it is left to a follow-up (old #160, design §8.2/§9.4). The
 // bit therefore UNDER-reports saturation, which errs toward under-rating a node, the
 // direction the design prefers (over-rating hurts users now; under-rating only wastes
 // capacity, design §6.3). d is a parameter, not a constant, so the caller owns the

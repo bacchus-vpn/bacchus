@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
+
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 )
 
 // cacheVersion is the on-disk state file's own format version, independent of the
@@ -129,10 +130,13 @@ func (c *Cache) Load(v *Verifier, now time.Time) (minSeq uint64, p Policy, ok bo
 // verified are the bytes re-verified on the next load; re-serializing a parsed form
 // would put this enforcer's own marshaling between the signature and the check.
 //
-// The write is atomic (temp file, then rename) so a crash mid-write cannot leave a
-// truncated state file, which would otherwise lose the floor.
+// The write is atomic (a complete file renamed over the target) so a crash
+// mid-write cannot leave a truncated state file, which would otherwise lose the
+// floor. Whether the RENAME itself is made durable depends on whether this write
+// raises the floor — see writeAtomic.
 func (c *Cache) Store(raw []byte, seq uint64) error {
 	prev, _ := c.peek()
+	raises := seq > prev
 	if seq < prev {
 		seq = prev
 	}
@@ -141,7 +145,7 @@ func (c *Cache) Store(raw []byte, seq uint64) error {
 	if err != nil {
 		return fmt.Errorf("policy: marshal cache: %w", err)
 	}
-	return c.writeAtomic(b)
+	return c.writeAtomic(b, raises)
 }
 
 // StoreFloor raises the rollback floor without recording a bundle. It is how an
@@ -149,6 +153,7 @@ func (c *Cache) Store(raw []byte, seq uint64) error {
 // preserves any bundle already on disk.
 func (c *Cache) StoreFloor(seq uint64) error {
 	prev, f := c.peek()
+	raises := seq > prev
 	if seq < prev {
 		seq = prev
 	}
@@ -157,7 +162,7 @@ func (c *Cache) StoreFloor(seq uint64) error {
 	if err != nil {
 		return fmt.Errorf("policy: marshal cache: %w", err)
 	}
-	return c.writeAtomic(b)
+	return c.writeAtomic(b, raises)
 }
 
 // peek reads the current state file for its floor, tolerating every failure: a
@@ -178,33 +183,40 @@ func (c *Cache) peek() (uint64, cacheFile) {
 	return f.MinSeq, f
 }
 
-// writeAtomic writes b to c.path via a temporary file in the same directory and a
-// rename, so a reader never observes a partial state file.
-func (c *Cache) writeAtomic(b []byte) error {
-	dir := filepath.Dir(c.path)
-	tmp, err := os.CreateTemp(dir, ".policy-state-*")
-	if err != nil {
-		return fmt.Errorf("policy: create temp state in %s: %w", dir, err)
+// writeAtomic installs b at c.path through core/atomicfile: a complete file is
+// staged in the same directory, flushed and renamed over the target, so a reader
+// never observes a partial state file. 0600, because write access to this file
+// is write access to this coordinator's rollback floor.
+//
+// # Why raising the floor is written durably and re-recording it is not
+//
+// A file's own flush makes the BYTES durable. It says nothing about the
+// directory entry, so a power loss immediately after the rename can come back
+// holding the previous file. Issue #188 ruled that boundary per WRITE rather
+// than per file, and this is the caller the distinction was invented for.
+//
+// cmd/coordinator calls Store on EVERY successful refresh — policyRefresh is 10
+// seconds — and almost all of those re-record a floor that has not moved. Losing
+// one of those renames costs nothing: the file reverts to a state this
+// coordinator was legitimately in ten seconds ago, floor and bundle together,
+// and the next refresh re-records it. Paying a directory fsync 8,640 times a day
+// to protect a write that repairs itself is not a trade worth making.
+//
+// A write that RAISES the floor is the opposite. That one is not re-emitted: it
+// records that this enforcer has seen a generation, and nothing regenerates that
+// knowledge except another honest fetch of the same document. Lose it, and an
+// attacker who controls the fetch can serve the previous generation — genuinely
+// signed, correctly delegated, unexpired — and the ratchet has forgotten why it
+// should refuse. So a floor raise takes the directory fsync, and it is cheap
+// exactly because it is rare: once per published generation, not once per
+// refresh.
+func (c *Cache) writeAtomic(b []byte, raisesFloor bool) error {
+	install := atomicfile.Write
+	if raisesFloor {
+		install = atomicfile.WriteDurable
 	}
-	name := tmp.Name()
-	defer func() { _ = os.Remove(name) }() // no-op once the rename has succeeded
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("policy: chmod temp state: %w", err)
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return fmt.Errorf("policy: write temp state: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("policy: sync temp state: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("policy: close temp state: %w", err)
-	}
-	if err := os.Rename(name, c.path); err != nil {
-		return fmt.Errorf("policy: install state %s: %w", c.path, err)
+	if err := install(c.path, b, 0o600); err != nil {
+		return fmt.Errorf("policy: persist state: %w", err)
 	}
 	return nil
 }

@@ -9,7 +9,7 @@ import (
 )
 
 // TestNilLimiterIsInert: no declared cap = the inert nil *Limiter, which is every
-// node in today's fleet. This is what keeps #143 opt-in with zero behaviour change
+// node in today's fleet. This is what keeps old #143 opt-in with zero behaviour change
 // for anyone who does not use it.
 func TestNilLimiterIsInert(t *testing.T) {
 	if NewLimiter(0) != nil {

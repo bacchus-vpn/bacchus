@@ -4,7 +4,7 @@
 // the current default route, excluding the coordinator/STUN/TURN endpoints
 // from the tunnel (so the WebRTC session itself doesn't loop into the TUN
 // device), installing the tunnel's split-default route, blocking IPv6 on the
-// physical adapter, and (split-tunnel "include" mode only, issue #64) routing
+// physical adapter, and (split-tunnel "include" mode only, old #64) routing
 // specific destinations *into* the tunnel adapter instead of the split-default
 // capturing everything.
 //
@@ -91,8 +91,8 @@ func (o *winOS) runPS(script string) (string, error) {
 		// command's first line plus PowerShell's actual message; the IPv6-loopback
 		// firewall rejection that fail-closed the tunnel was invisible without this.
 		//
-		// Both are cut to their first line and redacted before logging (issue
-		// #140): New-NetRoute and New-NetFirewallRule calls carry the
+		// Both are cut to their first line and redacted before logging
+		// (old #140): New-NetRoute and New-NetFirewallRule calls carry the
 		// coordinator/exit/relay addresses as literal arguments, and
 		// PowerShell's own multi-line error rendering re-echoes the failing
 		// source line a second time as part of its "At line:N char:M" position
@@ -139,7 +139,7 @@ func (o *winOS) runPS(script string) (string, error) {
 // defaultGateway returns the current best (lowest-metric) IPv4 default
 // route: its next hop, and the physical interface carrying it. It also
 // best-effort resolves that same interface's IPv6 default route, if any
-// (issue #117, gatewayInfo.nextHopV6) — a missing/absent IPv6 route is not an
+// (old #117, gatewayInfo.nextHopV6) — a missing/absent IPv6 route is not an
 // error, since most networks and most of the tunnel's lifetime have none
 // (disablePhysicalIPv6); only the IPv4 lookup is required to succeed.
 func (o *winOS) defaultGateway() (gatewayInfo, error) {
@@ -183,7 +183,7 @@ func (o *winOS) addExclusionRoutes(prefixes []string, gw gatewayInfo) {
 	}
 }
 
-// addExclusionRoutesV6 is addExclusionRoutes' IPv6 counterpart (issue #117),
+// addExclusionRoutesV6 is addExclusionRoutes' IPv6 counterpart (old #117),
 // used by poolExcluder for an IPv6 reality exit address. A no-op when gw has
 // no IPv6 default route (nextHopV6 == "") — there is then nothing to route an
 // exclusion via, which is safe: physical IPv6 is disabled while the tunnel is
@@ -201,7 +201,7 @@ func (o *winOS) addExclusionRoutesV6(prefixes []string, gw gatewayInfo) {
 }
 
 // addInclusionRoutes is addExclusionRoutes' mirror for split-tunnel "include"
-// mode (issue #64): instead of carving a destination *out* of the tunnel's
+// mode (old #64): instead of carving a destination *out* of the tunnel's
 // split-default route, it routes the destination *into* the tunnel adapter —
 // needed because include mode never installs a split-default in the first
 // place (see addSplitDefaultRoute), so without this, the bypass/include set
@@ -391,10 +391,10 @@ func (o *winOS) configureTunInterface(addr string, prefixLen int) error {
 // overriding the real default route without removing it. Split-tunnel
 // "exclude" mode (the default) needs this: it captures everything into the
 // tunnel and relies on addExclusionRoutes to carve out the bypass set.
-// "include" mode must NOT call this (issue #64) — it wants the opposite,
+// "include" mode must NOT call this (old #64) — it wants the opposite,
 // capturing *nothing* by default and pulling only the bypass/include set in
 // via addInclusionRoutes instead, so the real default route stays authoritative
-// for everything else. Calling this in include mode is exactly the bug #64
+// for everything else. Calling this in include mode is exactly the bug old #64
 // fixed: it would recapture every "direct" dial straight back into the tunnel.
 func (o *winOS) addSplitDefaultRoute(addr string) error {
 	for _, prefix := range []string{"0.0.0.0/1", "128.0.0.0/1"} {

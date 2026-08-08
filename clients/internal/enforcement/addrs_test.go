@@ -13,7 +13,7 @@ func TestHostOf(t *testing.T) {
 		"1.2.3.4:8080":             "1.2.3.4",
 		"not-a-valid-endpoint":     "",
 		"":                         "",
-		// Bracketed IPv6 (issue #117): the "count 2+ colons -> drop a leading
+		// Bracketed IPv6 (old #117): the "count 2+ colons -> drop a leading
 		// scheme" heuristic used to fire on these too, slicing into the
 		// address itself instead of leaving it for net.SplitHostPort, which
 		// already understands the bracket form natively.
@@ -48,7 +48,7 @@ func TestEnsureCIDR(t *testing.T) {
 		"1.2.3.4":       "1.2.3.4/32",
 		"1.2.3.4/32":    "1.2.3.4/32",
 		"10.0.0.0/8":    "10.0.0.0/8",
-		"2001:db8::1":   "2001:db8::1/128", // issue #117: removeRoutes reaps IPv6 exclusions through this same helper
+		"2001:db8::1":   "2001:db8::1/128", // old #117: removeRoutes reaps IPv6 exclusions through this same helper
 		"::1":           "::1/128",
 		"2001:db8::/32": "2001:db8::/32", // already a CIDR — passes through regardless of family
 	}
@@ -100,7 +100,7 @@ func TestIsIPv6Literal(t *testing.T) {
 	}
 }
 
-// TestFirstLine guards the other half of issue #140: PowerShell's multi-line
+// TestFirstLine guards the other half of old #140: PowerShell's multi-line
 // "At line:N char:M" position block re-echoes the failing source line (in
 // the OS display language, and sometimes console-width-truncated mid-token),
 // which can hand redactIPs a partial address fragment it can't recognize as
@@ -120,7 +120,7 @@ func TestFirstLine(t *testing.T) {
 	}
 }
 
-// TestRedactIPs guards issue #140: a PowerShell command line or error string
+// TestRedactIPs guards old #140: a PowerShell command line or error string
 // naming a real coordinator/exit/relay address must not reach bacchus.log
 // intact. Table cases mirror the actual shapes runPS sees in this package —
 // addExclusionRoutes' single-line New-NetRoute, killswitch.go's comma-joined

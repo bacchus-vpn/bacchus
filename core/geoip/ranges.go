@@ -79,7 +79,7 @@ func LoadRanges(rangesV4Path, rangesV6Path string) (*DB, error) {
 // Skipping past that would load PART of a table and report success, and a partially
 // loaded country table is the specific failure this package exists to remove: every
 // address in the missing ranges falls back to the node's own self-reported country, with
-// nothing failing visibly (issue #136). So structural damage is fatal and semantic
+// nothing failing visibly (old #136). So structural damage is fatal and semantic
 // absence is a gap — the same split asn.Read draws for the AS table.
 //
 // The exact field count earns its strictness on the likeliest staging mistake of all:

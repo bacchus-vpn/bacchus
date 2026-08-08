@@ -18,7 +18,7 @@ import (
 // rather than a stutter of large gulps.
 const burstBytes = 64 * 1024
 
-// Limiter enforces a node's declared aggregate speed cap (issue #143) on the data
+// Limiter enforces a node's declared aggregate speed cap (old #143) on the data
 // path. One Limiter is shared by every session on the node, which is what makes
 // the cap AGGREGATE — the operator is capping what leaves their house, not what
 // any one stranger gets. Sharing the bucket is the enforcement.
@@ -51,7 +51,7 @@ type Limiter struct {
 
 // NewLimiter returns a Limiter for the declared cap, or nil (inert) when the cap
 // is zero/unset — which is every node in today's datacenter fleet, and is what
-// keeps #143 opt-in with no behaviour change for anyone who does not use it.
+// keeps old #143 opt-in with no behaviour change for anyone who does not use it.
 func NewLimiter(c Rate) *Limiter {
 	if c == 0 {
 		return nil

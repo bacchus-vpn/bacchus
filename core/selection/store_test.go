@@ -1,8 +1,14 @@
 package selection
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -142,5 +148,126 @@ func TestStoreResetForgets(t *testing.T) {
 	s2, _ := Open(path)
 	if _, ok := s2.Best("net1", "RU", now); ok {
 		t.Fatal("Reset should have removed the persisted file")
+	}
+}
+
+// Issue #188: this store used to stage under a FIXED name (path + ".tmp"), so a
+// second saver staged into the same file and the rename installed a mixture.
+//
+// Asserted structurally rather than by racing: a file sitting at the old staged
+// name is now untouched by a save. Under the old writer it WAS the staging area.
+func TestStorePutDoesNotStageUnderThePredictableName(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "selection.json")
+	squatter := path + ".tmp"
+	if err := os.WriteFile(squatter, []byte("not ours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, _ := Open(path)
+	if err := s.Put(rec("net1", "RU", "BY", "reality", 25, now)); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := os.ReadFile(squatter)
+	if err != nil {
+		t.Fatalf("the save consumed %s, so it is still staging under a name another saver can pick: %v", squatter, err)
+	}
+	if string(b) != "not ours" {
+		t.Errorf("%s now holds %q; a save must stage under a name it created itself", squatter, b)
+	}
+}
+
+// The same defect from the other side. Two stores at one path is what two client
+// processes sharing a state directory are; every state the file is observed in
+// has to be a whole generation one of them wrote.
+//
+// A mixture here is not fatal — Open discards a cache it cannot parse — so what
+// this pins is that the cache does not silently lose itself under contention,
+// which is a thing that would only ever show up as unexplained slow reconnects.
+func TestStoreConcurrentSaversNeverInstallAMixture(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "selection.json")
+
+	// Distinct country sets of very different sizes, so an interleaving is
+	// detectable by content as well as by a parse failure.
+	sets := [2][]Record{}
+	for i := 0; i < 40; i++ {
+		sets[0] = append(sets[0], rec("netA", "RU", fmt.Sprintf("A%02d", i), "reality", 20+i, now))
+	}
+	for i := 0; i < 4; i++ {
+		sets[1] = append(sets[1], rec("netB", "DE", fmt.Sprintf("B%02d", i), "webrtc", 90+i, now))
+	}
+
+	var writers, readers sync.WaitGroup
+	stop := make(chan struct{})
+	var reads atomic.Int64
+
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			b, err := os.ReadFile(path)
+			if err != nil || len(b) == 0 {
+				continue
+			}
+			var got []Record
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Errorf("a reader observed %d bytes of unparseable JSON: %v — two savers interleaved into one staged file", len(b), err)
+				return
+			}
+			for _, r := range got {
+				if !strings.HasPrefix(r.Country, "A") && !strings.HasPrefix(r.Country, "B") {
+					t.Errorf("a reader observed a record no saver wrote: %+v", r)
+					return
+				}
+			}
+			reads.Add(1)
+		}
+	}()
+
+	for i := range sets {
+		writers.Add(1)
+		go func(i int) {
+			defer writers.Done()
+			// Opened empty and pointed at the shared path, rather than
+			// Open(path): two savers that each LOAD the file converge on the
+			// union of both sets, and a file that always contains everything
+			// makes a mixture undetectable. Kept disjoint and very different in
+			// size, each generation is unmistakably one writer's.
+			s, _ := Open("")
+			s.path = path
+			for n := 0; n < 30; n++ {
+				for _, r := range sets[i] {
+					if err := s.Put(r); err != nil {
+						t.Errorf("Put: %v", err)
+						return
+					}
+				}
+			}
+		}(i)
+	}
+	writers.Wait()
+	// The writers are done, so the file certainly exists. Do NOT stop the
+	// reader until it has actually looked at least once: under a loaded machine
+	// — `go test ./...` across every package at once — its goroutine can fail to
+	// be scheduled for the whole few milliseconds the writers take, and a run
+	// where it observed nothing is a green test that checked nothing. Bounded,
+	// so a reader that returned early on a real failure cannot hang the test.
+	for deadline := time.Now().Add(5 * time.Second); reads.Load() == 0 && time.Now().Before(deadline); {
+		runtime.Gosched()
+	}
+	close(stop)
+	readers.Wait()
+
+	if reads.Load() == 0 {
+		t.Error("no reader ever observed the file; this test proved nothing")
 	}
 }

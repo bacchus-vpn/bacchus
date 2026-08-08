@@ -67,7 +67,7 @@ type Enforcer interface {
 	// poolroutes.go: "the initial pooled Connect dials reality before
 	// startTunnel runs"). A caller that wired core.Config.OnUnderlayDial to
 	// the Session it does not have yet would silently drop that first
-	// address, which is precisely the leak issue #109 closed. So the wiring
+	// address, which is precisely the leak old #109 closed. So the wiring
 	// point is the Enforcer, once, for the whole session lifetime: addresses
 	// reserved before Start are recorded and installed by bring-up, and
 	// addresses reserved after it install live.
@@ -114,14 +114,14 @@ type Session interface {
 	// client is about to dial (core.Config.OnUnderlayDial) — from the
 	// tunnel's route before the dial completes, so the dial rides the
 	// physical interface instead of looping into the tunnel it is carrying.
-	// See clients/internal/enforcement/poolroutes.go's poolExcluder and issue #109: the
+	// See clients/internal/enforcement/poolroutes.go's poolExcluder and old #109: the
 	// Reality transport's exit address is only known at dial time, not in
 	// advance like the WebRTC/TURN control-plane endpoints Policy already
 	// carries, so it cannot be excluded up front in Start and needs this
 	// separate, synchronous, dial-path hook instead. An implementation for
 	// a transport pool with no such late-arriving address is free to make
 	// this a no-op, but the method has to exist on the interface, or a port
-	// of poolroutes.go's hardening (issues #109/#117/#123b/#123c — several
+	// of poolroutes.go's hardening (old #109/#117/#123b/#123c — several
 	// rounds of closing races in exactly this path) has nowhere to attach.
 	ReserveUnderlay(addr string)
 
@@ -141,7 +141,7 @@ type Policy struct {
 	// Coordinators, STUNURL and TURNURL are not dialled here — they are
 	// excluded. An Enforcer must keep every pool member plus STUN/TURN
 	// reachable outside the tunnel's own route (clients/internal/enforcement/tunnel.go's
-	// startTunnel, issue #6), the same set core.Config uses to actually
+	// startTunnel, old #6), the same set core.Config uses to actually
 	// dial, for an unrelated reason: whichever of them the session ends up
 	// using, the tunnel's own signalling must never be captured by the
 	// route the tunnel itself just installed.
@@ -201,7 +201,7 @@ type Policy struct {
 	// Whatever this points at, an implementation must redact addresses out of
 	// what it passes (redact.go): a client's log is a disk file a user may
 	// hand over for support, and this package's messages carry coordinator,
-	// exit and relay addresses as literal command arguments (issue #140).
+	// exit and relay addresses as literal command arguments (old #140).
 	Logf func(format string, args ...any)
 }
 

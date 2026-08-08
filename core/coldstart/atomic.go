@@ -1,21 +1,22 @@
 package coldstart
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 )
 
-// writeFileAtomic installs b at path by staging a complete file under
-// ".<name>.tmp*" in path's OWN directory, flushing it, and renaming it over the
-// target. The live file is never opened for writing, so there is no moment at
-// which path holds a partial file (issue #178).
+// writeFileAtomic installs b at path, replacing whatever is there rather than
+// rewriting it: a complete file is staged under ".<name>.tmp*" in path's OWN
+// directory, flushed, and renamed over the target. The live file is never opened
+// for writing, so there is no moment at which path holds a partial file (issue
+// #178). It does not create parent directories, so a missing secrets/ directory
+// is still an error rather than something a mint quietly conjures.
 //
-// It is the same shape core/admission.RevocationList.SaveFile took for issue
-// #168 and core/policy.Cache.writeAtomic has carried since ADR-0043, and it is
-// here rather than shared with either of them for a reason given at the bottom.
+// The shape and every guarantee in it are core/atomicfile's, and that package's
+// doc carries the reasoning. This function is what this package's two writers
+// call, because the durability choice below is one decision about both of them
+// rather than two decisions at two call sites.
 //
-// # Why this package needs it
+// # Why this package needs it at all
 //
 // The secrets file is written by cmd/coldstart-issue, which is
 // READ-MODIFY-WRITE: it loads every secret already issued, adds one, and writes
@@ -41,95 +42,33 @@ import (
 // the same absolute time destroyed-and-not-yet-rewritten on its thousandth write
 // as on its first.
 //
-// # The two mechanics that are load-bearing rather than tidy
+// # Why both of this package's writers take the DURABLE form
 //
-//   - The temporary file is created IN THE TARGET'S DIRECTORY. os.Rename is
-//     atomic only within one filesystem, and a rename across one degrades to
-//     copy-then-delete — exactly the half-written file this exists to prevent.
-//   - The bytes are flushed BEFORE the rename. A rename that becomes visible
-//     ahead of the data it points at is a file the next reader sees as empty,
-//     and for the secrets file that reads as "no user may bootstrap".
+// A file's own flush makes the BYTES durable; it does not commit the directory
+// entry, so a power loss straight after the rename can restore the previous
+// file. Issue #188 ruled that boundary per write rather than per file, and both
+// writers here land on the durable side — for different reasons, which is worth
+// saying because they are not the same file:
 //
-// # Three consequences of replacing the file instead of rewriting it
+//   - The secrets ledger is the accumulated record of what an operator has
+//     issued, and nothing rewrites it until the next issue. A lost rename
+//     silently drops the most recent secret, after cmd/coldstart-issue has told
+//     the operator it was saved — while the invite carrying its other half has
+//     already gone to a person.
+//   - The client's cached snapshot is the marginal one, and it is included on
+//     SaveCache's own argument rather than in spite of it: the fallback from an
+//     unusable cache is a network fetch to a coordinator, which for the users
+//     this protocol exists for is exactly what may be unreachable at the moment
+//     the client launches. Coming back from a power loss holding the PREVIOUS
+//     snapshot rather than the one just saved leads to the same place a
+//     truncated one does when the older snapshot has expired.
 //
-// Named because each is a real change from os.WriteFile rather than an
-// implementation detail:
-//
-//   - The result is mode 0600 every time. os.WriteFile applied its perm only
-//     when creating, so an existing file kept whatever mode it had. That only
-//     ever narrows, and both files this writes are secret-bearing.
-//   - A path that is a SYMLINK is replaced rather than written through.
-//   - A writer killed mid-save leaves its staged file behind, which os.WriteFile
-//     never did. They are named ".<target>.tmp*" so they sort beside the file
-//     they were staged for, are hidden from a plain ls, and can never be
-//     mistaken for the file itself.
-//
-// # What it deliberately does not do
-//
-// It does not fsync the DIRECTORY, so a machine that loses power immediately
-// after the rename can come back holding the previous file. That is a different
-// property — whether the rename is durable, not whether the bytes are whole —
-// and its failure restores a complete older file rather than a torn one. Every
-// atomic writer in this repository stops at the same line (core/policy/cache.go,
-// core/admission/verify.go, core/capacity/quota.go, core/devicestore/store.go,
-// core/selection/store.go, cmd/bacchus-netd/dns.go); moving it is a repo-wide
-// change rather than this function's.
-//
-// It does not create parent directories, which keeps both callers behaving
-// exactly as their os.WriteFile did: a missing secrets/ directory is still an
-// error rather than something a mint quietly conjures.
-//
-// It does not serialise two writers. Atomicity is a promise to a READER — every
-// read lands on a whole file — and it says nothing about two read-modify-write
-// issuers racing, where the loser's secret is dropped from a file that is
-// perfectly well-formed. That is cmd/coldstart-issue's lock, not this.
-//
-// # Why package-local
-//
-// This is the third copy of the shape in the repository and the argument for
-// folding all of them into one helper is real, but it is not this card's to
-// make: the two existing copies are correct, guarded by their own tests, and
-// live in packages this lane does not own, so consolidating means editing
-// passing code in three places to no behavioural end. A helper shared by the two
-// writers IN THIS PACKAGE is the granularity that pays for itself here. Issue
-// #188 holds the repo-wide question.
+// Both are rare, operator- or launch-triggered writes, so the cost is one fsync
+// on an operation that already touched the disk once. Nothing in this package is
+// on a data path.
 func writeFileAtomic(path string, b []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp")
-	if err != nil {
-		return fmt.Errorf("stage in %s: %w", dir, err)
-	}
-	staged := tmp.Name()
-	// Removed on every path that does not rename it away, so a failure leaves
-	// the live file untouched AND nothing beside it for the next operator to
-	// wonder about. A no-op once the rename has succeeded.
-	defer func() { _ = os.Remove(staged) }()
-	if err := writeStaged(tmp, b); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write %s: %w", staged, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("write %s: %w", staged, err)
-	}
-	if err := os.Rename(staged, path); err != nil {
-		return fmt.Errorf("install %s: %w", path, err)
-	}
-	return nil
-}
-
-// writeStaged fills a staged file and flushes it to stable storage, so
-// everything that can fail has failed before anything is renamed over the file
-// somebody else is reading.
-func writeStaged(f *os.File, b []byte) error {
-	// 0600 explicitly rather than whatever os.CreateTemp's mode survived the
-	// umask. This replaces files the previous os.WriteFile named 0600, and the
+	// 0600: this replaces files the previous os.WriteFile named 0600, and the
 	// secrets file is staged in the coordinator's secrets directory beside its
 	// signing keys.
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		return err
-	}
-	return f.Sync()
+	return atomicfile.WriteDurable(path, b, 0o600)
 }

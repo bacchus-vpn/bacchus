@@ -1,13 +1,13 @@
 // Package geoip resolves an IP address to an ISO-3166-1 alpha-2 country code from
 // a database staged on local disk, with no network access of any kind.
 //
-// It exists for issue #136. An exit's or relay's country used to be a hand-typed
+// It exists for old #136. An exit's or relay's country used to be a hand-typed
 // -country flag, which is a NODE SELF-REPORT: the trust model treats those as
 // untrusted (a hostile or Sybil node can claim any country), and it is also simply
 // easy to typo — a wrong tag silently corrupts the client's country filter. The
 // coordinator instead derives the tag from the source IP it OBSERVED the node
-// register from, which is the same rule coldstart.Entry.Ingress (issue #124) and
-// capacity's observedAS (issue #158) already follow: an observed address is
+// register from, which is the same rule coldstart.Entry.Ingress (old #124) and
+// capacity's observedAS (old #158) already follow: an observed address is
 // trusted, a claimed one is not.
 //
 // # Why local, never a lookup service
@@ -326,7 +326,7 @@ func optional(dir, name string) string {
 //
 // Not-resolvable covers three distinct cases, deliberately answered the same way,
 // because the caller's response to all three is identical (fall back to the node's
-// hint, per issue #136):
+// hint, per old #136):
 //
 //   - The address is not globally routable — loopback, RFC1918, link-local,
 //     unspecified, or multicast. This is the ordinary case on a developer box and in
@@ -396,7 +396,7 @@ func (d *DB) Len() (v4, v6 int) {
 //
 // Every country tag in the system passes through here — the GeoIP-derived one and
 // the node's fallback hint alike — which buys two things. It kills the typo class
-// that motivated issue #136 even on the hint path ("Netherlands", "nl ", "N1" all
+// that motivated old #136 even on the hint path ("Netherlands", "nl ", "N1" all
 // become ""), so a malformed tag becomes "unknown" rather than a country no filter
 // will ever match. And it makes the tag's case canonical at the source, which
 // removes the standing asymmetry between core/selection's case-INSENSITIVE

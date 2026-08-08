@@ -2,7 +2,7 @@ package capacity
 
 import "testing"
 
-// Assignment arithmetic (issue #146, ADR-0042).
+// Assignment arithmetic (old #146, ADR-0042).
 
 // TestProjectedShareReportsUnlimitedRatherThanEncodingIt pins the distinction the type
 // exists for. "No information" cannot be a number: 0 would rank an uncapped node last
@@ -37,7 +37,7 @@ func TestProjectedShareReportsUnlimitedRatherThanEncodingIt(t *testing.T) {
 	}
 }
 
-// TestRankShareMakesForgingWorthWhatSilenceIsWorth is the #157 rule applied to
+// TestRankShareMakesForgingWorthWhatSilenceIsWorth is the old #157 rule applied to
 // assignment. An UNRATED node's capacity is its own self-report, so ranking on it raw
 // would pay a liar in assignments. Clamped, a node claiming 10 Gbit ranks exactly
 // level with one claiming nothing at all — and level with an honestly measured node at
@@ -115,7 +115,7 @@ func TestOctaveFloorAdmitsExactlyWithinAFactorOfTwo(t *testing.T) {
 	}
 }
 
-// TestFullIsOffAtZeroAndNeverCatchesAnUncappedNode pins both halves of how #147's
+// TestFullIsOffAtZeroAndNeverCatchesAnUncappedNode pins both halves of how old #147's
 // share-based trigger ships: disabled at zero, and — even when enabled — inert for a
 // node that declared nothing and has been measured at nothing, which is the standing
 // opt-in promise declared limits make everywhere else.

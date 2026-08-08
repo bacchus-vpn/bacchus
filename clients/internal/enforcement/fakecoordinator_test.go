@@ -35,7 +35,7 @@ type fakeWire struct {
 	Mode    string `json:"mode,omitempty"`
 	Session string `json:"session,omitempty"`
 	// ExitID is the coordinator's ANSWER on a session mint, naming the exit it chose
-	// inside the requested country (issue #146, ADR-0042). It is load-bearing: an
+	// inside the requested country (old #146, ADR-0042). It is load-bearing: an
 	// exit's id IS its Noise static public key (ADR-0009), so a client that does not
 	// receive it cannot bring up the end-to-end channel, and core refuses a mint
 	// without one. A client never sends it — a connect names a country.
@@ -55,7 +55,7 @@ type fakeExit struct {
 
 // fakeWireCountry mirrors the per-country aggregate a real coordinator answers `list`
 // with. It replaced a per-exit list: a client picks a COUNTRY and the coordinator picks
-// the exit inside it, so exit ids are neither sent nor needed (issue #146).
+// the exit inside it, so exit ids are neither sent nor needed (old #146).
 type fakeWireCountry struct {
 	Country   string `json:"country"`
 	Exits     int    `json:"exits"`

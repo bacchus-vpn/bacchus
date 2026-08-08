@@ -57,7 +57,7 @@ type gatewayInfo struct {
 	ifAlias string
 
 	// nextHopV6 is the IPv6 default-gateway next hop on the same interface, if
-	// any (issue #117) — "" when this interface has no IPv6 default route
+	// any (old #117) — "" when this interface has no IPv6 default route
 	// (common: physical IPv6 is disabled for most of the tunnel's lifetime via
 	// disablePhysicalIPv6, and many networks have no IPv6 at all). Populated
 	// best-effort by defaultGateway; addExclusionRoutesV6 is a no-op without
@@ -85,18 +85,18 @@ type gatewayInfo struct {
 type osNet interface {
 	// defaultGateway reads the current best (lowest-metric) IPv4 default
 	// route, plus that same interface's IPv6 default route if it has one
-	// (issue #117). Only the IPv4 lookup is required to succeed.
+	// (old #117). Only the IPv4 lookup is required to succeed.
 	defaultGateway() (gatewayInfo, error)
 
 	// addExclusionRoutes routes each prefix via the physical default gateway,
 	// carving it out of the tunnel's capture. addExclusionRoutesV6 is its
-	// IPv6 counterpart (issue #117) and must be a no-op when gw has no IPv6
+	// IPv6 counterpart (old #117) and must be a no-op when gw has no IPv6
 	// next hop. Both are best-effort: see the type doc.
 	addExclusionRoutes(prefixes []string, gw gatewayInfo)
 	addExclusionRoutesV6(prefixes []string, gw gatewayInfo)
 
-	// addInclusionRoutes is the mirror for split-tunnel "include" mode (issue
-	// #64): routes each prefix *into* the tunnel adapter. Requires the TUN
+	// addInclusionRoutes is the mirror for split-tunnel "include" mode
+	// (old #64): routes each prefix *into* the tunnel adapter. Requires the TUN
 	// device to already exist, unlike addExclusionRoutes.
 	addInclusionRoutes(prefixes []string, tunNextHop string)
 
@@ -112,7 +112,7 @@ type osNet interface {
 
 	// addSplitDefaultRoute overrides the default route without removing it
 	// (0.0.0.0/1 + 128.0.0.0/1 via addr, the standard approach). Exclude mode
-	// only — include mode must never call this (issue #64).
+	// only — include mode must never call this (old #64).
 	addSplitDefaultRoute(addr string) error
 
 	// disablePhysicalIPv6 / enablePhysicalIPv6 are parity item 6: the tunnel
