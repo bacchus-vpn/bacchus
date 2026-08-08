@@ -77,7 +77,7 @@ if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
 	exit 2
 fi
 
-want=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+want=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
 case "$want" in
 *[!0-9a-f]*)
 	printf 'bacchus-fleet-check: %s is not a hex revision\n' "$1" >&2
@@ -93,9 +93,13 @@ fi
 # to pass) is not quietly compared against 12 characters of it by accident.
 want=$(printf '%.12s' "$want")
 
-if [ "$#" -eq 2 ] && [ "$2" != "-" ] && [ ! -r "$2" ]; then
-	printf 'bacchus-fleet-check: cannot read %s\n' "$2" >&2
-	exit 2
+# A named file becomes this shell's stdin, so the awk below always reads one place.
+if [ "$#" -eq 2 ] && [ "$2" != "-" ]; then
+	[ -r "$2" ] || {
+		printf 'bacchus-fleet-check: cannot read %s\n' "$2" >&2
+		exit 2
+	}
+	exec <"$2"
 fi
 
 # The whole reading happens in one awk pass. Roles and ids are extracted by pattern
@@ -108,6 +112,11 @@ fi
 # (describeBuild), while a node's wire value carries `-dirty` (renderBuildRevision).
 # Both are handled, separately, because a pattern written for one silently reports the
 # other as clean.
+#
+# The program is single quoted so awk's own $0/$1 reach awk rather than being expanded
+# by the shell first; want is passed with -v, which is the reason nothing here needs to
+# interpolate at all.
+# shellcheck disable=SC2016
 awk -v want="$want" '
 	# The comparison is a PREFIX one: `git rev-parse --short` produces 7-ish characters,
 	# the wire carries 12, and a full sha is 40, so three correct spellings of one commit
@@ -212,4 +221,4 @@ awk -v want="$want" '
 		printf "the fleet is pinned to %s\n", want
 		exit 0
 	}
-' ${2+"$2"}
+'

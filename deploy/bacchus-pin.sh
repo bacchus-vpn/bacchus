@@ -126,7 +126,7 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 : "${repo:=$(dirname -- "$script_dir")}"
 : "${config:=$script_dir/testbed.env}"
 
@@ -340,6 +340,10 @@ digest_of() {
 # a failure anywhere removes the debris everywhere rather than leaving a half-fleet
 # holding an unexplained `.bacchus-pin.new` beside its live binary.
 staged=""
+# Invoked indirectly, through the EXIT trap below — shellcheck cannot follow a trap
+# target to its definition and reports it as unreachable/unused, the same way
+# bacchus-asn-drift-check.sh's cleanup is reported.
+# shellcheck disable=SC2317,SC2329
 cleanup_staged() {
 	for _s in $staged; do
 		remote "${_s%%=*}" "rm -f $BIN_DIR/${_s#*=}.bacchus-pin.new" >/dev/null 2>&1 || true
