@@ -78,6 +78,32 @@ const keyFileName = "device.key"
 // that — so atomicfile.SyncDir is called directly, which is why that function is
 // exported.
 //
+// ON WINDOWS THAT CALL DOES NOTHING, and this is the client's connect path, so
+// Windows is where it runs most (issue #228). What is established about it, and
+// what is not, is worth stating here rather than one indirection away:
+//
+//   - The flush above is not a weaker version of what Linux does — it is the
+//     only lever Windows documents. FlushFileBuffers, which is what Sync calls,
+//     is documented to write the file's data AND metadata and to synchronize the
+//     underlying storage's cache; the alternative Win32 names is opening the
+//     file FILE_FLAG_WRITE_THROUGH, which is the same guarantee taken earlier.
+//     There is no second, stronger call being skipped here.
+//   - What Microsoft does not say is whether "the file's metadata" includes the
+//     entry in the file's PARENT directory, which is the whole question: losing
+//     that entry is what leaves no key file at all. Issue #238 is the power-loss
+//     run that answers it, and #228 stays open until it does.
+//
+// So the create is durable on Linux, and on Windows it is durable to the extent
+// that a documented file flush covers a directory entry, which is unestablished.
+// The consequence if it does not is the reason the card exists: a power loss
+// right after a first-run generation comes back with no key file, the branch
+// above reads that as a cold start and mints a SECOND key, and the enrolment
+// that bound the first one has already gone to the account service and spent a
+// one-shot claim code that clients/fyne has already erased. Nothing here is a
+// regression — it is the gap issue #215 closed on Linux and could not close
+// there — and nothing about it is fixed by inventing a call, which is why this
+// is a comment and not a syscall.
+//
 // A write that fails partway leaves a SHORT file on purpose. It is caught loudly
 // on the next read by the malformed-key check above, which is fail-closed;
 // removing it would hand the next run a missing file and a silent fresh key,
