@@ -174,7 +174,7 @@ func WriteDurable(path string, b []byte, perm os.FileMode) error {
 // polarity is also worse than a replacing writer's — losing a rename restores a
 // complete older file, but losing a first-run CREATE leaves no file at all, and
 // all three of those regenerate silently on the next start after having already
-// distributed the public half. ADR-0066 §5 records that; converting them is
+// distributed the public half. ADR-0066 §6 records that; converting them is
 // tracked separately because they live outside the packages that record's
 // change touched.
 func SyncDir(dir string) error {

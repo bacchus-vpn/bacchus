@@ -172,7 +172,7 @@ By §5's rule they are on the durable side: a first-run generation is the
 definition of a write nothing re-emits. They cannot use `Write` — `O_EXCL` on
 the real path is precisely what stops two processes both believing they
 generated the key, and a stage-and-rename cannot express that — so
-`core/atomicfile.SyncDir` is exported for them. Converting them is a follow-up
+`core/atomicfile.SyncDir` is exported for them. Converting them is issue #215,
 because all three live outside the files this record's change owns.
 
 ### 7. What is not converted here
@@ -187,8 +187,8 @@ because all three live outside the files this record's change owns.
 - `core/update`'s downloaded-artifact writer, being written in the same wave.
 
 All three are call-site changes of a few lines each, and all three are outside
-this lane's file ownership. Left as a follow-up rather than reached for
-mid-wave.
+this lane's file ownership. Issue #215 carries them, together with §6's three
+create-case writers, rather than being reached for mid-wave.
 
 ## Consequences
 
