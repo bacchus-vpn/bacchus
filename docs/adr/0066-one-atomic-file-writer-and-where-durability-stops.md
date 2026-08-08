@@ -60,8 +60,8 @@ set incorrectly, is a shape that does not stay correct.
 - write, set the mode, flush, close, rename;
 - remove the staged file on every path that does not rename it away.
 
-Seven call sites adopt it in this record. Two do not, for ownership reasons
-rather than technical ones — see §7.
+Seven of the nine call sites adopt it in this record. The other two do not, for
+ownership reasons rather than technical ones — see §7.
 
 ### 2. What it deliberately does NOT absorb, which is how #178's objection is answered
 
@@ -91,15 +91,21 @@ should find the substitution costs nothing to make.
 ### 3. The mode is a parameter, and `core/capacity` keeps 0644
 
 The strongest argument against consolidating was that a helper flattening the
-modes either loosens a secret or breaks a reader. Six writers install 0600
-because they hold credentials, state that gates admission, or a rollback floor.
-`core/capacity`'s quota checkpoint installs **0644**, and that is deliberate:
-`quotaState`'s own doc says an operator debugging "why is my node not serving"
-must be able to `cat` it, and its contents are a byte count and a date.
+modes either loosens a secret or breaks a reader. Five of the seven converted
+writers install 0600, because they hold credentials, state that gates admission,
+or a rollback floor. Two do not, and neither is an oversight:
+
+- `core/capacity`'s quota checkpoint installs **0644**. `quotaState`'s own doc
+  says an operator debugging "why is my node not serving" must be able to `cat`
+  it, and its contents are a byte count and a date.
+- `cmd/bacchus-netd`'s `replaceFile` takes the mode from ITS caller — 0644 when
+  it points `/etc/resolv.conf` at the tunnel, and the mode it recorded from the
+  original file when it puts that back. A writer that could only install one
+  mode could not restore a file it did not write.
 
 So the mode is a parameter, not a property of the writer, and
 `TestCheckpointStaysOperatorReadable` pins 0644 specifically so that a later
-tidy-up cannot quietly narrow the odd one out to match the six.
+tidy-up cannot quietly narrow the odd one out to match the five.
 
 ### 4. The mode is applied AFTER the bytes, and the odd writer out was the correct one
 
@@ -113,8 +119,9 @@ file readable-by-default while it is written — **is backwards**:
 - `replaceFile`'s mode is **0644**, because `/etc/resolv.conf` must be
   world-readable. Applying that mode BEFORE the write is what would let every
   local user read a half-written resolv.conf.
-- The three writers that chmod first are safe only because 0600 is not wider
-  than what `os.CreateTemp` already gave them.
+- The writers that chmod first are safe only because 0600 is not wider than what
+  `os.CreateTemp` already gave them — a property of their mode, not of their
+  ordering, and one the next caller has no reason to preserve.
 
 Applying the mode after the bytes is correct for a widening mode and for a
 narrowing one, so `core/atomicfile` does that for everyone, and the six moved to
