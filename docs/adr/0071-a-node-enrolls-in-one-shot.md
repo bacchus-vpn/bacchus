@@ -74,10 +74,21 @@ Introducing dispatch would change how every existing invocation parses in order
 to gain nothing `-enroll` does not already have.
 
 `-enroll` runs **before every other startup check** — before the volunteer
-validation, before the update machinery, before any coordinator is contacted. A
+validation, before the release machinery, before any coordinator is contacted. A
 node being provisioned needs no exit key, no advertise address and no reachable
 coordinator, and a typo in an unrelated flag should not stand between an
 operator and a credential.
+
+**One of those "before"s is a fix rather than a preference,** and it was found by
+asking where in `main` this belongs. A one-shot must not run ADR-0069's startup
+demotion check, because `update.CheckStartup` **claims** the probation
+(`started=false` → `true`) and only the serving path ever clears it. `-list`
+already did exactly that: run it on a freshly applied release and the marker is
+consumed by a process that prints countries and exits, after which the first real
+start finds `started=true` and demotes a build nothing has tried. `-enroll` would
+have been a second instance, and a likelier one — provisioning a node's credential
+is what an operator does right after deploying it. Both are exempted here; the
+absence of a test that would catch a third is `#240`.
 
 ### 2. The claim code is read from stdin, or from a file that is unlinked
 
@@ -328,3 +339,7 @@ the reason the seam has the shape it has.
 - **The claim code's exposure is now a property of how it is supplied**, not of
   the design: piped in, it never touches a disk; in a file, it is removed once
   spent. It is no longer in a process listing under any invocation.
+- **`-list` stops eating the release probation** (§1). That is a pre-existing
+  rollback bug this change did not cause and could not leave alone, since
+  `-enroll` would have been the second instance of it. `#240` holds the missing
+  regression test.

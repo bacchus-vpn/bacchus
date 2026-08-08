@@ -97,10 +97,21 @@ func main() {
 	// BEFORE anything else: if a previous START of an applied release never
 	// confirmed it, put the previous binary back and exit so the supervisor starts
 	// it. This start is that release's trial when it is the first one (ADR-0069).
-	// Unconditional — the marker was written by a run that may have been configured
-	// differently — and with no marker it is one stat.
+	// The marker was written by a run that may have been configured differently, so
+	// nothing about the configuration below exempts it — and with no marker it is
+	// one stat.
+	//
+	// A ONE-SHOT is exempt, and that is not a configuration exemption. -enroll and
+	// -list do one thing and quit: neither ever reaches a serving state, so neither
+	// reaches confirmAfter below, so neither can ever clear the marker it would
+	// have claimed. ADR-0069's probation turns on `started`, and a one-shot that
+	// claimed it would leave the applied release recorded as having had its turn
+	// without having taken it — after which the first REAL start finds
+	// started=true and demotes a build nothing has actually tried. Provisioning a
+	// freshly deployed node is exactly when that happens.
+	oneShot := *acct.enroll || *doList
 	updTarget := updateTarget(*upd.target)
-	if updTarget != "" {
+	if updTarget != "" && !oneShot {
 		checkStartupDemotion(updTarget)
 	}
 
