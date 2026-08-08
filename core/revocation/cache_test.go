@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -359,5 +360,118 @@ func TestCacheStoreIsAtomic(t *testing.T) {
 		if e.Name() != filepath.Base(path) {
 			t.Errorf("stray file left in the state directory: %s", e.Name())
 		}
+	}
+}
+
+// TestCacheStateFileIsOwnerOnly pins 0600 on the state file, which the
+// consolidation onto core/atomicfile turned from a line inside this package into
+// an argument passed to a shared writer. The mode is a PARAMETER of that writer
+// precisely so a later tidy-up cannot flatten the set (ADR-0066 §3), and this is
+// the assertion that makes flattening this one fail rather than pass quietly.
+//
+// The reason is Cache's own: MinAsOf is the only value here that cannot be
+// re-derived from signed data, so write access to this file is the ability to
+// roll this enforcer back to an older, validly-signed generation.
+//
+// Skipped on Windows, where the POSIX permission bits are not what governs the
+// file and os.Chmod only moves the read-only attribute.
+func TestCacheStateFileIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not the access control on Windows")
+	}
+	raw, _, _, asOf := frozenBundle(t)
+	c, path := newCache(t)
+
+	// Both writers, and both sides of the durability split, so none of the four
+	// paths can be the one that widens it.
+	if err := c.Store(raw, asOf); err != nil { // raises the floor: WriteDurable
+		t.Fatalf("Store: %v", err)
+	}
+	assertOwnerOnly(t, path, "after a floor-raising Store")
+	if err := c.Store(raw, asOf); err != nil { // re-records it: Write
+		t.Fatalf("Store (same as_of): %v", err)
+	}
+	assertOwnerOnly(t, path, "after re-recording the same floor")
+	if err := c.StoreFloor(asOf.Add(time.Hour)); err != nil { // raises: WriteDurable
+		t.Fatalf("StoreFloor: %v", err)
+	}
+	assertOwnerOnly(t, path, "after a floor-raising StoreFloor")
+	if err := c.StoreFloor(asOf); err != nil { // below the floor: Write
+		t.Fatalf("StoreFloor (older): %v", err)
+	}
+	assertOwnerOnly(t, path, "after a StoreFloor that did not raise")
+}
+
+func assertOwnerOnly(t *testing.T, path, when string) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", when, err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("state file mode %s = %v, want 0600 — write access to it is the ability to roll this enforcer's floor back", when, perm)
+	}
+}
+
+// TestCacheAFloorRaiseInstallsTheSameFileAsAReRecord covers the split ADR-0066
+// §5 introduced here: a write that raises the floor goes through
+// atomicfile.WriteDurable and one that does not goes through atomicfile.Write.
+//
+// What the extra step buys is a property of a POWER LOSS and cannot be observed
+// from inside a process — core/atomicfile's own TestWriteDurableInstallsTheFile
+// says the same about itself. So what is asserted is the part that can go wrong
+// silently: the two paths install the same state, neither leaves debris, and a
+// raise is not a different file format from a re-record.
+func TestCacheAFloorRaiseInstallsTheSameFileAsAReRecord(t *testing.T) {
+	raw, rootPub, now, asOf := frozenBundle(t)
+	v, err := revocation.NewVerifier(rootPub, nil)
+	if err != nil {
+		t.Fatalf("build verifier: %v", err)
+	}
+
+	// One cache takes the raise (cold start, so any as_of raises the zero
+	// floor); the other reaches the same state by re-recording what it holds.
+	raised, raisedPath := newCache(t)
+	if err := raised.Store(raw, asOf); err != nil {
+		t.Fatalf("Store (raise): %v", err)
+	}
+	rerecorded, rerecordedPath := newCache(t)
+	if err := rerecorded.Store(raw, asOf); err != nil {
+		t.Fatalf("Store (seed): %v", err)
+	}
+	if err := rerecorded.Store(raw, asOf); err != nil {
+		t.Fatalf("Store (re-record): %v", err)
+	}
+
+	a, err := os.ReadFile(raisedPath)
+	if err != nil {
+		t.Fatalf("read the raised state: %v", err)
+	}
+	b, err := os.ReadFile(rerecordedPath)
+	if err != nil {
+		t.Fatalf("read the re-recorded state: %v", err)
+	}
+	if string(a) != string(b) {
+		t.Errorf("a floor raise and a re-record wrote different files:\n raise: %s\n re-record: %s", a, b)
+	}
+	for _, p := range []string{raisedPath, rerecordedPath} {
+		entries, err := os.ReadDir(filepath.Dir(p))
+		if err != nil {
+			t.Fatalf("read dir: %v", err)
+		}
+		for _, e := range entries {
+			if e.Name() != filepath.Base(p) {
+				t.Errorf("stray file left beside %s: %s", filepath.Base(p), e.Name())
+			}
+		}
+	}
+	// And the durable path still round-trips through the verifier, which is the
+	// only thing a caller can actually see about it.
+	floor, _, ok, err := raised.Load(v, now)
+	if err != nil || !ok {
+		t.Fatalf("Load after a floor-raising Store = (%v, ok=%v)", err, ok)
+	}
+	if !floor.Equal(asOf) {
+		t.Errorf("floor after a raise = %s, want %s", floor, asOf)
 	}
 }
