@@ -60,9 +60,15 @@ func writeMarker(path string, m Marker) error {
 // readMarker reads the marker at path. A missing file is (zero, false, nil).
 //
 // A marker that cannot be parsed is reported as PRESENT with a zero body rather
-// than as an error, because the decision it drives — demote — is the safe one, and
+// than as an error, because every decision a zero body drives is the safe one and
 // the alternative is a build that refuses to start because a scratch file beside
-// it is malformed.
+// it is malformed. A zero body has Started false, so the applied release gets one
+// trial start and is demoted on the next if it did not confirm — the same
+// treatment a well-formed marker gets, with the unreadable file replaced by a
+// well-formed one on the way past. The shell rollback reads the same file with a
+// pattern and reaches the same conclusion for the same reason: it cannot match
+// "started": true in bytes it cannot parse, so it treats the release as never
+// started, which errs toward restoring a binary known to work.
 func readMarker(path string) (Marker, bool, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
