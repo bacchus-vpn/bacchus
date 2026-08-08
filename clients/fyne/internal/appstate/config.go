@@ -44,6 +44,36 @@ type Config struct {
 	TURNUser     string   `json:"turnUser"`
 	TURNPass     string   `json:"turnPass"`
 
+	// Invite is a `bacchus1:` string from cmd/coldstart-issue, and it is what
+	// makes every address above LEARNABLE rather than fixed (bacchus#193,
+	// ADR-0061). With one, this client fetches the coordinator's signed
+	// cold-start directory at each connect and reads the coordinator pool and
+	// the account service out of it; without one it uses exactly the addresses
+	// in this file, which is what it did before and is a supported deployment.
+	//
+	// It is what closes the gap ADR-0016 names: every address in this file is
+	// static, and a moved coordinator takes this client offline immediately
+	// while a moved account service takes it offline about six hours later. The
+	// directory is the one artifact that can carry a correction.
+	//
+	// # It is PER-RECIPIENT and must never ship inside an installer or a template
+	//
+	// The invite carries a bootstrap secret, and coldstart.LoadMemStore's own
+	// doc records that every entry in a coordinator's secrets file is trusted
+	// equally — there is no vouch or trust system underneath it. A secret
+	// embedded in a downloadable artifact is therefore a secret the censor
+	// holds, and holding it is enough to fetch the directory of every entry
+	// point in the network. So the accepted price of this field is that a new
+	// install needs TWO out-of-band strings rather than one: an invite alongside
+	// the claim code. The shipped template carries this key EMPTY, which is a
+	// slot and not a credential.
+	//
+	// Optional, like everything that follows AdmissionPubKey. A malformed one is
+	// refused at connect with its own sentence rather than ignored: a typo that
+	// silently disabled directory updates would leave the user believing this
+	// client follows a moved address when it does not.
+	Invite string `json:"invite"`
+
 	// Country is the country to egress in, as an ISO-3166-1 alpha-2 code, and it
 	// reaches core.Config.Geo unchanged (via ValidateCountry). Empty is
 	// CountryAutomatic: core resolves the country itself and takes the first
@@ -252,9 +282,13 @@ type Config struct {
 	// that does not present the pinned identity is unreachable rather than
 	// trusted. accountclient.New enforces it for the whole list at once.
 	//
-	// It does not help an UNPLANNED move — a list the client cannot update goes
-	// stale together — which is bacchus#193's job and needs this list underneath
-	// it.
+	// On its own it does not help an UNPLANNED move — a list the client cannot
+	// update goes stale together. What updates it is the signed directory
+	// (bacchus#193, ADR-0061): with an Invite set, the "account" entries of a
+	// verified snapshot REPLACE this list at connect time, and this is the seed
+	// the client uses until it holds one. The two are not alternatives — the
+	// audience and CA below are still what pin the identity of every address in
+	// either list, and neither is discoverable.
 	AccountServiceURLs []string `json:"accountServiceUrls"`
 
 	// AccountServiceURL is the older single-address key, still read (bacchus#192,
@@ -344,6 +378,33 @@ func DefaultDeviceCredDir() string {
 		return ""
 	}
 	return filepath.Join(dir, "Bacchus", "device")
+}
+
+// DefaultDirectoryCachePath is where this client keeps the last signed
+// cold-start snapshot it verified (bacchus#193): one file beside the per-user
+// config, on the same reasoning DefaultDeviceCredDir gives for not writing next
+// to the executable.
+//
+// Not user-configurable, mirroring DefaultSelectionDir: a cache of something the
+// network hands out is an implementation detail, and the value of a knob here
+// would be to point two installs at one file — which is the one thing that must
+// not happen, since a snapshot is verified against the invite that fetched it.
+//
+// The bytes are the SIGNED wire form, saved verbatim, so they carry no secret
+// (coldstart.Snapshot's own doc) and are worthless to anyone who does not also
+// hold the signing key to check them against. The file is written by
+// coldstart.SaveCache, which is atomic — a torn cache would fail Verify and send
+// the next launch to the network, which for the users this exists for is exactly
+// what may be unreachable at that moment.
+//
+// Returns "" when the OS cannot name a per-user config directory, which
+// AcquireDirectory reads as "do not cache" rather than guessing at a path.
+func DefaultDirectoryCachePath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "Bacchus", "directory.snapshot")
 }
 
 // AccountServiceConfigured reports whether this config names an account service

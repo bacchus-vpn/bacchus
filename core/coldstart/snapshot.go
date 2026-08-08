@@ -9,12 +9,31 @@ import (
 )
 
 // Entry is one directory record in a Snapshot: an entry point a client can
-// try, or the coordinator itself.
+// try, the coordinator itself, or a service a client addresses out of band.
 type Entry struct {
-	Role    string `json:"role"` // "coordinator" | "relay" | "exit"
+	// Role is what this record names. Four values, and the fourth is not an
+	// entry point (bacchus#193, ADR-0061):
+	//
+	//   - "coordinator", "relay", "exit" — a node in this network. Addr is a
+	//     host:port this client dials directly.
+	//   - "account" — the account service (ADR-0016 decision 4). It is not part
+	//     of the rendezvous fabric and is never dialled as one; it is reached
+	//     over HTTPS, so Addr carries a scheme-and-host URL rather than a
+	//     host:port. It rides here because a client has no other channel that
+	//     can tell it the service moved, and because the directory is signed by
+	//     the coordinator and re-shareable without carrying anybody's secret.
+	//
+	// An "account" entry is a LOCATION and never a trust root. A consumer keeps
+	// its own out-of-band audience and pinned CA — see core/accountclient's New,
+	// which validates both once for the whole address list — so a coordinator
+	// that named a service it controls would be pointing this client at
+	// something that still has to present the identity the client already pins.
+	Role    string `json:"role"`
 	ID      string `json:"id"`
 	Country string `json:"country,omitempty"`
-	Addr    string `json:"addr"` // host:port
+	// Addr is host:port for the three node roles, and a scheme-and-host URL
+	// ("https://host:port", no path) for role "account". See Role.
+	Addr string `json:"addr"`
 
 	// CountrySource says HOW the coordinator arrived at Country (issue #3): one of the
 	// Country* provenance values below, or empty from a coordinator predating the

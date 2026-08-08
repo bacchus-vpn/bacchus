@@ -135,7 +135,7 @@ func TestStartEnforcementAsksForTheCarveOutOnlyWhenServing(t *testing.T) {
 	for _, serving := range []bool{false, true} {
 		enf := &fakeEnforcer{servesWhileRouted: true}
 		c := newEnforcedController(Config{}, enf)
-		if _, err := c.startEnforcement(serving); err != nil {
+		if _, err := c.startEnforcement(serving, c.cfg.Coordinators); err != nil {
 			t.Fatalf("startEnforcement(%v): %v", serving, err)
 		}
 		policy, _ := enf.lastPolicy(t)
