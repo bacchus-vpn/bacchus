@@ -49,8 +49,24 @@ func signBody(priv ed25519.PrivateKey, tag string, body []byte) []byte {
 // mintTestChain builds a throwaway chain valid at now for credTTL, and returns
 // the root's public key (what a coordinator-side Verifier is anchored to), the
 // two envelope strings a device presents, and the device's own private key.
+//
+// now is normalized to a whole second in UTC first, and that is what makes the two
+// envelopes SIZE-STABLE. time.Time marshals as RFC3339Nano, which trims trailing
+// zeros, so a timestamp is 20 to 30 characters wide depending on how many trailing
+// zeros the nanosecond it was taken at happens to have, and a non-UTC zone offset
+// costs five more ("+02:00" against "Z"). Each envelope carries two of them and is
+// then base64'd, so a chain minted from a bare time.Now() swings 40 bytes on the
+// clock alone — which is issue #233: the connect-size assertion in
+// connect_datagram_test.go measured 362 on the workstation ADR-0057 was written at
+// and 360 on a CI runner, from identical code.
+//
+// The clock stays REAL. Minting at a fixed instant would make the size constant too
+// and would hand back credentials that expire, turning main red one day with no push
+// to blame. A second of slack is far inside the hour-scale validity and renewal
+// margins every caller here works with.
 func mintTestChain(t *testing.T, now time.Time, credTTL time.Duration) (rootPub ed25519.PublicKey, issuerCertEnc, credEnc string, devicePriv ed25519.PrivateKey) {
 	t.Helper()
+	now = now.UTC().Truncate(time.Second)
 	rootPub, rootPriv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("generate root key: %v", err)

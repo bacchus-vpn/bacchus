@@ -259,6 +259,22 @@ record does not pre-empt it.
 > asserting against `maxRendezvousPayload` catches the moment the datagram stops
 > fitting and not a byte sooner.
 
+> **Every cert number above is a fixture number, and it was an unstable one — #233,
+> 2026-08-09.** The 362 is this repository's own test chain minted from a bare
+> `time.Now()` on a workstation whose clock had nine significant nanosecond digits and
+> a `+02:00` zone. `time.Time` marshals as RFC3339Nano, which trims trailing zeros, so
+> identical code on a UTC runner with a coarser clock minted the same cert anywhere
+> from **322 to 349 bytes** — and the test asserting a floor of 362 duly failed at 360
+> on CI having passed 240 times locally. The fixture clock is normalized to a whole
+> UTC second now, which makes the envelope a constant 322 bytes (338 on a connect,
+> once its JSON key is counted) and lets that test assert exactly instead of as a
+> floor. The largest connect the suite measures moves 719 → **679** for the same
+> reason: the fixture chain got 40 bytes smaller, not the wire. A real issuer cert is
+> *larger* than any of these — the account service stamps a `note` and does not
+> truncate its clock, and this repository's own frozen chain is 382 bytes — so the 378
+> and the 476 understate what the move bought rather than overstating it, which is the
+> safe direction for a budget.
+
 > **§4's `EMSGSIZE` diagnosis survives the shaped hop, measured rather than assumed
 > (ADR-0062 §6).** The datagram the kernel refuses is now a DTLS record, and the
 > refusal has to travel back out through pion for this client to classify it; it

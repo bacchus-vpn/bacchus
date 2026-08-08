@@ -37,13 +37,18 @@ import (
 // — 413 bytes of credential. The credential below is minted with a full-length
 // serial, a 64-hex-character subject and the account service's trust/plan/vouched
 // stamps, and comes out slightly larger than that.
+//
+// Its clock is normalized to a whole second for the reason mintTestChain's is: the
+// two RFC3339Nano timestamps inside make the encoded credential swing 27 bytes on
+// the nanosecond it was minted at, and a fixture whose size is decided by the clock
+// cannot be asserted against (issue #233).
 func prodSizedAdmissionCred(t *testing.T) string {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("generate admission key: %v", err)
 	}
-	now := time.Now()
+	now := time.Now().UTC().Truncate(time.Second)
 	signed, err := admission.Sign(priv, admission.Credential{
 		Version:   admission.CredentialVersion,
 		Serial:    "0123456789abcdef",
@@ -135,6 +140,32 @@ func TestConnectDatagramFitsASafePath(t *testing.T) {
 // was never "the credential is 200 bytes over" — it is "what this connect no longer
 // carries is what put it over a real path", and that claim needs every field that
 // left.
+
+// issuerCertConnectCost is what one issuer cert costs the connect it rides: the
+// 322-byte envelope mintTestChain produces plus the 16 bytes of `,"issuerCert":""`
+// that carry it. Both halves are constants, so this is asserted EXACTLY rather than
+// as a floor.
+//
+// It replaces a floor of 362 (issue #233), and the 362 is worth recording because it
+// was never a production measurement. It is this same fixture, minted on a
+// workstation whose time.Now() had nine significant nanosecond digits and a +02:00
+// zone — the two widest RFC3339Nano timestamps available. The same code on a UTC
+// runner with a coarser clock minted 322 and the floor failed at 360, which is all
+// #233 ever was. mintTestChain now normalizes its clock, so there is one number.
+//
+// A floor could not have caught what this exists to catch. It fails only downwards,
+// so a fixture that drifted LARGER for an unrelated reason would keep passing while
+// measuring something else — which is precisely the doubt the old failure message
+// raised and could not settle. An exact number fails in both directions.
+//
+// The fixture stays LIGHTER than a real issuer cert, and deliberately so: the
+// account service stamps a `note` and does not truncate its clock (bacchus-payment's
+// chain.IssueIssuerCert), and this repository's own frozen chain
+// (core/devicecred/testdata/vectors.json) is 382 bytes against these 322. Every
+// conclusion below is therefore understated — a real cert overflows the budget by
+// more, never less.
+const issuerCertConnectCost = 338
+
 func TestTheFieldsThatMovedOffTheConnectAreWhatOverflowedThePath(t *testing.T) {
 	coord := newFakeDeviceCoordinator(t)
 	eng, link := newTestClientEngine(t, coord.addr())
@@ -177,8 +208,8 @@ func TestTheFieldsThatMovedOffTheConnectAreWhatOverflowedThePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if cost := len(withCert) - len(base); cost < 362 {
-		t.Fatalf("putting the issuer cert back on the connect cost %d bytes; ADR-0057 measured 362, so either the fixture cert is smaller than the account service's or this is no longer measuring the field #206 moved", cost)
+	if cost := len(withCert) - len(base); cost != issuerCertConnectCost {
+		t.Fatalf("putting the issuer cert back on the connect cost %d bytes, want exactly %d — the chain mintTestChain builds has changed size, so this is no longer measuring the field issue #206 moved off the connect. If that was deliberate, move issuerCertConnectCost in the same change and say what the envelope now is; do NOT widen it back into a floor, which is how this stopped catching anything the first time", cost, issuerCertConnectCost)
 	}
 	sent.Cred = admissionEnc
 	both, err := json.Marshal(sent)
@@ -191,6 +222,53 @@ func TestTheFieldsThatMovedOffTheConnectAreWhatOverflowedThePath(t *testing.T) {
 	}
 	t.Logf("connect as sent: %d bytes; + issuer cert: %d (+%d, issue #206); + admission credential: %d (%d over the %d-byte budget, issue #183)",
 		len(base), len(withCert), len(withCert)-len(base), len(both), len(both)-maxRendezvousPayload, maxRendezvousPayload)
+}
+
+// TestTheFixtureChainIsTheSameSizeWhateverClockItWasMintedAt is what makes the exact
+// assertion above safe to write, and it is the check a passing run cannot stand in
+// for. Issue #233 reproduced about once in ten CI runs and not once in 240 local
+// ones, so a green loop proves only that the clock was kind that day; this drives the
+// fixture from the instants that used to break it instead.
+//
+// The two axes are the ones RFC3339Nano varies on, and both are here: trailing zeros
+// in the nanosecond, which it trims (a whole second renders "…:33Z" and nine
+// significant digits "…:33.123456789Z"), and the zone offset, one character as "Z"
+// and six as "+02:00". Across these rows the chain used to span 40 bytes.
+//
+// Every instant is derived from a real time.Now(), not written down. Nothing here
+// verifies the chain — this measures lengths only — but a fixed instant in a fixture
+// file is how this repository has previously turned main red on a day nobody pushed,
+// and the habit is not worth keeping for the two lines it would save.
+func TestTheFixtureChainIsTheSameSizeWhateverClockItWasMintedAt(t *testing.T) {
+	second := time.Now().UTC().Truncate(time.Second)
+	east := time.FixedZone("+02:00", 2*60*60)
+	rows := []struct {
+		name string
+		now  time.Time
+	}{
+		{"whole second, UTC", second},
+		{"one nanosecond past the second, UTC", second.Add(time.Nanosecond)},
+		{"one tenth of a second, UTC", second.Add(100 * time.Millisecond)},
+		// The CI runner's own log timestamps are seven-digit, and seven digits is what
+		// #233's 360-byte failure measured.
+		{"seven significant digits, UTC", second.Add(635850400 * time.Nanosecond)},
+		{"nine significant digits, UTC", second.Add(123456789 * time.Nanosecond)},
+		{"whole second, +02:00", second.In(east)},
+		{"nine significant digits, +02:00", second.Add(123456789 * time.Nanosecond).In(east)},
+	}
+	var wantCert, wantCred int
+	for i, tc := range rows {
+		_, issuerCertEnc, credEnc, _ := mintTestChain(t, tc.now, 48*time.Hour)
+		if i == 0 {
+			wantCert, wantCred = len(issuerCertEnc), len(credEnc)
+			continue
+		}
+		if len(issuerCertEnc) != wantCert || len(credEnc) != wantCred {
+			t.Fatalf("minted at %s the chain is %d/%d bytes (issuer cert/device credential); minted at a whole UTC second it is %d/%d. The fixture's size is being decided by the clock again, which is issue #233 — every size assertion in this file then holds or fails on the nanosecond the run started at",
+				tc.name, len(issuerCertEnc), len(credEnc), wantCert, wantCred)
+		}
+	}
+	t.Logf("the fixture chain is %d bytes of issuer cert and %d of device credential at all %d instants", wantCert, wantCred, len(rows))
 }
 
 // TestChallengeCarriesTheAdmissionCredentialAndTheConnectDoesNot is the wire contract
@@ -297,6 +375,13 @@ func TestTheIssuerCertRidesTheChallengeAndNotTheConnect(t *testing.T) {
 // record. ADR-0057 records that production credentials measured ~34 bytes heavier
 // than these fixtures, which comes out of the 476 as well. 400 is the floor that
 // leaves, rounded down.
+//
+// This build measures MORE than the 476 above — 516 — and none of it is recovered
+// room. Normalizing the fixture clock for issue #233 took 40 bytes off the device
+// credential riding this connect, so the fixture is 40 bytes lighter than the one
+// ADR-0062 measured and reports that much headroom it does not have. The floor is
+// left at 400 because it still holds against the pessimistic reading: 516 less those
+// 40 and less ADR-0057's ~34 bytes of production weight is ~442.
 //
 // Raising it is a decision about the budget and should read like one. This is not a
 // number to bump because a test went red.
