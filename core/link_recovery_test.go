@@ -482,6 +482,58 @@ func TestARebuiltLinkLeavesTheSocketBehind(t *testing.T) {
 	}
 }
 
+// TestARebuildAfterStopIsRefused. A leg can decide to rebuild a link and land after
+// Stop has already torn it down. Installing a socket at that point leaves the read
+// loop parked on something closeLinks is already past — and Stop waits on that loop,
+// so the engine would hang on shutdown for a link it had just repaired.
+func TestARebuildAfterStopIsRefused(t *testing.T) {
+	coord := newRestartableCoordinator(t)
+	eng, link := newTestClientEngine(t, coord.addr())
+
+	eng.Stop() // idempotent; t.Cleanup calls it again
+	_, _, gen := link.transport()
+
+	if err := link.relink(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("relink after Stop returned %v, want net.ErrClosed", err)
+	}
+	if _, _, now := link.transport(); now != gen {
+		t.Fatal("a link torn down by Stop was given a new socket; nothing will ever close it and Stop waits on its reader")
+	}
+	// And the leg says nothing about it, because there is nothing left to repair.
+	if eng.relinkIfStale(link, link.heardMark(), true) {
+		t.Fatal("relinkIfStale reported a rebuild of a link that is gone")
+	}
+}
+
+// TestStopReturnsWhileLinksAreBeingRebuilt is the same hazard from the other side and
+// the one that would actually be felt: shutdown must not wait on a read loop parked on
+// a socket a concurrent rebuild installed.
+func TestStopReturnsWhileLinksAreBeingRebuilt(t *testing.T) {
+	coord := newRestartableCoordinator(t)
+	eng, link := newTestClientEngine(t, coord.addr())
+
+	rebuilding := make(chan struct{})
+	go func() {
+		close(rebuilding)
+		for i := 0; i < 50; i++ {
+			if err := link.relink(); err != nil {
+				return // refused once the link is closed, which is the point
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	<-rebuilding
+	time.Sleep(20 * time.Millisecond)
+
+	done := make(chan struct{})
+	go func() { eng.Stop(); eng.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return while links were being rebuilt; a read loop is parked on a socket nothing closed")
+	}
+}
+
 // TestTheReadLoopSurvivesARebuild is the failure a rebuild could quietly introduce and
 // nothing else in this file would catch: the link comes back and nothing is listening
 // to it. Closing the old socket fails whatever read was parked on it, and a read loop

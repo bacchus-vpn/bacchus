@@ -657,7 +657,11 @@ func (e *Engine) relinkIfStale(l *coordLink, heardBefore uint64, held bool) bool
 	}
 	l.noteLinkStale(e, "since then this client has sent to it and heard nothing at all back")
 	if err := l.relink(); err != nil {
-		l.noteRelinkFailed(e, err)
+		// A link torn down by Stop while this leg was deciding is not a failure worth
+		// a line: the engine is going away and there is nothing left to rebuild for.
+		if !errors.Is(err, net.ErrClosed) {
+			l.noteRelinkFailed(e, err)
+		}
 		return false
 	}
 	return true

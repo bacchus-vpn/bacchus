@@ -93,6 +93,12 @@ type coordLink struct {
 	// reader and the right answer is to read the new one, not to report the link
 	// dead. See read.
 	gen uint64
+	// linkClosed latches this link's teardown, so a rebuild that was decided before
+	// Stop and lands after it cannot install a socket nothing will ever close. Under
+	// linkMu with the rest, because the whole point is that the two orderings are
+	// decided in one place: without it, a relink racing closeLinks leaves the read
+	// loop parked on a live socket and Stop waiting on it forever.
+	linkClosed bool
 
 	sendMu sync.Mutex
 	msgCh  chan wire // this member's client rendezvous replies
@@ -496,6 +502,15 @@ func (l *coordLink) relink() error {
 	// reaches transport), so a rebuild can never interleave with a send in flight.
 	l.sendMu.Lock()
 	l.linkMu.Lock()
+	if l.linkClosed {
+		l.linkMu.Unlock()
+		l.sendMu.Unlock()
+		// Decided before Stop, arriving after it. Installing this socket would leave
+		// the read loop parked on something closeLinks has already been past, and Stop
+		// waits on that loop.
+		_ = conn.Close()
+		return net.ErrClosed
+	}
 	oldConn, oldShaped := l.conn, l.shaped
 	l.conn = conn
 	if oldShaped != nil {
@@ -527,8 +542,14 @@ func (l *coordLink) relink() error {
 
 // close tears the link down: the transport first, then the socket, because closing
 // the socket is what ends the shaped link's reader goroutine.
+//
+// The latch is set under the same lock that hands the socket out, so a rebuild
+// either happens entirely before this or refuses. See relink.
 func (l *coordLink) close() {
-	conn, shaped, _ := l.transport()
+	l.linkMu.Lock()
+	l.linkClosed = true
+	conn, shaped := l.conn, l.shaped
+	l.linkMu.Unlock()
 	if shaped != nil {
 		_ = shaped.Close()
 	}
