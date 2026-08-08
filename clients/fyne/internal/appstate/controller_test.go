@@ -1550,6 +1550,8 @@ func TestEnrollmentRedeemsAClaimCodeAndErasesIt(t *testing.T) {
 	t.Cleanup(func() { appstateClearClaimCode = restore })
 
 	ctrl := newProxyOnlyController(s.config(t, "BC1-GOODCODE"))
+	var details []Detail
+	ctrl.OnDetail = func(d Detail) { details = append(details, d) }
 	dc, err := ctrl.openDeviceCredential(ctrl.cfg.AccountServiceAddresses())
 	if err != nil {
 		t.Fatalf("openDeviceCredential: %v", err)
@@ -1559,6 +1561,11 @@ func TestEnrollmentRedeemsAClaimCodeAndErasesIt(t *testing.T) {
 	}
 	if !dc.dev.Enrolled() {
 		t.Fatal("the device holds no credential after a successful enrollment")
+	}
+	// The success line is classified too (bacchus#181), so the UI renders it
+	// through lang.L instead of relaying the English appstate filled in.
+	if len(details) == 0 || details[0].Kind != DetailEnrolled {
+		t.Errorf("the enrolled line went out as %+v, want kind DetailEnrolled", details)
 	}
 	if !cleared {
 		t.Fatal("the spent claim code was left in the config file")
@@ -1648,6 +1655,13 @@ func TestAnUnreachableAccountServiceDoesNotBlockConnecting(t *testing.T) {
 	}
 	if len(details) == 0 || !strings.Contains(details[0].Text, "Could not reach") {
 		t.Fatalf("the user was told nothing about the failed registration: %+v", details)
+	}
+	// And it carries its KIND, not just its English (bacchus#181). This is the
+	// one of the two enrollment sentences a user can act on, and DetailVerbatim
+	// is the path meant for core's own error text — a sentence sent that way is
+	// rendered as the English it arrived as, whatever language the user reads.
+	if details[0].Kind != DetailEnrollUnreachable {
+		t.Errorf("the unreachable-service line went out as kind %d, want DetailEnrollUnreachable: the UI cannot translate what it cannot classify", details[0].Kind)
 	}
 }
 

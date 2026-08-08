@@ -1098,7 +1098,7 @@ func (c *Controller) enrollIfNeeded(ctx context.Context, dc deviceCredential) (a
 			c.logf("enrollment: could not clear the spent claim code from the config file: %v", cerr)
 		}
 		c.logf("enrollment: this device now holds a device credential")
-		c.notifyDetail(Detail{Text: "This device is now registered to your account."})
+		c.notifyDetail(Detail{Kind: DetailEnrolled, Text: "This device is now registered to your account."})
 		return nil
 
 	case accountclient.Terminal(err):
@@ -1108,7 +1108,7 @@ func (c *Controller) enrollIfNeeded(ctx context.Context, dc deviceCredential) (a
 		// Unreachable, rate limited, or the service failed. Say so and keep
 		// going: whatever this device already holds is what it will present.
 		c.logf("enrollment: %v", err)
-		c.notifyDetail(Detail{Text: "Could not reach your account service to register this device — connecting with what this device already has."})
+		c.notifyDetail(Detail{Kind: DetailEnrollUnreachable, Text: "Could not reach your account service to register this device — connecting with what this device already has."})
 		return nil
 	}
 }

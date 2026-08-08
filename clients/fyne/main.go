@@ -464,6 +464,18 @@ var errCountryConfigUnreadable = errors.New("the settings file could not be read
 // the only notice they will get before their access stops. Reading that in a
 // language they do not speak is reading nothing.
 //
+// Enrollment (bacchus#181) is the third, and it is the same argument reaching the
+// two sentences #171 named but did not widen to. The second of them is the one
+// that matters: it is what a user reads when enrollment cannot reach the account
+// service, which is a moment they have something to act on and, until now, no way
+// to read.
+//
+// enrollmentRefusalText's TERMINAL refusals (internal/appstate/controller.go) are
+// deliberately not here. They are a different job — a coded refusal mapped to a
+// sentence, in the package that owns the mapping — and widening to them is a
+// decision rather than a follow-through, which is what #171 declined to make and
+// #181 did not reopen.
+//
 // Everything else is relayed verbatim. That is not an oversight: core's errors
 // are not fixed sentences, they have no translation to look up, and inventing a
 // generic translated sentence to replace them would throw away the only
@@ -490,6 +502,10 @@ func detailText(d appstate.Detail) string {
 		return lang.L("This device's access was withdrawn. It will stop connecting when its current access runs out.")
 	case appstate.DetailRenewalRecovered:
 		return lang.L("Your subscription is up to date again.")
+	case appstate.DetailEnrolled:
+		return lang.L("This device is now registered to your account.")
+	case appstate.DetailEnrollUnreachable:
+		return lang.L("Could not reach your account service to register this device — connecting with what this device already has.")
 	}
 	return d.Text
 }
