@@ -17,7 +17,7 @@ type opRecorder struct {
 	mu      sync.Mutex
 	routes  []string // IPs excluded via the gateway, in call order
 	allows  []string // IPs added to the live kill-switch allowlist, in call order
-	removes []string // IPs reaped via removeFn, in call order (issue #117 self-reap)
+	removes []string // IPs reaped via removeFn, in call order (old #117 self-reap)
 }
 
 func (r *opRecorder) exclude(_ gatewayInfo, ip string) {
@@ -66,7 +66,7 @@ func newTestExcluder() (*poolExcluder, *opRecorder) {
 		// Default gatewayFn "succeeds" with the same zero-value gatewayInfo
 		// these tests already pass to goLive — opRecorder.exclude discards its
 		// gatewayInfo argument entirely, so no existing assertion depends on
-		// this value; tests of the refresh behavior itself (issue #117)
+		// this value; tests of the refresh behavior itself (old #117)
 		// override it explicitly.
 		gatewayFn: func() (gatewayInfo, error) { return gatewayInfo{}, nil },
 	}
@@ -105,7 +105,7 @@ func TestPoolExcluderPreTunnelRecordsThenGoLiveInstalls(t *testing.T) {
 }
 
 // TestPoolExcluderFailoverReExcludesNewAddress is the leak-focused proof for the
-// #109 "handle the failover timing window" requirement: once the tunnel is up
+// old #109 "handle the failover timing window" requirement: once the tunnel is up
 // and the kill-switch armed, a mid-session failover to a NEW exit must exclude
 // and allow-list that new address live, on the dial path. Reverting reserve()'s
 // live-install branch (the `if p.routesLive` early-return, or the p.allowFn call)
@@ -145,7 +145,7 @@ func TestPoolExcluderFailoverReExcludesNewAddress(t *testing.T) {
 	}
 }
 
-// TestPoolExcluderArmAtomicity pins the #73-style split: an address reserved
+// TestPoolExcluderArmAtomicity pins the old #73-style split: an address reserved
 // BEFORE arming lands in the initial allowlist snapshot and is not also
 // live-refreshed; an address reserved AFTER arming takes the live-refresh path.
 // Every address is on exactly one path, never neither (the leak) nor both.
@@ -247,7 +247,7 @@ func TestPoolExcluderArmError(t *testing.T) {
 	}
 }
 
-// TestPoolExcluderReservesIPv6Address is the IPv6-exclude proof (issue #117):
+// TestPoolExcluderReservesIPv6Address is the IPv6-exclude proof (old #117):
 // a reality exit address that resolves to an IPv6 literal must flow through
 // the same live-install path as an IPv4 one, not be silently dropped
 // (resolveExclusions alone is IPv4-only). Reverting reserve()'s
@@ -268,10 +268,10 @@ func TestPoolExcluderReservesIPv6Address(t *testing.T) {
 }
 
 // TestPoolExcluderDoesNotHoldLockAcrossExcludeFn is the lock-narrowing proof
-// (issue #117): a slow excludeFn (standing in for a slow PowerShell shell-out)
+// (old #117): a slow excludeFn (standing in for a slow PowerShell shell-out)
 // must not stall a concurrent call needing mu, like reserved() (which
 // startTunnel's failure cleanup and tunnel.Close() both call). Reverting
-// reserve() to hold mu for its whole body (the pre-#117 shape) makes this
+// reserve() to hold mu for its whole body (the shape that predates old #117) makes this
 // test time out instead of completing promptly, since reserved() would then
 // block until excludeFn returns.
 func TestPoolExcluderDoesNotHoldLockAcrossExcludeFn(t *testing.T) {
@@ -307,7 +307,7 @@ func TestPoolExcluderDoesNotHoldLockAcrossExcludeFn(t *testing.T) {
 }
 
 // TestPoolExcluderSelfReapsRouteInstalledAfterDisable is the orphaned-route
-// proof (issue #117): narrowing reserve()'s lock (above) reopens a window
+// proof (old #117): narrowing reserve()'s lock (above) reopens a window
 // where startTunnel's failure cleanup (or tunnel.Close()) can disable() and
 // take its final removeRoutes(reserved()) snapshot while a concurrent
 // reserve()'s install is still in flight, unlocked — landing after the
@@ -363,7 +363,7 @@ func waitForGatewayRefreshIdle(t *testing.T, pe *poolExcluder) {
 }
 
 // TestPoolExcluderReserveDoesNotBlockOnGatewayRefresh is the off-dial-path
-// proof (issue #123c): reserve()'s live-install path must not shell out to
+// proof (old #123c): reserve()'s live-install path must not shell out to
 // defaultGateway synchronously — a slow gatewayFn (standing in for a slow
 // PowerShell spawn) must not stall the dial reserve() guards. Reverting to a
 // synchronous gatewayFn call inside reserve() makes this test time out
@@ -398,10 +398,10 @@ func TestPoolExcluderReserveDoesNotBlockOnGatewayRefresh(t *testing.T) {
 }
 
 // TestPoolExcluderBackgroundRefreshUpdatesGatewayForNextInstall is the
-// eventual-freshness proof (issue #123c): reserve() no longer re-resolves the
+// eventual-freshness proof (old #123c): reserve() no longer re-resolves the
 // gateway itself, but the background refresh it triggers must still keep
 // p.gw current for whichever reserve() comes next — otherwise moving the
-// resolve off the dial path would silently resurrect the #117 stale-gateway
+// resolve off the dial path would silently resurrect the old #117 stale-gateway
 // bug (a moved laptop's failover routing an exclusion via a next-hop that no
 // longer exists, for the rest of the session instead of just one call).
 func TestPoolExcluderBackgroundRefreshUpdatesGatewayForNextInstall(t *testing.T) {
@@ -476,7 +476,7 @@ func TestPoolExcluderBackgroundRefreshFailureKeepsLastKnownGateway(t *testing.T)
 // new addresses at once (a multi-address reality answer) must not spawn one
 // redundant PowerShell process per address. The three calls here are
 // synchronous from the test's own goroutine, so the first is guaranteed to
-// have set gwRefreshing before the second and third run (issue #123c).
+// have set gwRefreshing before the second and third run (old #123c).
 func TestPoolExcluderTriggerGatewayRefreshDedupsConcurrentCalls(t *testing.T) {
 	pe, _ := newTestExcluder()
 
@@ -510,7 +510,7 @@ func TestPoolExcluderTriggerGatewayRefreshDedupsConcurrentCalls(t *testing.T) {
 }
 
 // TestPoolExcluderSkipsAllowlistForInstallReapedAfterDisable is the
-// firewall-rule-residual proof (issue #123b): when a reserve()'s route
+// firewall-rule-residual proof (old #123b): when a reserve()'s route
 // install races past disable()'s teardown snapshot (same window as
 // TestPoolExcluderSelfReapsRouteInstalledAfterDisable) under an ARMED
 // kill-switch, the reaped install must not also add a live allowlist entry —

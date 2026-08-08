@@ -4,7 +4,7 @@ package enforcement
 
 import "testing"
 
-// TestReserveBeforeStartSurvivesIntoBringUp is issue #109's ordering at the
+// TestReserveBeforeStartSurvivesIntoBringUp is old #109's ordering at the
 // Enforcer level, and the reason ReserveUnderlay is on Enforcer and not only
 // on Session.
 //
@@ -27,7 +27,7 @@ func TestReserveBeforeStartSurvivesIntoBringUp(t *testing.T) {
 	t.Cleanup(sess.Close)
 
 	if indexOf(f.seq(), "exclude 198.51.100.7") < 0 {
-		t.Fatalf("an underlay reserved before Start was never excluded during bring-up (issue #109)\nsequence: %v", f.seq())
+		t.Fatalf("an underlay reserved before Start was never excluded during bring-up (old #109)\nsequence: %v", f.seq())
 	}
 }
 

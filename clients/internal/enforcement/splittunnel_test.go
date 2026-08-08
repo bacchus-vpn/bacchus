@@ -190,8 +190,8 @@ func TestBypassPolicyArmPropagatesInstallErrorAndStaysUnarmed(t *testing.T) {
 	}
 }
 
-// TestBypassPolicyArmLearnRaceNeverLosesAnIP is the regression test for issue
-// #73: a bypass IP learned concurrently with arm() must always end up on at
+// TestBypassPolicyArmLearnRaceNeverLosesAnIP is the regression test for
+// old #73: a bypass IP learned concurrently with arm() must always end up on at
 // least one side of the ordering — baked into arm()'s snapshot, or reported
 // live via onLearn(ip, true) — never neither. The bug this guards against was
 // exactly a window where an IP could land on neither side, because the old

@@ -1,4 +1,4 @@
-// General UDP forwarding (issue #41): a genuine SOCKS5 UDP ASSOCIATE client
+// General UDP forwarding (old #41): a genuine SOCKS5 UDP ASSOCIATE client
 // (RFC 1928 §4/§7) against the tunnel's local SOCKS server
 // (core/client.go's handleSocksUDPAssociate, core/udprelay.go), plus the
 // idle-timeout pump that bridges one gVisor-captured flow to it (or to a
@@ -26,7 +26,7 @@ const (
 
 // udpIdleTimeout is how long a captured UDP flow may sit with no datagram in
 // either direction before pumpUDP tears it down — the client-driven half of
-// issue #41's NAT-style association expiry (core/engine.go's udpIdleTimeout
+// old #41's NAT-style association expiry (core/engine.go's udpIdleTimeout
 // field is the exit-side backstop for when this signal never arrives). A
 // var, not a const, so a test can shrink it.
 var udpIdleTimeout = 45 * time.Second
@@ -54,7 +54,7 @@ func dialDirectUDP(target string) (udpRelay, error) {
 // udpRelay structurally like everything else here) and relay (either a
 // direct dial or a SOCKS UDP ASSOCIATE tunnel) until either side
 // closes/errors or idle passes with no datagram either way — the 5-tuple
-// flow's NAT-style expiry (issue #41). Both sides are the same interface so
+// flow's NAT-style expiry (old #41). Both sides are the same interface so
 // tests can fake either end without a real netstack.
 func pumpUDP(conn udpRelay, relay udpRelay, idle time.Duration) {
 	var lastActivity atomic.Int64

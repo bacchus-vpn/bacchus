@@ -144,7 +144,7 @@ func TestDialSOCKSUDPAssociateFailsWhenNothingListens(t *testing.T) {
 // fakeSOCKSUDPAssociateNonLoopbackReply completes the SOCKS5 UDP ASSOCIATE
 // handshake like fakeSOCKSUDPAssociateEcho, but replies with a non-loopback
 // BND.ADDR — standing in for a compromised or misconfigured local SOCKS
-// server, to prove dialSOCKSUDPAssociate refuses to dial it (issue #99).
+// server, to prove dialSOCKSUDPAssociate refuses to dial it (old #99).
 func fakeSOCKSUDPAssociateNonLoopbackReply(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -498,7 +498,7 @@ func TestHandleGeneralUDPForwardsThroughFakeTunnel(t *testing.T) {
 }
 
 // TestHandleGeneralUDPDropsWhenTunnelUnreachable is the hard-invariant test
-// (issue #41): when the tunnel relay can't be established, the captured
+// (old #41): when the tunnel relay can't be established, the captured
 // datagram must be dropped — never sent to the real destination in the
 // clear. target stands in for "the open internet destination" this flow is
 // addressed to; if handleGeneralUDP ever fell back to a direct send despite

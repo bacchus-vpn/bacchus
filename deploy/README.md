@@ -86,11 +86,35 @@ journalctl -u bacchus-exit -f
 ```
 
 ## Update a binary
+
+For **one** box, by hand:
+
 ```bash
 systemctl stop bacchus-exit          # stop before replacing a running binary
 cp bacchus-node /usr/local/bin/      # (scp'd from the dev machine)
 systemctl start bacchus-exit
 ```
+
+For a **deployment**, do not do the above once per box. Use `bacchus-pin.sh`,
+which takes the coordinator and every node to one named commit from one build:
+
+```bash
+cp testbed.env.example testbed.env    # once; testbed.env is gitignored
+$EDITOR testbed.env                   # your hosts and units
+sh bacchus-pin.sh --commit "$(git rev-parse HEAD)"
+```
+
+It refuses a build that cannot be identified (a `git worktree` checkout, a dirty
+tree, a missing or unapplied release stamp), stages a digest-checked copy onto
+every box before replacing anything, restarts the **coordinator last** — which is
+what makes every node's build readable from the coordinator's journal — and then
+checks the result with `bacchus-fleet-check.sh` and `cmd/coordinator-probe`
+rather than reporting success because `scp` exited 0. **It never copies a
+`.service` file**, because the coordinator's live unit carries hand-added flags
+that the template here does not.
+
+The full procedure, the negative control the probe rests on, and what the exit
+codes mean: [docs/RUNNING.md](../docs/RUNNING.md#pinning-the-whole-deployment-to-a-commit-issue-205-adr-0064).
 
 ## Adding another exit (issue #5)
 Exit selection is only meaningful with more than one exit. To add one, provision

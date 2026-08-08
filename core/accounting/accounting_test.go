@@ -81,7 +81,7 @@ func TestExitProposeClientCosignRoundTrip(t *testing.T) {
 	}
 }
 
-// TestClientRejectsMismatch: the acceptance criterion in issue #20 -- neither
+// TestClientRejectsMismatch: the acceptance criterion in old #20 -- neither
 // side gets a receipt when their counts disagree, and the client's rejection
 // tells the exit what it saw (the cross-check hook).
 func TestClientRejectsMismatch(t *testing.T) {
@@ -106,7 +106,7 @@ func TestClientRejectsMismatch(t *testing.T) {
 	}
 }
 
-// TestVerifyFailsOnTamperedBytes is the other half of #20's acceptance
+// TestVerifyFailsOnTamperedBytes is the other half of old #20's acceptance
 // criterion: a tampered count fails verification.
 func TestVerifyFailsOnTamperedBytes(t *testing.T) {
 	exitKey, clientKey := genKey(t), genKey(t)
@@ -138,7 +138,7 @@ func TestVerifyFailsOnTamperedBytes(t *testing.T) {
 }
 
 // TestVerifyRequiresBothSignatures proves the "neither side alone" half of
-// #20's acceptance criterion directly: a receipt is only as good as both
+// old #20's acceptance criterion directly: a receipt is only as good as both
 // signatures, not either one.
 func TestVerifyRequiresBothSignatures(t *testing.T) {
 	exitKey, clientKey := genKey(t), genKey(t)

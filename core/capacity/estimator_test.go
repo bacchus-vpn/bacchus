@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// The tests in this file are the spike's actual deliverable (issue #144).
+// The tests in this file are the spike's actual deliverable (old #144).
 //
 // docs/design/node-capacity.md §7 argues that this estimator resists gaming, and
 // the argument is quantitative — "an attacker cannot gain more than RiseFactor per
@@ -450,7 +450,7 @@ func TestDecayExpiresStaleRating(t *testing.T) {
 // the size of the loss depended on the caller's tick rate, which is not a property
 // a rating should have. Note that no adversarial test caught it: over-decaying
 // looks like caution right up until it drives off the honest residential
-// volunteers issue #143 exists to recruit.
+// volunteers old #143 exists to recruit.
 func TestDecayIsIndependentOfAdvanceFrequency(t *testing.T) {
 	p := DefaultParams()
 	p.Ceiling = 0
@@ -505,7 +505,7 @@ func TestIdleNodeKeepsItsRating(t *testing.T) {
 }
 
 // TestCongestionTracksReality pins the "periodic re-tests track reality" half of
-// issue #144, and design §5.3's deliberate conflation: a node whose uplink is
+// old #144, and design §5.3's deliberate conflation: a node whose uplink is
 // congested and a node that is throttling are the same node from here, and the
 // correct action for both is identical. No attribution is attempted, and none is
 // needed.

@@ -68,7 +68,7 @@ func TestParseBytes(t *testing.T) {
 
 // TestUnitsAreDecimalNotBinary pins the choice in limits.go: ISPs bill in decimal,
 // so "500GB" is 500e9 and not 500*2^30. Reading it as binary would silently let a
-// node overshoot its real cap by 7.4% — which is the exact overage bill issue #143
+// node overshoot its real cap by 7.4% — which is the exact overage bill old #143
 // exists to prevent, arriving quietly.
 func TestUnitsAreDecimalNotBinary(t *testing.T) {
 	got, err := ParseBytes("500GB")
@@ -147,7 +147,7 @@ func TestLimitsValidate(t *testing.T) {
 }
 
 // The zero Limits must describe today's node exactly: uncapped and unmetered. This
-// is what keeps issue #143 opt-in and the existing datacenter fleet unaffected.
+// is what keeps old #143 opt-in and the existing datacenter fleet unaffected.
 func TestZeroLimitsIsTodaysNode(t *testing.T) {
 	var l Limits
 	if l.SpeedCap != 0 || l.MonthlyQuota != 0 {

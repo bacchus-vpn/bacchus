@@ -1,7 +1,7 @@
 package capacity
 
 // This file holds the arithmetic the coordinator's country-scoped exit assignment
-// runs on (issue #146, ADR-0042). Only the arithmetic: which exit is actually chosen
+// runs on (old #146, ADR-0042). Only the arithmetic: which exit is actually chosen
 // is policy and lives in cmd/coordinator, because it depends on registry state
 // (liveness, quota disposition, the client's exclusions) this package knows nothing
 // about.
@@ -49,7 +49,7 @@ func ProjectedShare(usable Rate, sessions int) (share Rate, unlimited bool) {
 // The clamp: a node with no measured rating falls back to its DECLARED cap (see
 // RatingStore.Usable), which is a self-report. Ranking on it raw would mean an
 // unrated node claiming 10 Gbit outranks an honestly-measured neighbour — paying for
-// the claim in assignments, which is exactly the trade #157 refused. So an unrated
+// the claim in assignments, which is exactly the trade old #157 refused. So an unrated
 // node's capacity contribution is clamped to `ceiling`, the same bound the untrusted
 // estimator clamps to, making a forged or inflated declaration buy precisely what
 // silence buys and not one bit more.
@@ -98,7 +98,7 @@ func OctaveFloor(best Rate) Rate {
 // declared no cap (declared == 0 means uncapped, see Usable) and no measurement exists.
 //
 // It is a named predicate rather than a condition spelled out at each call site because
-// it is the exact boundary of the opt-in promise declared limits make (#143, ADR-0040),
+// it is the exact boundary of the opt-in promise declared limits make (old #143, ADR-0040),
 // and because the obvious shorthand for it is wrong. "usable == 0" LOOKS equivalent —
 // for an unrated node the usable rate IS the declaration — but it survives only until a
 // caller passes a transformed rate. RankShare's output, for instance, clamps an unrated
@@ -136,7 +136,7 @@ func Unmetered(declared uint64, rated bool) bool { return !rated && declared == 
 // above zero, applied to ratings that are all ceiling-clamped today, would cap a
 // rated exit at a couple of dozen sessions when it can carry orders of magnitude
 // more, stranding users to protect a number that is not yet real. It is the same trap
-// #145's serve floor is held at zero for, and it lifts on the same condition: a fed
+// old #145's serve floor is held at zero for, and it lifts on the same condition: a fed
 // trusted stream.
 func Full(usable Rate, sessions int, unmetered bool, minShare Rate) bool {
 	if minShare == 0 {
