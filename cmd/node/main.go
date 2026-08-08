@@ -85,7 +85,19 @@ func main() {
 	relayFwdTotal := flag.Int("relay-forward-max-total", 0, "relay serving -relay-ingress: most forwarded circuits this node will carry in total, across every neighbour (issue #25). 0 uses the built-in default (256). This is the number that bounds what forwarding can cost you; the per-peer cap only decides how it is shared out. A per-peer value above this one is clamped to it, since otherwise one neighbour could hold every slot")
 	relayFwdPeerRate := flag.String("relay-forward-peer-rate", "", "relay serving -relay-ingress: pace forwarded traffic per upstream neighbour, e.g. 5Mbit (issue #25). Empty — the default — is unpaced, because your TOTAL forwarding bandwidth is already bounded by -max-speed; this only divides that budget between neighbours, and is what you reach for when one of them crowds out the rest. Unlike the circuit caps, bytes are slowed rather than dropped: a circuit already admitted is not worth destroying mid-copy to save bandwidth that pacing reclaims anyway")
 	relayDirectory := flag.String("relay-directory", "", "path to a coordinator-signed snapshot (e.g. cmd/coldstart-bootstrap -cache) used for relay chaining: a client picks its hops out of it, a -relay-ingress hop admits a forward only to an address in it. Verified against -mesh-pubkey and must be unexpired. Required by -relay-hops 2+ and by -relay-ingress. Re-read from this same path on an interval (issue #27), so an operator rotating the file in place is picked up without a restart — a bad, expired, or unreadable reload leaves the previous directory enforcing unchanged")
+	// The signed release channel (issue #34, ADR-0052, ADR-0065). See update.go for
+	// why a node polls and a client does not.
+	upd := registerUpdateFlags()
 	flag.Parse()
+
+	// BEFORE anything else: if a previous run applied a release and never confirmed
+	// it, put the previous binary back and exit so the supervisor starts it. This is
+	// unconditional — the marker was written by a run that may have been configured
+	// differently — and with no marker it is one stat.
+	updTarget := updateTarget(*upd.target)
+	if updTarget != "" {
+		checkStartupDemotion(updTarget)
+	}
 
 	// The volunteer opt-ins (issue #12) add serve roles to whatever -role names, and
 	// are checked before anything registers: a donation that cannot work must stop the
@@ -253,6 +265,14 @@ func main() {
 	mesh, err := loadMeshRecovery(*meshPeers, *meshProof, *meshPubkey)
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// The update check loop, once the node is past every startup failure that would
+	// have stopped it. A release that arrives is verified against the anchor, staged
+	// beside the binary and published by a rename; nothing here can fail in a way
+	// that stops the node serving.
+	if updTarget != "" {
+		go confirmAfter(ctx, startUpdates(ctx, upd, updTarget), confirmProbation)
 	}
 
 	// runNode serves (forwarder) or connects (client) and, for a client with mesh
