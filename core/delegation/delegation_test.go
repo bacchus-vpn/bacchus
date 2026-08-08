@@ -144,6 +144,25 @@ func TestVerifyDelegationCertRejectsTheWrongRole(t *testing.T) {
 	}
 }
 
+// TestVerifyDelegationCertAcceptsARevocationsRoleCert pins that RoleRevocations
+// (issue #199, ADR-0017, ADR-0063) is a live role by the same general verifier
+// used for policy and update, not a value that merely exists in the type. Part 1
+// of #199 is inert without this: Known() is advisory only, and this is the check
+// that actually admits — or refuses — a cert cut for this role.
+func TestVerifyDelegationCertAcceptsARevocationsRoleCert(t *testing.T) {
+	rootPub, rootPriv, cert, _, now := liveCert(t)
+
+	cert.Role = delegation.RoleRevocations
+	signed := signCert(t, rootPriv, cert)
+
+	if _, err := delegation.VerifyDelegationCert(rootPub, signed, delegation.RoleRevocations, now, nil); err != nil {
+		t.Fatalf("VerifyDelegationCert() = %v, want accept for a revocations-role cert asked for as revocations", err)
+	}
+	if _, err := delegation.VerifyDelegationCert(rootPub, signed, delegation.RolePolicy, now, nil); !errors.Is(err, delegation.ErrWrongRole) {
+		t.Fatalf("VerifyDelegationCert(revocations cert, want policy) = %v, want ErrWrongRole", err)
+	}
+}
+
 // TestVerifyDelegationCertRejectsAnUnknownRole is the same rule at its edge: a role
 // nobody has minted yet must not slip through by not matching any known value. The
 // check compares against the ONE role the caller asked for, so this falls out —
@@ -348,7 +367,7 @@ func TestEncodeDecodeCertRoundTrip(t *testing.T) {
 // TestRoleKnown pins the advisory helper, which deliberately does NOT gate
 // verification — a verifier compares against the single role it was built for.
 func TestRoleKnown(t *testing.T) {
-	for _, r := range []delegation.Role{delegation.RolePolicy, delegation.RoleUpdate} {
+	for _, r := range []delegation.Role{delegation.RolePolicy, delegation.RoleUpdate, delegation.RoleRevocations} {
 		if !r.Known() {
 			t.Errorf("Role(%q).Known() = false, want true", r)
 		}

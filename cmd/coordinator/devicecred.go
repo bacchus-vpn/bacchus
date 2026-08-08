@@ -309,34 +309,42 @@ func sweepChallengesLoop(ctx context.Context) {
 // not set one explicitly. An empty audience with the gate ENABLED is refused: it
 // would verify perfectly well and bind nothing, which is the failure mode that
 // looks exactly like success.
-func setupDeviceCred(ctx context.Context, rootPubHex, audience, advertised, revocationsPath string) (*devicecred.Verifier, string, error) {
+//
+// The fourth return value is the device-namespace revocation list this function
+// builds and keeps reloadRevocationsLoop pointed at — nil exactly when the
+// device-credential gate is disabled, the same case in which no reload loop
+// starts at all. See setupAdmission's identical return value for why: it lets a
+// caller point the signed-revocations fetch loop (issue #199, ADR-0017,
+// ADR-0063) at the SAME in-memory list, additively, and there is nothing for it
+// to populate — and nobody to read it — while this gate is off.
+func setupDeviceCred(ctx context.Context, rootPubHex, audience, advertised, revocationsPath string) (*devicecred.Verifier, string, *atomic.Pointer[admission.RevocationList], error) {
 	if rootPubHex == "" {
-		return nil, "", nil
+		return nil, "", nil, nil
 	}
 	pub, err := hex.DecodeString(rootPubHex)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return nil, "", fmt.Errorf("device credential: bad -device-root-pubkey: want %d hex-encoded bytes", ed25519.PublicKeySize)
+		return nil, "", nil, fmt.Errorf("device credential: bad -device-root-pubkey: want %d hex-encoded bytes", ed25519.PublicKeySize)
 	}
 
 	if audience == "" {
 		audience = advertised
 	}
 	if audience == "" {
-		return nil, "", fmt.Errorf("device credential: -device-root-pubkey is set but this coordinator has no audience — set -advertise (or -device-audience) to the identity clients dial it by, or an assertion would be bound to nothing")
+		return nil, "", nil, fmt.Errorf("device credential: -device-root-pubkey is set but this coordinator has no audience — set -advertise (or -device-audience) to the identity clients dial it by, or an assertion would be bound to nothing")
 	}
 
-	var revocations atomic.Pointer[admission.RevocationList]
+	revocations := new(atomic.Pointer[admission.RevocationList])
 	revocations.Store(admission.NewRevocationList())
-	go reloadRevocationsLoop(ctx, revocationsPath, &revocations)
+	go reloadRevocationsLoop(ctx, revocationsPath, revocations)
 	go sweepChallengesLoop(ctx)
 
 	v, err := devicecred.NewVerifier(ed25519.PublicKey(pub), func(serial string) bool {
 		return revocations.Load().Revoked(serial)
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("device credential: %w", err)
+		return nil, "", nil, fmt.Errorf("device credential: %w", err)
 	}
-	return v, audience, nil
+	return v, audience, revocations, nil
 }
 
 // challengeKey identifies whoever a challenge was issued to. It is the full source

@@ -196,12 +196,24 @@ type wire struct {
 	Version         int                    `json:"version,omitempty"`
 	Capabilities    []handshake.Capability `json:"capabilities,omitempty"`
 	Reason          string                 `json:"reason,omitempty"`
-	Cred            string                 `json:"cred,omitempty"`        // admission credential (issue #42); verified on register/list/connect
-	Release         string                 `json:"release,omitempty"`     // product release version, semver (issue #36, ADR-0015): a node stamps it on register (this coordinator fences a stale one); this coordinator stamps its own on client replies so a client can force-major/skip-minor. Distinct from Version, the wire-shape int (ADR-0016).
-	Relay           string                 `json:"relay,omitempty"`       // relay disposition on a relay-mode "session" reply (issue #17, ADR-0033): relayPeer = a Bacchus relay node splices client<->exit (preferred); relayTURN = no peer relay available, the client reaches the exit directly and its ICE relays through TURN only if it can't hole-punch (fallback). Empty on direct-mode replies.
-	RelayTag        string                 `json:"relayTag,omitempty"`    // stable opaque tag identifying the assigned peer relay (issue #56, ADR-0035), so a client rotating the coordinator pool can skip a second member that assigns the SAME relay it just failed on. Set only on the peer-relay path; empty for direct/TURN-fallback (no distinct relay to dedupe). Additive/optional — a client predating #56 ignores it.
-	IngressPort     int                    `json:"ingressPort,omitempty"` // a relay's onion-forward TCP listener port (issue #124, ADR-0038): the port a client's onion layer dials to use this node as an intermediate hop. Self-reported on register — the coordinator cannot observe a TCP listener from a UDP register — but only the PORT is trusted: buildSnapshot advertises the ingress as the coordinator-OBSERVED source IP joined to this port, so a relay cannot assert an ingress IP (see Entry.Ingress). Zero/absent => this relay advertises no ingress and is not relay-eligible. Additive/optional; a relay predating #124 omits it.
-	SpeedCap        uint64                 `json:"speedCap,omitempty"`    // a forwarder's DECLARED aggregate speed cap in bits/s (issue #143, ADR-0040): what its operator is WILLING to carry, which is not what it CAN carry. Self-reported, and trusted, because this claim can only ever bind downward: under-declaring merely reduces what the node is given (its operator's uplink, their ISP bill, their call), and over-declaring is inert because usable = min(declared, measured) and the measured term is NOT a self-report. Contrast Operator/Ingress, where the self-report is exactly the thing an attacker profits from and is therefore not trusted. Zero/absent = no declared cap; additive/optional, so a node predating #143 is treated exactly as it is today.
+	Cred            string                 `json:"cred,omitempty"`    // admission credential (issue #42); verified on register/list/connect
+	Release         string                 `json:"release,omitempty"` // product release version, semver (issue #36, ADR-0015): a node stamps it on register (this coordinator fences a stale one); this coordinator stamps its own on client replies so a client can force-major/skip-minor. Distinct from Version, the wire-shape int (ADR-0016).
+	// Build is a node's VCS revision, self-stamped on register (issue #182,
+	// ADR-0063) — coordBuild's/describeBuild's reasoning applied to the node
+	// side of the same comparison: Release is a wire field a client parses as
+	// semver (ADR-0015), so the revision travels separately rather than folded
+	// into it, exactly as this coordinator already keeps its OWN revision off
+	// every wire. Empty is the ordinary case for a build made in a git
+	// WORKTREE or under `go test` — the toolchain records VCS data only from a
+	// checkout with a real .git directory — and must not read as suspicious;
+	// it is a MISMATCH against this coordinator's own revision that is
+	// evidence, never the absence of one. Logged only, beside release=; never
+	// compared or fenced on here.
+	Build       string `json:"build,omitempty"`
+	Relay       string `json:"relay,omitempty"`       // relay disposition on a relay-mode "session" reply (issue #17, ADR-0033): relayPeer = a Bacchus relay node splices client<->exit (preferred); relayTURN = no peer relay available, the client reaches the exit directly and its ICE relays through TURN only if it can't hole-punch (fallback). Empty on direct-mode replies.
+	RelayTag    string `json:"relayTag,omitempty"`    // stable opaque tag identifying the assigned peer relay (issue #56, ADR-0035), so a client rotating the coordinator pool can skip a second member that assigns the SAME relay it just failed on. Set only on the peer-relay path; empty for direct/TURN-fallback (no distinct relay to dedupe). Additive/optional — a client predating #56 ignores it.
+	IngressPort int    `json:"ingressPort,omitempty"` // a relay's onion-forward TCP listener port (issue #124, ADR-0038): the port a client's onion layer dials to use this node as an intermediate hop. Self-reported on register — the coordinator cannot observe a TCP listener from a UDP register — but only the PORT is trusted: buildSnapshot advertises the ingress as the coordinator-OBSERVED source IP joined to this port, so a relay cannot assert an ingress IP (see Entry.Ingress). Zero/absent => this relay advertises no ingress and is not relay-eligible. Additive/optional; a relay predating #124 omits it.
+	SpeedCap    uint64 `json:"speedCap,omitempty"`    // a forwarder's DECLARED aggregate speed cap in bits/s (issue #143, ADR-0040): what its operator is WILLING to carry, which is not what it CAN carry. Self-reported, and trusted, because this claim can only ever bind downward: under-declaring merely reduces what the node is given (its operator's uplink, their ISP bill, their call), and over-declaring is inert because usable = min(declared, measured) and the measured term is NOT a self-report. Contrast Operator/Ingress, where the self-report is exactly the thing an attacker profits from and is therefore not trusted. Zero/absent = no declared cap; additive/optional, so a node predating #143 is treated exactly as it is today.
 	// DeclaredQuotaBytes is a forwarder's DECLARED monthly traffic quota in BYTES
 	// (issue #49, ADR-0040 amendment): the cap its operator configured, which is the
 	// input the signed policy's serve_floor.min_declared_quota_bytes is compared
@@ -560,6 +572,11 @@ func main() {
 	policyRootPubKey := flag.String("policy-root-pubkey", "", "offline ROOT public key (hex) the signed network policy chains to (issue #39, ADR-0043). When set, this coordinator fetches a signed policy bundle and enforces the floors, fences and reserves inside it — numbers it cannot author, because it does not hold the key that signs them. Empty DISABLES signed policy and leaves this coordinator enforcing only its own flags. NOTE the direction of failure flips here: unlike -admission-pubkey and -min-serving-version, which fail OPEN when unset, a coordinator WITH a policy root configured stops assigning new work once its policy goes stale. Coordinators are a pool with client rotation, so one failing closed sheds to its peers.")
 	policySource := flag.String("policy-source", "", "where to fetch the signed policy bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at. Required when -policy-root-pubkey is set. Re-fetched every 10s and re-verified from scratch every time, delegation included.")
 	policyStatePath := flag.String("policy-state", "secrets/policy-state.json", "path to this coordinator's persistent policy state (issue #39): the last VERIFIED bundle, so a restart does not begin unpoliced, and the highest policy sequence ever accepted, which is what refuses a rollback. The sequence floor cannot be re-derived from signed data, so write access to this file is equivalent to being able to roll this coordinator back one generation — keep it with the other secrets.")
+	revocationsRootPubKey := flag.String("revocations-root-pubkey", "", "offline ROOT public key (hex) the two signed revocation bundles chain to (issue #199, ADR-0017, ADR-0063) — the untrusted-hop mechanism past bacchus-payment's revocation-sync. When set, this coordinator additionally fetches, verifies and caches a signed bundle per namespace and installs it into the SAME in-memory list -device-revocations / -admission-revocations already populate; those two flags keep working completely unchanged either way. Empty DISABLES the mechanism, which is how every coordinator ships until an operator has run the signing ceremony. Shared by both namespaces: the same root delegates one 'revocations' role that signs both lists.")
+	deviceRevocationsSource := flag.String("device-revocations-source", "", "where to fetch the signed DEVICE-namespace revocation bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at — same two transports as -policy-source. Required when -revocations-root-pubkey is set AND -device-root-pubkey is set (a signed source for a gate that is off has nothing to feed); re-fetched and re-verified from scratch every 10s.")
+	deviceRevocationsState := flag.String("device-revocations-state", "secrets/device-revocations-state.json", "path to this coordinator's persistent state for the DEVICE-namespace signed bundle (issue #199): the last VERIFIED bundle, so a restart does not begin holding only whatever the untrusted hop happens to be serving at that instant, and the newest as_of ever accepted, which is what refuses a rollback. That floor cannot be re-derived from signed data, so write access to this file is equivalent to rolling this namespace's revocations back to an older generation — keep it with the other secrets.")
+	admissionRevocationsSource := flag.String("admission-revocations-source", "", "where to fetch the signed ADMISSION-namespace revocation bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at. Required when -revocations-root-pubkey is set AND admission is enabled (-admission-pubkey or -admission-authority); re-fetched and re-verified from scratch every 10s.")
+	admissionRevocationsState := flag.String("admission-revocations-state", "secrets/admission-revocations-state.json", "path to this coordinator's persistent state for the ADMISSION-namespace signed bundle (issue #199) — the admission-namespace counterpart to -device-revocations-state; see it for what this protects and why it belongs with the other secrets.")
 	rendezvousDTLS := flag.Bool("rendezvous-dtls", true, "also accept DTLS-shaped rendezvous on -addr, alongside raw JSON, on the same port (issue #175, ADR-0059). The two shapes are told apart by the DTLS record header, which no JSON document can produce, so this REFUSES NOTHING a coordinator accepted before and is safe to deploy ahead of any client that speaks it. Replies go back in whichever shape the peer arrived in. Turn it OFF only to shed the one cost it adds: a bounded table of per-source DTLS associations, which a spoofed-source flood can hold slots in for the length of a handshake timeout (it cannot get further — DTLS's cookie exchange is answered from a source that never replies).")
 	printBootstrapPub := flag.Bool("print-bootstrap-pubkey", false, "load (or generate) the snapshot-signing key at -bootstrap-key, print its public key (hex) to stdout, and exit. Provision this to mesh-walk clients (bacchus-node -mesh-pubkey) so they can verify coordinator-signed snapshots recovered via a peer (issue #31, design §4.3). Couriers get the same key inside their -courier-invite.")
 	flag.Parse()
@@ -591,7 +608,7 @@ func main() {
 	} else {
 		log.Printf("version fence ENABLED — nodes below %s are dropped from matchmaking (issue #36); coordinator release %s", servingFloor, coordBuild())
 	}
-	v, admissionAnchors, err := setupAdmission(context.Background(), *admissionPubKey, admissionAuthorities, *admissionRevocations)
+	v, admissionAnchors, admissionRevocationsList, err := setupAdmission(context.Background(), *admissionPubKey, admissionAuthorities, *admissionRevocations)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -611,7 +628,7 @@ func main() {
 	// into admission, because it answers a different question against a different
 	// trust anchor. A malformed key, or an enabled gate with no audience to bind
 	// assertions to, is fatal rather than degraded.
-	dv, audience, err := setupDeviceCred(context.Background(), *deviceRootPubKey, *deviceAudienceFlag, coordAdvertise(*advertise, *addr), *deviceRevocations)
+	dv, audience, deviceRevocationsList, err := setupDeviceCred(context.Background(), *deviceRootPubKey, *deviceAudienceFlag, coordAdvertise(*advertise, *addr), *deviceRevocations)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -620,6 +637,17 @@ func main() {
 		log.Printf("device-credential gate DISABLED (-device-root-pubkey not set) — connects are gated by admission alone; no entitlement is checked (issue #50)")
 	} else {
 		log.Printf("device-credential gate ENABLED — every connect must present a credential chaining to the configured offline root, bound to audience %q (issue #50)", audience)
+	}
+	// Signed revocation bundles from the untrusted hop past revocation-sync
+	// (issue #199, ADR-0017, ADR-0063), additive to the two plain-file loops
+	// setupAdmission/setupDeviceCred just started — see revocations.go. Started
+	// here, after both gates, because it needs the SAME in-memory revocation
+	// list each of them already holds and only they can hand out.
+	if err := startRevocations(context.Background(), *revocationsRootPubKey,
+		revocationsNamespaceConfig{label: "device", source: *deviceRevocationsSource, state: *deviceRevocationsState, target: deviceRevocationsList},
+		revocationsNamespaceConfig{label: "admission", source: *admissionRevocationsSource, state: *admissionRevocationsState, target: admissionRevocationsList},
+	); err != nil {
+		log.Fatal(err)
 	}
 	// Signed network policy (issue #39, ADR-0043). Started before the packet loop so
 	// the cached policy is restored — and the fail-closed state is established —
@@ -855,7 +883,16 @@ func handle(m wire, src *net.UDPAddr) {
 				priorClaims = &pc
 			}
 			if prior == nil {
-				log.Printf("relay registered: %s (%s) country=%s (%s) release=%s", m.ID, src, countryOrUnknown(claims.derived), countryClaimLabel(claims), releaseOrUnknown(m.Release))
+				// build names the SENDER's revision (issue #182, ADR-0063), never
+				// compared here — a log-only counterpart to release=, tolerant of
+				// empty (a worktree or `go test` build) because absence is the
+				// ordinary case and only a MISMATCH against this coordinator's own
+				// revision (coordBuild, printed once at startup) is evidence.
+				build := m.Build
+				if build == "" {
+					build = "unknown"
+				}
+				log.Printf("relay registered: %s (%s) country=%s (%s) release=%s build=%s", m.ID, src, countryOrUnknown(claims.derived), countryClaimLabel(claims), releaseOrUnknown(m.Release), build)
 			}
 			noteCountryOverride("relay", m.ID, priorClaims, claims)
 			noteRelease("relay", m.ID, prior, m.Release)
@@ -888,7 +925,13 @@ func handle(m wire, src *net.UDPAddr) {
 				priorClaims = &pc
 			}
 			if prior == nil {
-				log.Printf("exit registered: %s -> %s country=%s (%s) release=%s", m.ID, m.Addr, countryOrUnknown(claims.derived), countryClaimLabel(claims), releaseOrUnknown(m.Release))
+				// See the relay branch above for what build is and why empty is
+				// tolerated (issue #182, ADR-0063).
+				build := m.Build
+				if build == "" {
+					build = "unknown"
+				}
+				log.Printf("exit registered: %s -> %s country=%s (%s) release=%s build=%s", m.ID, m.Addr, countryOrUnknown(claims.derived), countryClaimLabel(claims), releaseOrUnknown(m.Release), build)
 				if claims.source == countrySplit {
 					// Loud, because it is the one case where a client is shown a
 					// country this coordinator has NOT tied to the egress path.
