@@ -13,7 +13,13 @@
   `core/coldstart/atomic.go` (`writeFileAtomic`; `writeStaged` deleted);
   `core/devicestore/store.go` (`save`); `core/capacity/quota.go`
   (`checkpoint`); `core/selection/store.go` (`save`);
-  `cmd/bacchus-netd/dns.go` (`replaceFile`)
+  `cmd/bacchus-netd/dns.go` (`replaceFile`). Issue #215 completed it:
+  `core/revocation/cache.go` (`writeAtomic`), `core/update/atomic.go`,
+  `clients/fyne/internal/appstate/config.go` (`writeConfigAtomic`;
+  `writeStagedConfig` deleted), and `SyncDir` at the three seed writers —
+  `cmd/coordinator/main.go` (`loadOrGenerateBootstrapKey`),
+  `cmd/admission-issue/main.go` (`loadOrGenerateAdmissionKey`),
+  `core/devicestore/devicestore.go` (`LoadOrGenerateKey`)
 
 ## Context
 
@@ -234,3 +240,51 @@ writes rather than to how, so it belongs to whoever owns that loop.
 Anything that changes about this shape — the ordering, the cleanup, the
 durability rule — changes in `core/atomicfile` and its ADR, instead of in
 however many doc comments happen to describe it correctly that week.
+
+## Amendment (issue #215, 2026-08-08): the three groups §6 and §7 could not reach
+
+§7 named three call sites it did not convert, and §6 named three seed writers it could
+rule on but not implement. All six are done, applying this record rather than extending
+it. Nothing here is a new decision.
+
+**The two remaining copies, plus the tenth.** `core/revocation/cache.go`'s `writeAtomic`
+and `clients/fyne/internal/appstate/config.go`'s `writeConfigAtomic`/`writeStagedConfig`
+are `core/atomicfile` now, and so is `core/update/atomic.go`, which §7 recorded as "being
+written in the same wave" and which turned out to be a full tenth copy. `core/revocation`
+takes §5's policy row unchanged — `Write` on a re-record, `WriteDurable` on a floor raise
+— because `MinAsOf` plays `MinSeq`'s part exactly. `clients/fyne` keeps `Write`, and the
+sentence §7 flagged as falsified ("which is where every atomic writer in this repository
+stops") is gone with it.
+
+**The create case.** `cmd/coordinator`'s bootstrap key, `cmd/admission-issue`'s admission
+root and `core/devicestore`'s on-device keypair each call `atomicfile.SyncDir` on the
+key's directory once the seed is flushed and closed, which is what §6 exported it for. All
+three REPORT a failure rather than swallowing it, and the two that print a public key for
+an operator do the sync first: a directory whose entry could not be flushed is precisely
+the case in which that pubkey must not be advertised. The key file is on disk either way,
+so the next run reads it rather than minting a second.
+
+**Two things this record did not anticipate, both now carrying cards.**
+
+- `core/update`'s writer serves the update **state file** and the **confirmation marker**,
+  not the downloaded artifact — §7 and issue #215 both describe it as the artifact writer.
+  The artifact is staged by a streaming copy in `apply.go`: `io.Copy` under a size limit
+  taken from the signed manifest, then re-read from disk to hash the bytes as written.
+  `Write` takes a `[]byte`, and buffering the artifact to hand it one would defeat both the
+  limit and the re-read, so that site is a shape this package does not offer rather than a
+  copy of the one it does. §5's per-write split for the two it DOES serve is issue #229:
+  the state file's floor raise lands on the durable side by the same argument as
+  `core/policy`'s, and the change is at call sites #215's lane did not own.
+- `atomicfile.SyncDir` is a no-op on Windows, and `dirsync_windows.go` named "the first
+  Windows caller to appear" as its own exit condition. `core/devicestore` is it — the seed
+  writer on the client's connect path — so the create case is durable on Linux and is not
+  on the platform that ships first. Issue #228. Not a regression: it is the gap this
+  amendment closed on Linux, left open there and stated rather than implied by a no-op.
+
+**What did NOT change.** No mode moved. `core/capacity` keeps 0644 and its pin still
+passes, and the two state files converted here gained tests pinning 0600 at the seam where
+the mode stopped being a `chmod` in the package and became an argument to a shared writer —
+which is the flattening §3 said the parameter existed to prevent.
+
+The observation in Consequences — `cmd/coordinator` rewriting an identical policy state
+file every ten seconds — is still unacted on, and still belongs to whoever owns that loop.
