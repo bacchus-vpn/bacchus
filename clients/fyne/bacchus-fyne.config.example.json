@@ -45,5 +45,11 @@
   "accountServiceCa": "",
   "deviceCredDir": "",
   "claimCode": "",
-  "deviceLabel": ""
+  "deviceLabel": "",
+
+  "update": {
+    "source": "",
+    "rootPubKey": "",
+    "statePath": ""
+  }
 }

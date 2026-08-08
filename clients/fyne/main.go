@@ -33,6 +33,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"errors"
 	"fmt"
@@ -268,7 +269,36 @@ func main() {
 	// DisconnectAndWait rather than Disconnect, and a.Quit through fyne.Do: the
 	// teardown runs on a goroutine of quitAction's making, and touching the app
 	// from one is what fyne.Do exists for (Fyne 2.6's threading rules).
-	quit := quitAction(ctrl.DisconnectAndWait, w.Hide, func() { fyne.Do(a.Quit) })
+	// The signed release channel (bacchus#34, ADR-0052, ADR-0065). Two boundaries
+	// and one watcher:
+	//
+	//   - HERE, at startup, before anything connects: publish a release an earlier
+	//     session staged. Nothing is connected, so there is no session to interrupt
+	//     and no kill-switch to strand, which is the only kind of moment ADR-0052 §4
+	//     permits an apply at.
+	//   - inside quit, after the teardown has WAITED: the same call, at the other
+	//     end of the same rule.
+	//   - and updater.Run, which never touches the network on its own: it watches the
+	//     release a coordinator already stamps on replies this client was already
+	//     receiving, and fetches only while the tunnel is up.
+	//
+	// A configured-but-broken channel is reported and does not stop the client: a
+	// user whose update source is a typo still wants their VPN.
+	updater, err := appstate.NewUpdateWatcher(ctrl, cfg.Update, log.Printf)
+	if err != nil {
+		log.Println("update:", err)
+	}
+	updater.ApplyStaged()
+	updateCtx, stopUpdates := context.WithCancel(context.Background())
+	defer stopUpdates()
+	go updater.Run(updateCtx)
+
+	quit := quitAction(func() {
+		ctrl.DisconnectAndWait()
+		stopUpdates()
+		// Disconnected by the line above, so this is a boundary by construction.
+		updater.ApplyStaged()
+	}, w.Hide, func() { fyne.Do(a.Quit) })
 
 	// The File menu's Quit is explicit rather than left to Fyne. Fyne appends
 	// one to any main menu that lacks it (addMissingQuitForMainMenu) and the one
