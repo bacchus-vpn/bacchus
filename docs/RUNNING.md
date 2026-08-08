@@ -1034,6 +1034,59 @@ predating #50 connects exactly as it does today — but it does not perform the
 challenge exchange, so enabling the gate on a network with such clients refuses
 them.
 
+### Giving a node a device credential (issue #170, ADR-0071)
+
+A node in the client role needs one of these too, once the gate above is on. It
+gets one by **enrolling, before the service starts** — `-enroll` runs the
+exchange with the account service and quits:
+
+```
+# Provisioning, once. The claim code is piped in, so it never reaches a disk.
+printf '%s' "$CLAIM_CODE" | bacchus-node -enroll \
+    -device-cred-dir /var/lib/bacchus/device \
+    -account-service https://<account-host>:<port> \
+    -account-service-audience <audience> \
+    -account-service-ca /etc/bacchus/account-ca.pem
+
+# Running, afterwards. No claim code appears here, under any flag.
+bacchus-node -role client -geo <CC> \
+    -device-cred-dir /var/lib/bacchus/device \
+    -account-service https://<account-host>:<port> \
+    -account-service-audience <audience> \
+    -account-service-ca /etc/bacchus/account-ca.pem  …
+```
+
+**A claim code is spent exactly once and cannot be re-spent**, which is why it is
+never a flag value: a flag would sit in the unit file, the shell history and the
+process listing, and would be re-supplied by every restart. Use
+`-claim-code-file <path>` if piping is awkward — the file is **removed** once the
+code has bought a credential, and **left in place if the service refuses it**, so
+a mistyped code is still there to correct. That flag is read only by `-enroll`;
+passing it to the running service is a startup error rather than a line nobody
+reads.
+
+Re-running `-enroll` is safe. A node that already holds a credential is left
+alone and nothing is sent, so a provisioning script that runs twice cannot burn a
+second, live code.
+
+Three things worth knowing:
+
+- **`-device-cred-dir` is required** with `-account-service`, and the node refuses
+  to start without it. Empty is an in-memory device identity regenerated on every
+  start; a claim code spent against one is gone.
+- **Renewal is automatic** once the account service is configured — the same
+  three verbs, on a ten-minute check with a six-hour margin. A failing renewal is
+  logged with how long the current credential has left, and escalates to
+  `WARNING` inside three hours. That warning is the only notice before a
+  gate-enabled coordinator starts refusing this node, so it is worth alerting on.
+- **If the credential file is lost but `device.key` survives**, run `-enroll` with
+  `-claim-code-file=` (empty). That collects a fresh credential for the key the
+  account service already knows and spends no claim code.
+
+The account service address list is **configuration only** for a node — unlike
+the desktop client, a node does not learn a moved address from the signed
+directory (see the next section). Name every address you have.
+
 ## Telling clients that an address moved (issue #193, ADR-0061)
 
 Every address the desktop client dials — the coordinator pool, and the account
