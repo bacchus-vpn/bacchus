@@ -175,8 +175,8 @@ func WriteDurable(path string, b []byte, perm os.FileMode) error {
 // complete older file, but losing a first-run CREATE leaves no file at all, and
 // all three of those regenerate silently on the next start after having already
 // distributed the public half. ADR-0066 §6 records that; converting them is
-// tracked separately because they live outside the packages that record's
-// change touched.
+// issue #215, because they live outside the packages that record's change
+// touched.
 func SyncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {
