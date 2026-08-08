@@ -113,6 +113,20 @@ rather than reporting success because `scp` exited 0. **It never copies a
 `.service` file**, because the coordinator's live unit carries hand-added flags
 that the template here does not.
 
+The fleet check counts **node ids**, not role lines: a box serving two roles is
+one node, and the count is compared against the number of `NODE_TARGETS` entries
+the script passes it as `--expect`. A box that did not register exits **4** and a
+box on the wrong build exits **1** — different findings, because one may simply
+be off and the other is serving traffic wrongly. On a 4 the script restarts the
+node units once and re-reads, which is a containment for issue #225 and not a
+fix; `--no-restart-absent` turns it off when the stranded process is what you
+want to look at.
+
+Running `bacchus-fleet-check.sh` on its own is worth knowing about for a reason
+beyond convenience: it prints **no hostname**, so its output is the half of a pin
+run that is safe to paste into a public issue. `bacchus-pin.sh`'s own output
+names every ssh target on every line.
+
 The full procedure, the negative control the probe rests on, and what the exit
 codes mean: [docs/RUNNING.md](../docs/RUNNING.md#pinning-the-whole-deployment-to-a-commit-issue-205-adr-0064).
 
