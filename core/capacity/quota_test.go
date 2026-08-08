@@ -720,6 +720,15 @@ func TestConcurrentCheckpointsNeverInstallAMixture(t *testing.T) {
 		}(i)
 	}
 	writers.Wait()
+	// The writers are done, so the file certainly exists. Do NOT stop the
+	// reader until it has actually looked at least once: under a loaded machine
+	// — `go test ./...` across every package at once — its goroutine can fail to
+	// be scheduled for the whole few milliseconds the writers take, and a run
+	// where it observed nothing is a green test that checked nothing. Bounded,
+	// so a reader that returned early on a real failure cannot hang the test.
+	for deadline := time.Now().Add(5 * time.Second); reads.Load() == 0 && time.Now().Before(deadline); {
+		runtime.Gosched()
+	}
 	close(stop)
 	readers.Wait()
 
