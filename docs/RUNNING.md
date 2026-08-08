@@ -825,6 +825,37 @@ failure is logged and retried against the running engine (15s, doubling to a
 10-minute ceiling) while the serve roles keep serving throughout. It no longer ends
 the process. A node that only clients still exits on a failed connect, as before.
 
+### When the coordinator restarts underneath you (issue #225, ADR-0067)
+A running client holds a live rendezvous association with its coordinator, and a
+coordinator that restarts forgets it. Nothing on the client's side errors when that
+happens — a datagram sent into a forgotten association is accepted by the local
+network stack and dropped on arrival — so until this was fixed the client sent into
+it forever, reported `no coordinator reachable` on every attempt, and only a restart
+of the client recovered it. **On a volunteer that took the exit and relay
+registrations down with it**, silently, because they ride the same connection: the
+coordinator simply stopped hearing from the node and logged nothing at all.
+
+A client now notices within one failed connect attempt and rebuilds the link on a
+fresh socket, with no user action; the serve-side registrations come back with it.
+The log line to recognise names the fault as a local one:
+
+```
+the link this client held to coordinator <addr> has gone stale and is being rebuilt …
+This is a LOCAL fault — this client's own link, NOT the network …
+```
+
+That sentence is the point of it. `no coordinator reachable` means every coordinator
+was silent and is a reason to suspect the network or a block; this one means the
+connection this process was holding stopped working and has been replaced. If you see
+it once around a coordinator deploy, that is the mechanism working. If you see it on
+every attempt for minutes, the coordinator is answering handshakes and nothing else,
+which is worth looking at from the coordinator's side.
+
+One case is not covered: a volunteer sitting in a **healthy session** when its
+coordinator restarts has nothing to ask it, so it does not find out until that session
+ends. Its registrations come back then. A coordinator answers a `register` only to
+reject it, so there is no reply for the node to miss.
+
 ### The same choice on the desktop client
 The desktop client has the same two opt-ins, as two checkboxes in `File → Settings…`,
 with the exit's cost printed next to the exit's own checkbox — see
@@ -1285,7 +1316,7 @@ reaching a single node:
 
 ```sh
 ssh <coordinator-host> "journalctl -u bacchus-coordinator --since -10min --no-pager" |
-  sh deploy/bacchus-fleet-check.sh "$(git rev-parse HEAD)"
+  sh deploy/bacchus-fleet-check.sh --expect 3 "$(git rev-parse HEAD)"
 ```
 
 It reports one line per node and exits non-zero on any drift. It ignores
@@ -1295,6 +1326,39 @@ running now, and it looks exactly as convincing — and it refuses a window
 containing no startup line rather than reading whatever it happens to hold. A
 node reporting `build=unknown` is a **failed** pin, not a pass: a fleet whose
 revision cannot be established is the state this exists to end.
+
+`--expect N` is how many node **processes** should appear, and `bacchus-pin.sh`
+passes the size of its own `NODE_TARGETS`. Give it by hand too: without it the
+only floor is that *something* registered, which is how the first real run
+reported `3 node(s) registered` and `the fleet is pinned` with one of three boxes
+dead (issue #224). A box serving two roles prints two `registered:` lines
+carrying one node id and counts **once**.
+
+| finding | exit | what it means |
+|---|---|---|
+| every expected node on the pinned commit | 0 | pinned |
+| a node on a different build, `-dirty`, or `build=unknown` | 1 | drift — issue #114; distrust every result from these boxes |
+| no `coordinator release` line in the window | 3 | the window cannot answer the question; widen it |
+| fewer node ids than `--expect` | 4 | a box that should be there did not register in this window |
+
+Three things it will not tell you, each of which is a limit of a journal rather
+than of the script. It cannot **name** the missing box: this journal names node
+ids and your host list names ssh targets, and nothing maps one to the other.
+`--expect` takes a **count and refuses a host list**, because the script prints no
+hostname at all — that is what makes its output the half of a pin run you can
+paste into an issue, while `bacchus-pin.sh`'s own output names every ssh target
+on every line. And **more** ids than expected is not a failure, because a
+volunteer client serves and registers without being in anybody's host list — so
+`--expect` is a floor, not a roll call, and a volunteer can hold the count up
+while a deployed box is absent.
+
+**When a node has not come back**, the pin restarts the node units once and reads
+the journal again. That is a containment for issue #225 — a node brought up
+against the outgoing coordinator never rebuilds the link, which the
+coordinator-last order guarantees on every deploy — and not a fix; it retires when
+a client recovers on its own. It never restarts to answer *drift*, which would
+destroy the evidence, and `--no-restart-absent` keeps the stranded process for
+whoever is diagnosing it.
 
 **Is the coordinator serving what that commit carries?** — by behaviour:
 
@@ -1347,17 +1411,50 @@ cannot match, which draws a `reject`. Four outcomes, four exit codes:
 Both confirmed on real hardware in both directions, including against a
 coordinator started `-rendezvous-dtls=false` as the negative control.
 
-### One thing to check on the coordinator while you are there
+**That makes the coordinator's `reject` reply deployment infrastructure**, which
+is worth knowing before anyone tries to make it quieter. The handler used to
+write one log line per unauthenticated datagram, naming a source that may be
+spoofed, and the obvious fix is to stop answering strangers — which turns every
+future pin into row three of the table above: `control silent, capability
+answered`, exit 4, **not a pass**, against a perfectly healthy coordinator. The
+log is bounded instead (one line a minute, carrying a count of what it stood
+for); the reply is not, and `cmd/coordinator` has a test that builds the real
+probe and runs it against the production packet loop so the dependency cannot be
+broken quietly (issue #217).
+
+### Which paths are actually in effect (issue #226)
 
 The coordinator's unit has **`WorkingDirectory=` empty**, which for a system
-service means `/`. Every relative path in `ExecStart` therefore resolves under
-the root directory: a `-device-revocations secrets/device-revocations.json`
-becomes `/secrets/device-revocations.json`, which does not exist. That does not
-fail — **a missing revocation file means nothing is revoked**, quietly, which is
-the worst way for a security control to be off. `bacchus-pin.sh` prints the
-unit's effective `ExecStart` and `WorkingDirectory` after a deploy and warns when
-the two combine this way; give it a second look, because the file in this
-repository is not evidence about the running service.
+service means `/`. Every relative path therefore resolves under the root
+directory: `secrets/device-revocations.json` becomes
+`/secrets/device-revocations.json`, which does not exist. That does not fail —
+**a missing revocation file means nothing is revoked**, quietly, which is the
+worst way for a security control to be off.
+
+The dangerous half of this is the half that is invisible. `cmd/coordinator` has
+**nine** flags whose default is a relative `secrets/…` path, and **a flag left at
+its default never appears in `ExecStart` at all** — so a check that reads
+`ExecStart` stays silent precisely when the operator never thought about the
+path. On the first real pin run every path written into the live `ExecStart` was
+absolute, and the flags that were not written there were resolving under `/`.
+
+Two places now answer it:
+
+- **The coordinator says so itself, at startup.** A block of `paths:` lines names
+  every file flag, what it **resolves** to, whether it is there, and what its
+  absence means — a state file written on first use and a revocation list that is
+  off look identical from the path alone. It ends with one `WARNING` when the
+  working directory is `/` and anything is still relative. `journalctl -u
+  bacchus-coordinator | grep '^.*paths:'` is the whole answer, with or without a
+  pin.
+- **`bacchus-pin.sh` warns on an empty `WorkingDirectory=`, full stop** — no
+  longer only when `ExecStart` also spells out a relative path. It still prints
+  the unit's effective `ExecStart` and `WorkingDirectory`, because the file in
+  this repository is not evidence about the running service.
+
+The fix on the box is either a `WorkingDirectory=` in the unit or absolute paths
+on the flags; the point of the two reports is that you can tell which flags are
+affected without guessing.
 
 ### Cards that need the boxes
 

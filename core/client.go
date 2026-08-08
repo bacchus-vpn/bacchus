@@ -87,6 +87,11 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 	// beside it did not — so this leg is not the one that breaks. It is checked anyway
 	// because the leg that does not break today is the one nobody notices growing.
 	tooLarge := false
+	// The same pair establish keeps, for the same reason and read the same way: a
+	// member silent behind a link this client held that had stopped carrying is a
+	// local fault, and reporting it as an unreachable network is issue #225.
+	allStale := true
+	anyStale := false
 	for _, l := range links {
 		select {
 		case <-ctx.Done():
@@ -97,6 +102,9 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 		}
 		e.drainMsgCh(l)
 		hsMark := l.handshakeMark()
+		// Sampled before the greet: "held" is the association this leg arrived with,
+		// not one it minted.
+		held, heardMark := l.holdsAssociation(), l.heardMark()
 		e.greet(l)
 		mark := l.unroutableMark()
 		sendMark := l.tooLargeMark()
@@ -111,6 +119,11 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 		// the health memo below are for.
 		if l.handshakeFailed(hsMark) {
 			e.markUnhealthy(l.raw)
+			// Evidence ABOUT the member, not about this client's link: a handshake only
+			// runs when there is no association to hold, and one that does not complete
+			// says the member is unreachable. So this silence is the real kind, and the
+			// pass may not claim the local diagnosis.
+			allStale = false
 			continue
 		}
 		if countries, ok := e.awaitCountries(ctx, l, per); ok {
@@ -137,6 +150,11 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 		// next attempt, while the error decides whether the whole engine gets torn down
 		// and rebuilt against a rediscovered directory.
 		e.markUnhealthy(l.raw)
+		if e.relinkIfStale(l, heardMark, held) {
+			anyStale = true
+		} else {
+			allStale = false
+		}
 	}
 	if tooLarge {
 		// Ahead of the unroutable case, and — like it — deliberately not wrapping the
@@ -152,6 +170,14 @@ func (e *Engine) ListCountries(ctx context.Context, timeout time.Duration) ([]Co
 		// never reaches the force-major check — which is why the diagnosis has to come
 		// from here.
 		return nil, fmt.Errorf("core: a coordinator answered the country list in a shape this build cannot route: %w", ErrCoordinatorUnroutable)
+	}
+	// Every member silent behind a link this client held that had stopped carrying.
+	// Deliberately ahead of the sentinel below and deliberately not wrapping it, for
+	// the reason ErrCoordinatorLinkStale gives: the coordinator's ADDRESS was never in
+	// question, so rediscovering it is not the recovery, and the recovery has already
+	// happened — the links are rebuilt.
+	if anyStale && allStale {
+		return nil, fmt.Errorf("core: no coordinator answered the country list, and every link this client held to one had gone stale: %w", ErrCoordinatorLinkStale)
 	}
 	// Every member was silent — none answered. Wrap the recovery sentinel so the
 	// pooled path (poolCountries/selectPath) can tell this apart from "answered but no
@@ -464,6 +490,14 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 	allSilent := true
 	unroutable := false
 	tooLarge := false
+	// Whether EVERY silent member was silent behind a link this client held that had
+	// stopped carrying (issue #225), and whether any was. Tracked separately from
+	// allSilent because the two decide different things: allSilent decides whether
+	// rendezvous is down, and this decides whether saying so would be a lie. A pass in
+	// which one member wedged and another was genuinely unreachable is still the
+	// second thing, so anyStale alone is not enough to claim it.
+	allStale := true
+	anyStale := false
 	for _, l := range e.orderLinks() {
 		select {
 		case <-ctx.Done():
@@ -477,6 +511,10 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 		if err := e.updateRequired(); err != nil {
 			return connPath{}, err
 		}
+		// Sampled BEFORE the greet, so "held" means the association this client
+		// arrived with rather than one this pass minted, and "heard" counts only what
+		// this member produced for this pass (issue #225).
+		held, heardMark := l.holdsAssociation(), l.heardMark()
 		e.greet(l)
 		modes := e.modeLadder(prefer, !triedDirect)
 		if modesHaveDirect(modes) {
@@ -500,6 +538,16 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 		// healthy — we simply rotate past it for this attempt.
 		if outcome == coordinatorSilent {
 			e.markUnhealthy(l.raw)
+			// Still deprioritized, whichever kind of silence this was. A stale link is
+			// this client's fault and not the member's, but the member is unusable
+			// through it either way until the rebuilt one has been tried, and health
+			// memory only reorders the next rotation. What the two must not share is
+			// the ERROR, which is what decides whether the log implicates the network.
+			if e.relinkIfStale(l, heardMark, held) {
+				anyStale = true
+			} else {
+				allStale = false
+			}
 		} else {
 			allSilent = false
 			switch outcome {
@@ -521,6 +569,13 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 		}
 	}
 	if allSilent {
+		// Every member silent, and every one of them silent behind a link this client
+		// held that had stopped carrying. Reporting that as "no coordinator reachable"
+		// is what made a hundred-minute local outage read as a censored network
+		// (issue #225); the links have just been rebuilt, so say that instead.
+		if anyStale && allStale {
+			return connPath{}, ErrCoordinatorLinkStale
+		}
 		return connPath{}, ErrNoCoordinatorReachable
 	}
 	// Before the unroutable case: a request that was never sent is a stronger claim on
@@ -545,6 +600,72 @@ func (e *Engine) establish(ctx context.Context, prefer string) (connPath, error)
 // snapshot. A failure where some coordinator answered but couldn't pair us returns
 // a plain error instead, because walking the mesh would not help.
 var ErrNoCoordinatorReachable = errors.New("core: no coordinator reachable")
+
+// ErrCoordinatorLinkStale is what the client legs return when every silent member was
+// silent behind a link THIS CLIENT HELD and that had stopped carrying — a rendezvous
+// association the far end has forgotten, which this side cannot see and cannot be
+// told about (issue #225).
+//
+// It is the same family as ErrCoordinatorUnroutable and ErrRequestTooLarge, and it is
+// the third and worst instance of the same shape: a local fact that reaches a waiting
+// leg as nothing-happened and is therefore reported as the network being down. This
+// one earned its own sentinel the hard way. On real hardware a client emitted 112
+// consecutive "no coordinator reachable" over a hundred minutes — while that
+// coordinator was up, healthy, and connecting fresh clients from the SAME HOST in
+// under a second — and the sentence it printed is the one refusedForSize's comment
+// already named as "the sentence a user on a censored network will believe and
+// report". Nothing about the network was wrong. The link was.
+//
+// It deliberately does NOT wrap ErrNoCoordinatorReachable, for that sentinel's own
+// stated reason: it triggers mesh-walk, mesh-walk rediscovers coordinator ADDRESSES,
+// and the address here was never in doubt — a peer courier would name the very
+// coordinator this client is already dialling, sameCoordSet would refuse the rebuild,
+// and a hundred minutes of walking would change nothing. The recovery this condition
+// wants is the one the leg has already performed by the time this is returned: the
+// link is rebuilt, and the next attempt runs on a fresh one.
+//
+// It is self-limiting, which is what keeps it from starving mesh-walk of the silence
+// it needs. A link can only be called stale if it HELD a completed association, so a
+// coordinator that is genuinely gone produces it at most once: the rebuild's handshake
+// finds nobody, the link holds nothing, and every pass after that is ordinary silence
+// again.
+var ErrCoordinatorLinkStale = errors.New("core: the coordinator link this client held had gone stale — it has been rebuilt")
+
+// relinkIfStale rebuilds member l's link when a leg that heard NOTHING from it was
+// talking through an association this client already held, and reports whether it
+// did.
+//
+// The two conditions together are the whole test, and neither is sufficient:
+//
+//   - held says there was something to go stale. A link with no association has
+//     nothing this client is holding on to; its silence is the member's, the recovery
+//     is rotation, and rebuilding the socket would be answering a reachability
+//     problem with a local one. This is also what keeps a pure forwarder's cleartext
+//     link out of it entirely — it holds no association at all.
+//   - heard nothing says the association is not carrying. A member that answered
+//     anything — a countries reply, a refusal, even a type this build cannot route —
+//     has proved the link is a link, and whatever went wrong is not this.
+//
+// A false positive costs one handshake: the association is replaced by an equivalent
+// one on a fresh socket and the next attempt proceeds. A false NEGATIVE costs what
+// issue #225 measured — every client attached to a coordinator stranded permanently
+// by that coordinator's restart, ending only when the user restarts the client, with
+// nothing telling them to. The asymmetry is the reason this errs toward rebuilding.
+func (e *Engine) relinkIfStale(l *coordLink, heardBefore uint64, held bool) bool {
+	if !held || l.heardSince(heardBefore) {
+		return false
+	}
+	l.noteLinkStale(e, "since then this client has sent to it and heard nothing at all back")
+	if err := l.relink(); err != nil {
+		// A link torn down by Stop while this leg was deciding is not a failure worth
+		// a line: the engine is going away and there is nothing left to rebuild for.
+		if !errors.Is(err, net.ErrClosed) {
+			l.noteRelinkFailed(e, err)
+		}
+		return false
+	}
+	return true
+}
 
 // MeshWalk performs warm re-bootstrap recovery (issue #31, design §4.3) when every
 // coordinator has gone unreachable. Given peer courier addresses learned in a prior
@@ -1334,7 +1455,18 @@ func (e *Engine) reconnect(ctx context.Context, dropped string) (connPath, error
 		// Count consecutive all-silent passes; a walk after meshRecoveryAfter of them
 		// rules out a brief blip. Any non-silent failure (a coordinator answered but
 		// couldn't pair) resets the count — rendezvous is up, so mesh-walk wouldn't help.
-		if errors.Is(err, ErrNoCoordinatorReachable) && e.meshRecoveryConfigured() {
+		switch {
+		case errors.Is(err, ErrCoordinatorLinkStale):
+			// Neither counted nor reset, which is the only honest reading of a pass
+			// this client has just repaired (issue #225). It is not evidence that
+			// rendezvous is down — the address was never in doubt and a courier would
+			// name the same coordinator, so a walk would find nothing sameCoordSet
+			// would accept. Nor is it evidence that rendezvous is UP, so zeroing a
+			// streak that a genuine outage had built would let a wedged link postpone
+			// mesh-walk indefinitely. Leaving the streak where it stands costs at most
+			// a pass or two before the rebuilt link's own handshake fails and reports
+			// ordinary silence, which is what actually decides.
+		case errors.Is(err, ErrNoCoordinatorReachable) && e.meshRecoveryConfigured():
 			silentStreak++
 			if silentStreak >= e.meshRecoveryAfter {
 				if e.tryMeshRecovery(ctx) {
@@ -1342,7 +1474,7 @@ func (e *Engine) reconnect(ctx context.Context, dropped string) (connPath, error
 				}
 				silentStreak = 0 // pace the next walk another meshRecoveryAfter passes out
 			}
-		} else {
+		default:
 			silentStreak = 0
 		}
 		if e.reconnectMaxAttempts > 0 && attempt >= e.reconnectMaxAttempts {

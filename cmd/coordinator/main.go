@@ -61,6 +61,7 @@ import (
 
 	"github.com/bacchus-vpn/bacchus/core/accounting"
 	"github.com/bacchus-vpn/bacchus/core/admission"
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 	"github.com/bacchus-vpn/bacchus/core/capacity"
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 	"github.com/bacchus-vpn/bacchus/core/geoip"
@@ -553,30 +554,30 @@ func main() {
 	turnRealm := flag.String("turn-realm", "bacchus", "TURN realm")
 	turnUser := flag.String("turn-user", "bacchus", "TURN username")
 	turnPass := flag.String("turn-pass", "", "TURN password (required)")
-	bootstrapKeyPath := flag.String("bootstrap-key", "secrets/coordinator-bootstrap.key", "path to the snapshot-signing ed25519 key (hex seed); generated on first run if missing")
-	bootstrapSecretsPath := flag.String("bootstrap-secrets", "secrets/bootstrap-secrets.json", "path to the per-user bootstrap secrets file (see cmd/coldstart-issue); reloaded periodically")
+	bootstrapKeyPath := pathFlag("bootstrap-key", "secrets/coordinator-bootstrap.key", "generated on first run", "path to the snapshot-signing ed25519 key (hex seed); generated on first run if missing")
+	bootstrapSecretsPath := pathFlag("bootstrap-secrets", "secrets/bootstrap-secrets.json", "no per-user bootstrap secret can authenticate yet", "path to the per-user bootstrap secrets file (see cmd/coldstart-issue); reloaded periodically")
 	flag.Var(&accountServices, "account-service", "an account service base URL (\"https://host:port\", scheme and host only) to publish in the signed cold-start directory as role \"account\" — repeatable, one occurrence per address, in preference order (issue #193, ADR-0061). This is how a client learns the account service MOVED: it holds the address in a static config file otherwise, and an unplanned move takes the first devices offline about six hours later (ADR-0016). List every address a client should try, including the successor before a planned move — the directory's list REPLACES what a client has configured, so a single address here narrows a client that was configured with two. Empty publishes no such entry and leaves every client on its own configuration, which is what a deployment running no account service wants. It is a LOCATION, not a trust root: the client keeps its own out-of-band audience and pinned CA, so an address named here still has to present the identity that client already pins.")
 	admissionPubKey := flag.String("admission-pubkey", "", "admission authority public key (hex, from cmd/admission-issue), trusted for EVERY role. When set, every node (register) and client (list/connect) must present a credential this key signed (issue #42). Empty disables admission only if -admission-authority is also unset — the network then serves anyone. NOTE this flag names a different thing here than it does on bacchus-node: there it is the client's single anchor for verifying an EXIT's credential end-to-end (issue #60); here it is one member of this coordinator's anchored authority set. See ADR-0047.")
 	var admissionAuthorities authorityFlags
 	flag.Var(&admissionAuthorities, "admission-authority", "an admission authority scoped to the roles it may admit, \"role[,role...]:hexkey\" — repeatable, one occurrence per authority (issue #64, ADR-0047). Roles are client, relay, exit. Use it to keep the always-online issuer off the credentials that admit forwarding infrastructure: -admission-authority relay,exit:<operator key> -admission-authority client:<account service key>. Composes with -admission-pubkey, which is the same thing scoped to every role. A credential is admitted only if an authority anchored for the role being taken signed it, so the scoping holds even against an issuer that writes any roles it likes into what it mints.")
-	admissionRevocations := flag.String("admission-revocations", "secrets/admission-revocations.json", "path to the revoked-credential-serials file (hot-reloaded); a missing file means nothing is revoked. One list covers every anchored authority — serials are unique per credential regardless of who signed it.")
+	admissionRevocations := pathFlag("admission-revocations", "secrets/admission-revocations.json", "NOTHING IS REVOKED in the admission namespace", "path to the revoked-credential-serials file (hot-reloaded); a missing file means nothing is revoked. One list covers every anchored authority — serials are unique per credential regardless of who signed it.")
 	deviceRootPubKey := flag.String("device-root-pubkey", "", "offline ROOT public key (hex) that the account service's device-credential chain anchors to (issue #50, ADR-0045). When set, every client connect must additionally present a device credential, the issuer cert it chains through, and an assertion over a challenge this coordinator issued — all verified OFFLINE, so this coordinator never calls the account service. Empty DISABLES the gate and leaves connects gated by -admission-pubkey alone. This is a DIFFERENT credential from -admission-pubkey's: that one is the network's own membership, this one is an entitlement bound to one device, and both are checked. Direction of failure matches -admission-pubkey (unset = off) and is deliberately the opposite of -policy-root-pubkey; see ADR-0045 for why an absent anchor is not sheddable the way a stale policy is.")
 	deviceAudienceFlag := flag.String("device-audience", "", "the audience string a device must bind its connect assertion to (issue #50). Defaults to -advertise, which is what a client knows independently because it chose to dial it. Set explicitly only when clients reach this coordinator under a name it does not advertise itself as. An assertion bound to an audience the coordinator merely announced would bind nothing — a hostile pool member would announce someone else's and relay.")
-	deviceRevocations := flag.String("device-revocations", "secrets/device-revocations.json", "path to the revoked device-credential and issuer-cert serials file (hot-reloaded); a missing file means nothing is revoked. Separate from -admission-revocations because the two credentials come from different authorities and their serial namespaces are unrelated.")
-	operatorsPath := flag.String("operators", "secrets/operators.json", "path to the node->operator-tag assignment file (JSON object {\"nodeID\":\"operatorTag\"}), advertised in the signed directory for operator-diversity hop selection (issue #124, ADR-0038); a missing file means no operator tags")
-	geoipDir := flag.String("geoip", "", "path to an unzipped MaxMind GeoLite2-Country-CSV directory, used to derive each node's country from the source address this coordinator OBSERVES it register from (issue #136). Staged out of band and never committed; see docs/RUNNING.md. Empty DISABLES derivation and falls back to each node's self-reported -country tag.")
+	deviceRevocations := pathFlag("device-revocations", "secrets/device-revocations.json", "NOTHING IS REVOKED in the device namespace", "path to the revoked device-credential and issuer-cert serials file (hot-reloaded); a missing file means nothing is revoked. Separate from -admission-revocations because the two credentials come from different authorities and their serial namespaces are unrelated.")
+	operatorsPath := pathFlag("operators", "secrets/operators.json", "no operator tags, so the directory advertises unlabeled hops", "path to the node->operator-tag assignment file (JSON object {\"nodeID\":\"operatorTag\"}), advertised in the signed directory for operator-diversity hop selection (issue #124, ADR-0038); a missing file means no operator tags")
+	geoipDir := pathFlag("geoip", "", "fatal at startup: a configured database that is not there is refused, not fallen back from", "path to an unzipped MaxMind GeoLite2-Country-CSV directory, used to derive each node's country from the source address this coordinator OBSERVES it register from (issue #136). Staged out of band and never committed; see docs/RUNNING.md. Empty DISABLES derivation and falls back to each node's self-reported -country tag.")
 	geoipRequired := flag.Bool("geoip-required", false, "refuse to fall back to a node's self-reported -country when its observed address does not resolve (issue #136). The hardened posture: no node self-report can reach a client's country choice. Off by default because every node in a local stack registers from loopback, which no database resolves. Requires -geoip. NOTE two things this deliberately does NOT do (issue #113). The node's -country claim is still RECORDED and published as a labelled DECLARATION beside the country, because carrying a claim is not choosing one — under this flag the country is empty precisely because the claim was refused, and nothing in this project selects, filters or groups on a declaration. And an admin correction staged in -country-overrides still wins over the derivation, because that is this coordinator's own operator speaking rather than a node self-report; see that flag.")
-	countryOverridesPath := flag.String("country-overrides", "secrets/country-overrides.json", "path to the admin's per-node country corrections (JSON object {\"nodeID\":\"CC\"}, two-letter ISO-3166-1 alpha-2 codes), hot-reloaded every 30s; a missing file means no corrections and an empty path disables it (issue #113, ADR-0042 §8). Coordinator-side truth, NOT a node self-report — the same standing -operators has. An entry REPLACES what this coordinator derived for that node, in the country list, in assignment and in the signed directory, and it wins even under -geoip-required. READ THIS BEFORE EDITING IT: an override is a correction to the DERIVED country — \"your GeoIP table is wrong, this address really does present as DE\", which is an assertion about the ADDRESS that you can check against what real sites conclude. It is NOT a way to state where the machine physically sits. If the box is in DE but its address resolves US, the correct value is US: a user picks DE to be TREATED AS German by every site they visit, and an address that resolves US is treated as US regardless of which building it is in, so \"correcting\" that misroutes exactly the user who cared enough to choose. The node's own claim about its location is already carried separately and is deliberately not selectable. One more consequence to know: an override is terminal, so for an exit it also suppresses the signaling-vs-advertised-endpoint comparison and the contradiction label a chaining client refuses on — the coordinator logs a warning naming that when it happens. A file with any unusable row is refused whole: fatal at startup, and on a reload the corrections already in effect are kept.")
-	asnTablePath := flag.String("asn-table", "", "path to a disjoint IP->ASN table (`prefix<TAB>asn` rows, see core/asn), used to resolve a capacity attester's autonomous system from the source address this coordinator OBSERVES its report arrive from (issue #23, ADR-0044). The AS is the unit of Sybil cost the ~4:1 attestation bound is denominated in (ADR-0041). Staged out of band and never committed. Empty falls back to masking the observed IP to a routing prefix (/24, /48), which is what this coordinator did before the table existed.")
+	countryOverridesPath := pathFlag("country-overrides", "secrets/country-overrides.json", "no admin corrections take effect, and nothing else says so", "path to the admin's per-node country corrections (JSON object {\"nodeID\":\"CC\"}, two-letter ISO-3166-1 alpha-2 codes), hot-reloaded every 30s; a missing file means no corrections and an empty path disables it (issue #113, ADR-0042 §8). Coordinator-side truth, NOT a node self-report — the same standing -operators has. An entry REPLACES what this coordinator derived for that node, in the country list, in assignment and in the signed directory, and it wins even under -geoip-required. READ THIS BEFORE EDITING IT: an override is a correction to the DERIVED country — \"your GeoIP table is wrong, this address really does present as DE\", which is an assertion about the ADDRESS that you can check against what real sites conclude. It is NOT a way to state where the machine physically sits. If the box is in DE but its address resolves US, the correct value is US: a user picks DE to be TREATED AS German by every site they visit, and an address that resolves US is treated as US regardless of which building it is in, so \"correcting\" that misroutes exactly the user who cared enough to choose. The node's own claim about its location is already carried separately and is deliberately not selectable. One more consequence to know: an override is terminal, so for an exit it also suppresses the signaling-vs-advertised-endpoint comparison and the contradiction label a chaining client refuses on — the coordinator logs a warning naming that when it happens. A file with any unusable row is refused whole: fatal at startup, and on a reload the corrections already in effect are kept.")
+	asnTablePath := pathFlag("asn-table", "", "fatal at startup: a configured table that is not there is refused, not fallen back from", "path to a disjoint IP->ASN table (`prefix<TAB>asn` rows, see core/asn), used to resolve a capacity attester's autonomous system from the source address this coordinator OBSERVES its report arrive from (issue #23, ADR-0044). The AS is the unit of Sybil cost the ~4:1 attestation bound is denominated in (ADR-0041). Staged out of band and never committed. Empty falls back to masking the observed IP to a routing prefix (/24, /48), which is what this coordinator did before the table existed.")
 	minServingVersion := flag.String("min-serving-version", "0.0.0", "minimum node release (MAJOR.MINOR.PATCH) this coordinator will assign work to; nodes below it are fenced from matchmaking until they update (issue #36, ADR-0015). Raise it past the grace window after a release to pull stragglers up. 0.0.0 disables the fence — every node serves regardless of version.")
 	policyRootPubKey := flag.String("policy-root-pubkey", "", "offline ROOT public key (hex) the signed network policy chains to (issue #39, ADR-0043). When set, this coordinator fetches a signed policy bundle and enforces the floors, fences and reserves inside it — numbers it cannot author, because it does not hold the key that signs them. Empty DISABLES signed policy and leaves this coordinator enforcing only its own flags. NOTE the direction of failure flips here: unlike -admission-pubkey and -min-serving-version, which fail OPEN when unset, a coordinator WITH a policy root configured stops assigning new work once its policy goes stale. Coordinators are a pool with client rotation, so one failing closed sheds to its peers.")
 	policySource := flag.String("policy-source", "", "where to fetch the signed policy bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at. Required when -policy-root-pubkey is set. Re-fetched every 10s and re-verified from scratch every time, delegation included.")
-	policyStatePath := flag.String("policy-state", "secrets/policy-state.json", "path to this coordinator's persistent policy state (issue #39): the last VERIFIED bundle, so a restart does not begin unpoliced, and the highest policy sequence ever accepted, which is what refuses a rollback. The sequence floor cannot be re-derived from signed data, so write access to this file is equivalent to being able to roll this coordinator back one generation — keep it with the other secrets.")
+	policyStatePath := pathFlag("policy-state", "secrets/policy-state.json", "a cold start: no rollback floor, and this coordinator is unpoliced until a bundle verifies", "path to this coordinator's persistent policy state (issue #39): the last VERIFIED bundle, so a restart does not begin unpoliced, and the highest policy sequence ever accepted, which is what refuses a rollback. The sequence floor cannot be re-derived from signed data, so write access to this file is equivalent to being able to roll this coordinator back one generation — keep it with the other secrets.")
 	revocationsRootPubKey := flag.String("revocations-root-pubkey", "", "offline ROOT public key (hex) the two signed revocation bundles chain to (issue #199, ADR-0017, ADR-0063) — the untrusted-hop mechanism past bacchus-payment's revocation-sync. When set, this coordinator additionally fetches, verifies and caches a signed bundle per namespace and installs it into the SAME in-memory list -device-revocations / -admission-revocations already populate; those two flags keep working completely unchanged either way. Empty DISABLES the mechanism, which is how every coordinator ships until an operator has run the signing ceremony. Shared by both namespaces: the same root delegates one 'revocations' role that signs both lists.")
 	deviceRevocationsSource := flag.String("device-revocations-source", "", "where to fetch the signed DEVICE-namespace revocation bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at — same two transports as -policy-source. Required when -revocations-root-pubkey is set AND -device-root-pubkey is set (a signed source for a gate that is off has nothing to feed); re-fetched and re-verified from scratch every 10s.")
-	deviceRevocationsState := flag.String("device-revocations-state", "secrets/device-revocations-state.json", "path to this coordinator's persistent state for the DEVICE-namespace signed bundle (issue #199): the last VERIFIED bundle, so a restart does not begin holding only whatever the untrusted hop happens to be serving at that instant, and the newest as_of ever accepted, which is what refuses a rollback. That floor cannot be re-derived from signed data, so write access to this file is equivalent to rolling this namespace's revocations back to an older generation — keep it with the other secrets.")
+	deviceRevocationsState := pathFlag("device-revocations-state", "secrets/device-revocations-state.json", "a cold start: no as_of floor for this namespace until a signed bundle verifies", "path to this coordinator's persistent state for the DEVICE-namespace signed bundle (issue #199): the last VERIFIED bundle, so a restart does not begin holding only whatever the untrusted hop happens to be serving at that instant, and the newest as_of ever accepted, which is what refuses a rollback. That floor cannot be re-derived from signed data, so write access to this file is equivalent to rolling this namespace's revocations back to an older generation — keep it with the other secrets.")
 	admissionRevocationsSource := flag.String("admission-revocations-source", "", "where to fetch the signed ADMISSION-namespace revocation bundle from: an http(s) URL, or a filesystem path an operator stages the bundle at. Required when -revocations-root-pubkey is set AND admission is enabled (-admission-pubkey or -admission-authority); re-fetched and re-verified from scratch every 10s.")
-	admissionRevocationsState := flag.String("admission-revocations-state", "secrets/admission-revocations-state.json", "path to this coordinator's persistent state for the ADMISSION-namespace signed bundle (issue #199) — the admission-namespace counterpart to -device-revocations-state; see it for what this protects and why it belongs with the other secrets.")
+	admissionRevocationsState := pathFlag("admission-revocations-state", "secrets/admission-revocations-state.json", "a cold start: no as_of floor for this namespace until a signed bundle verifies", "path to this coordinator's persistent state for the ADMISSION-namespace signed bundle (issue #199) — the admission-namespace counterpart to -device-revocations-state; see it for what this protects and why it belongs with the other secrets.")
 	rendezvousDTLS := flag.Bool("rendezvous-dtls", true, "accept the shaped rendezvous handshake on -addr — a STUN connectivity check and DTLS, alongside raw JSON, on the same port (issues #175/#202, ADR-0059/0060). READ THIS BEFORE TURNING IT OFF. It was written as a free valve for shedding the per-source association table under a spoofed-source flood, and it is no longer free: since #175 slice 2 (ADR-0062) the client speaks this shape and has DELIBERATELY NO CLEARTEXT FALLBACK, because a censor dropping the handshake and a coordinator that never learned it are the same silence, and answering that silence with plaintext would send exactly what the shape exists to hide. So switching this off does not degrade this coordinator, it REMOVES it: no current client can reach it at all, they rotate away on the existing 30-second cooldown, and this coordinator's share of the pool goes to its peers. The cost it still sheds is real but small — a bounded table of per-source DTLS associations that a spoofed-source flood can hold slots in for the length of a handshake timeout, and no further, because DTLS's own cookie exchange is never answered from a spoofed source. Under attack, shedding the whole coordinator to save that table is almost certainly the wrong trade; the right lever is upstream filtering.")
 	printBootstrapPub := flag.Bool("print-bootstrap-pubkey", false, "load (or generate) the snapshot-signing key at -bootstrap-key, print its public key (hex) to stdout, and exit. Provision this to mesh-walk clients (bacchus-node -mesh-pubkey) so they can verify coordinator-signed snapshots recovered via a peer (issue #31, design §4.3). Couriers get the same key inside their -courier-invite.")
 	flag.Parse()
@@ -608,6 +609,16 @@ func main() {
 	} else {
 		log.Printf("version fence ENABLED — nodes below %s are dropped from matchmaking (issue #36); coordinator release %s", servingFloor, coordBuild())
 	}
+	// What every file path RESOLVES to, and whether it is there (issue #226).
+	// Here, deliberately: after the `coordinator release` line the fleet check
+	// keys its window on, and BEFORE the loaders below announce what they did
+	// with each file — so the journal reads "this path, resolved here" and then
+	// "this is what came of it". Nine of these flags default to a relative
+	// `secrets/…` path, and a relative default never appears in the unit's
+	// ExecStart, which is why the pin's scan could not see the case that
+	// produced this: a missing revocation file does not fail, it means nothing
+	// is revoked.
+	logResolvedPaths()
 	v, admissionAnchors, admissionRevocationsList, err := setupAdmission(context.Background(), *admissionPubKey, admissionAuthorities, *admissionRevocations)
 	if err != nil {
 		log.Fatal(err)
@@ -816,7 +827,36 @@ func handle(m wire, src *net.UDPAddr) {
 		// return to the peer as-is.
 		peer := handshake.Hello{Magic: m.Magic, Version: m.Version, Capabilities: m.Capabilities}
 		if ok, reason := handshake.Check(peer); !ok {
-			log.Printf("hello from %s: rejected (%s)", src, reason)
+			// The LOG is bounded (issue #217, see noteHelloReject): this line
+			// answered any spoofable source once per datagram, which is how a log
+			// becomes as good as no log.
+			//
+			// The REPLY is deliberately NOT bounded, and that is load-bearing.
+			// cmd/coordinator-probe uses exactly this reject as its NEGATIVE
+			// CONTROL — the one question only a Bacchus signaling port answers and
+			// which every build has answered since issue #8. Without it a probe
+			// pointed one port sideways passes against a coordinator of any age,
+			// because the TURN port answers a Binding Request byte-identically on
+			// every build ever shipped (ADR-0060). Silence this and the probe
+			// returns "control ABSENT, capability ok" — exit 4, which ADR-0064
+			// defines as explicitly NOT a pass — so every deployment pin from then
+			// on fails its own verification. cmd/coordinator's
+			// TestCoordinatorProbePassesAgainstThisBuild asserts it rather than
+			// assuming it.
+			//
+			// What that costs is measured rather than waved at. 16 bytes in draws
+			// 59 back — 3.7x of PAYLOAD, as issue #217 measured it, but 87 bytes
+			// against 44 ON THE WIRE, 2.0x, once the 28 bytes of IPv4+UDP header
+			// every datagram carries are counted. Bandwidth is what a reflector
+			// spends, so the wire figure is the one to compare, and the comparison
+			// on this very port is answerSTUN: 20 bytes drawing 40 is 2.0x of
+			// payload and 1.4x on the wire. So this reply IS the more amplifying of
+			// the two, by about 40%, and both sit far below the 50x-500x that makes
+			// a reflector worth building a campaign on — ADR-0060's own accepted
+			// threshold, restated here for a second exposure of the same class.
+			// TestHelloRejectAmplificationStaysBounded pins the number so a longer
+			// reason string cannot raise it unnoticed.
+			noteHelloReject(now, reason)
 			send(src, wire{Type: "reject", Reason: reason})
 		}
 	case "register":
@@ -2162,6 +2202,16 @@ func reloadSecretsLoop(ctx context.Context, path string, current *atomic.Pointer
 // and a power loss before the bytes are durable leaves every invite carrying it
 // failing snapshot verification against a regenerated key.
 //
+// The DIRECTORY entry is flushed for that same reason, which is #215's half of
+// it (ADR-0066 §5/§6). A file's own Sync makes the bytes durable and commits
+// nothing about the entry naming them, so a power loss straight after a first
+// start can come back with NO key file — and the branch above then reads that as
+// a cold start and generates a second signing key, silently, after the first
+// one's public half has been baked into invites already handed out. A first-run
+// create is the definition of a write nothing re-emits, and it cannot go through
+// atomicfile.Write, because O_EXCL on the real path is the point;
+// atomicfile.SyncDir is exported for exactly this.
+//
 // A partial write is deliberately left in place — the malformed-key branch above
 // refuses it loudly on the next start, where deleting it would silently mint a
 // second signing key and strand every invite already issued.
@@ -2203,6 +2253,14 @@ func loadOrGenerateBootstrapKey(path string) (ed25519.PrivateKey, error) {
 	}
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("close bootstrap key %s: %w", path, err)
+	}
+	// Before the log line below, deliberately: that line is what an operator
+	// reads the pubkey out of to bake into invites, and a directory whose entry
+	// could not be flushed is exactly the case in which it must not be
+	// advertised. The key file is on disk either way, so the next start reads it
+	// rather than generating a second one.
+	if err := atomicfile.SyncDir(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("flush the directory holding %s: %w", path, err)
 	}
 	log.Printf("bootstrap: generated new signing key at %s — public key (bake into client config/invites): %s",
 		path, hex.EncodeToString(pub))

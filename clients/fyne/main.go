@@ -1,11 +1,11 @@
-// Bacchus cross-platform client (issues #148/#149) - an all-Go Fyne app that
+// Bacchus cross-platform client (old #148/#149) - an all-Go Fyne app that
 // calls the Go core in-process: no FFI bridge, one language, one binary per
 // platform, no bundled webview (Fyne renders its own widgets - the smallest
 // attack surface a security tool can have). See docs/adr for the seam this
 // was spiked to prove.
 //
 // App shell, calm/trustworthy theme, Russian-first i18n, and the
-// connection-state indicator. Settings (#152) covers
+// connection-state indicator. Settings (old #152) covers
 // split-tunnel/kill-switch/DNS/auto-connect/launch-on-boot; whether the first
 // three do anything depends on the platform having an enforcement.Enforcer
 // (Windows does, bacchus#59) - see settings.go's doc. The window's centre is the
@@ -127,7 +127,7 @@ func main() {
 	// user, the file for whoever they ask for help.
 	//
 	// (The trap this used to be the sole workaround for — no console under
-	// -H=windowsgui, `issue #50` in the retired Windows tray client's numbering —
+	// -H=windowsgui, old #50 in the retired Windows tray client's numbering —
 	// is what bacchus#187 fixed generally.)
 	cfg, cfgPath, err := appstate.LoadConfig()
 	var cfgErr error
@@ -146,7 +146,7 @@ func main() {
 	// kill-switch arming) go to the log, not to the detail line: that line is
 	// one calm user-facing sentence, and a PowerShell error is neither calm
 	// nor actionable by a user. Addresses are redacted twice over — once by
-	// enforcement itself (issue #140) and again at the sink, which is what
+	// enforcement itself (old #140) and again at the sink, which is what
 	// covers every OTHER writer reaching this same logger.
 	ctrl.Logf = log.Printf
 	indicator := newStateIndicator()
@@ -464,6 +464,18 @@ var errCountryConfigUnreadable = errors.New("the settings file could not be read
 // the only notice they will get before their access stops. Reading that in a
 // language they do not speak is reading nothing.
 //
+// Enrollment (bacchus#181) is the third, and it is the same argument reaching the
+// two sentences #171 named but did not widen to. The second of them is the one
+// that matters: it is what a user reads when enrollment cannot reach the account
+// service, which is a moment they have something to act on and, until now, no way
+// to read.
+//
+// enrollmentRefusalText's TERMINAL refusals (internal/appstate/controller.go) are
+// deliberately not here. They are a different job — a coded refusal mapped to a
+// sentence, in the package that owns the mapping — and widening to them is a
+// decision rather than a follow-through, which is what #171 declined to make and
+// #181 did not reopen.
+//
 // Everything else is relayed verbatim. That is not an oversight: core's errors
 // are not fixed sentences, they have no translation to look up, and inventing a
 // generic translated sentence to replace them would throw away the only
@@ -490,6 +502,10 @@ func detailText(d appstate.Detail) string {
 		return lang.L("This device's access was withdrawn. It will stop connecting when its current access runs out.")
 	case appstate.DetailRenewalRecovered:
 		return lang.L("Your subscription is up to date again.")
+	case appstate.DetailEnrolled:
+		return lang.L("This device is now registered to your account.")
+	case appstate.DetailEnrollUnreachable:
+		return lang.L("Could not reach your account service to register this device — connecting with what this device already has.")
 	}
 	return d.Text
 }

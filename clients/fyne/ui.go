@@ -10,7 +10,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/clients/fyne/internal/appstate"
 )
 
-// stateIndicator is the single most important widget in the app (issue #149):
+// stateIndicator is the single most important widget in the app (old #149):
 // a full-width color band carrying the headline state and a plain-language
 // description, unmistakable at a glance for a non-technical, possibly
 // stressed user. update must only be called from the Fyne UI goroutine -

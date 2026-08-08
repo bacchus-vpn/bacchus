@@ -2,12 +2,15 @@
 // a complete copy is staged beside the target, flushed, and renamed over it, so
 // no reader ever observes a partial file and no crash can leave one behind.
 //
-// It exists because this repository had written the same twenty lines nine
-// times — core/policy, core/admission, core/coldstart, core/revocation,
-// core/devicestore, core/capacity, core/selection, cmd/bacchus-netd and
-// clients/fyne's appstate — and three of those nine were subtly wrong in the
-// same two ways (see "The two defects", below). ADR-0066 records the decision
-// to fold them into one, and answers the argument against it.
+// It exists because this repository had written the same twenty lines ten times
+// — core/policy, core/admission, core/coldstart, core/revocation,
+// core/devicestore, core/capacity, core/selection, core/update,
+// cmd/bacchus-netd and clients/fyne's appstate — and three of those ten were
+// subtly wrong in the same two ways (see "The two defects", below). ADR-0066
+// records the decision to fold them into one, and answers the argument against
+// it; the count was nine when that record landed and ten by the time issue #215
+// reached the last of them, because core/update's arrived in the same wave the
+// consolidation did.
 //
 // # What os.WriteFile does instead, and why it is not enough
 //
@@ -174,9 +177,16 @@ func WriteDurable(path string, b []byte, perm os.FileMode) error {
 // polarity is also worse than a replacing writer's — losing a rename restores a
 // complete older file, but losing a first-run CREATE leaves no file at all, and
 // all three of those regenerate silently on the next start after having already
-// distributed the public half. ADR-0066 §6 records that; converting them is
-// issue #215, because they live outside the packages that record's change
-// touched.
+// distributed the public half. ADR-0066 §6 records that, and issue #215 called
+// it at all three: cmd/coordinator's bootstrap key, cmd/admission-issue's
+// admission root, and core/devicestore's on-device keypair all call this once
+// the seed is flushed and closed, and all three report a failure rather than
+// swallowing it — the key file is on disk either way, so the next run reads it
+// instead of minting a second.
+//
+// On Windows this is a documented no-op, so those three get Write's guarantees
+// there and not WriteDurable's. See dirsync_windows.go, and issue #228 for the
+// gap that leaves on the one platform that ships first.
 func SyncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {

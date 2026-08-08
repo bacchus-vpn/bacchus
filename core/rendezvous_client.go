@@ -126,8 +126,16 @@ const (
 	// that promise false.
 	//
 	// It applies to a handshake that never completed. An association that completed
-	// and then DIED — a coordinator restart, an idle sweep — is retried on the very
-	// next send, because that is a different fact about a member that was working.
+	// and then failed a WRITE is retried on the very next send, because that is a
+	// different fact about a member that was working.
+	//
+	// It does NOT cover an association that died without failing anything, which is
+	// most of them: a coordinator restart leaves this side writing into a
+	// conversation the other end has forgotten, every write succeeds because a UDP
+	// send into a dead association is a local success forever, and nothing here ever
+	// learns of it. That case is not the link's to notice — see rendezvousAssocIdle
+	// for the one clock this file has, and coordLink.relink for what actually
+	// recovers it (issue #225).
 	rendezvousHandshakeBackoff = 2 * time.Second
 
 	// rendezvousAssocIdle is how long an association survives with no traffic before
@@ -149,6 +157,25 @@ const (
 	// the member reads as blocked forever. A rendezvous is a burst (greet, list,
 	// connect, signal a handshake through) and then nothing for as long as the
 	// session lasts, so that gap is the ordinary case and not an edge one.
+	//
+	// # What this clock is NOT, which cost a hundred minutes to find out
+	//
+	// It measures time since this link was last USED, and lastUsed is stamped by
+	// every send — by establish itself, before the association is even handed back.
+	// So it retires an association nobody is talking through, and only that. It can
+	// never retire one being sent to, which is the wedge that matters: a client whose
+	// coordinator restarted underneath it retries, and every retry stamps the very
+	// clock that was supposed to rescue it. On the box issue #225 was found on, a
+	// reconnect every ~53 seconds and a volunteer's register every 10 kept this
+	// threshold permanently three minutes away, for a hundred minutes.
+	//
+	// It is left as it is rather than re-pointed at a "last HEARD" clock, because
+	// hearing nothing is the NORMAL state of a healthy link: the coordinator answers
+	// list, connect and challenge, and answers neither hello nor register, so a
+	// volunteer that is merely registering hears nothing from a coordinator that is
+	// perfectly well. A clock that retired on silence alone would churn every
+	// healthy forwarder's association forever. Recovery is driven by evidence
+	// instead, from the leg that has it — see Engine.relinkIfStale.
 	rendezvousAssocIdle = 3 * time.Minute
 
 	// rendezvousCheckWait is how long the ICE connectivity check is given to be

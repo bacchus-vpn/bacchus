@@ -26,6 +26,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 )
 
 // keyFileName is the on-device keypair's filename within a store directory.
@@ -61,6 +63,20 @@ const keyFileName = "device.key"
 // the account service records DevicePub at enrolment — so an unclean shutdown in
 // the several seconds os.WriteFile leaves the bytes unsynced strands a
 // credential bound to a key the device no longer has.
+//
+// The DIRECTORY is flushed too, which is #215's half of the same argument. A
+// file's own Sync makes the bytes durable and says nothing about the entry
+// naming them, so a power loss right after a first-run generation can come back
+// with no key file at all — and the branch above then treats that as a cold
+// start and mints a second key, silently, after the first one's public half has
+// already gone to the account service. ADR-0066 §5's rule puts this on the
+// durable side without hesitation: a first-run create is the definition of a
+// write nothing re-emits, and its polarity is worse than a replacing writer's,
+// where a lost rename at least restores a complete older file. It cannot go
+// through atomicfile.Write — O_EXCL on the real path is what stops two processes
+// both believing they generated the key, and a stage-and-rename cannot express
+// that — so atomicfile.SyncDir is called directly, which is why that function is
+// exported.
 //
 // A write that fails partway leaves a SHORT file on purpose. It is caught loudly
 // on the next read by the malformed-key check above, which is fail-closed;
@@ -113,6 +129,15 @@ func LoadOrGenerateKey(dir string) (ed25519.PrivateKey, error) {
 	}
 	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("devicestore: close device key %s: %w", path, err)
+	}
+	// Reported rather than swallowed, and reported BEFORE the key is handed
+	// back. The file is on disk either way, so the next call reads it and this
+	// is a legible one-off failure rather than a lost key; what must not happen
+	// is a caller told it holds a durable device identity, enrolling that
+	// identity with the account service, and finding no key file after a power
+	// loss.
+	if err := atomicfile.SyncDir(dir); err != nil {
+		return nil, fmt.Errorf("devicestore: flush the directory holding %s: %w", path, err)
 	}
 	return priv, nil
 }

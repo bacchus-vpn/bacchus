@@ -266,3 +266,128 @@ real `systemd` or a real coordinator. That is the owner's run, filed as a
 - **Nothing here has been run against real hardware.** The whole procedure is a
   `needs-owner-test` blocker, and no work should build on the assumption that the
   boxes are pinned until that run happens.
+
+## Amendment (2026-08-08): what the first real run found (#224, #226, #217)
+
+- Implementation: `deploy/bacchus-fleet-check.sh`, `deploy/bacchus-pin.sh`,
+  `cmd/coordinator/paths.go` (new), `cmd/coordinator/hello.go` (new),
+  `cmd/coordinator/main.go` (the flag declarations and the `hello` case),
+  `deploy/pin_test.go`, `cmd/coordinator/paths_test.go` and
+  `cmd/coordinator/hello_test.go` (new)
+
+The procedure above was run against the live fleet for the first time on
+2026-08-08, at `7fbca67`, and the run itself worked: everything was staged before
+anything was stopped, the nodes restarted first and the coordinator last, and the
+probe's control fired so the capability result was not a false pass.
+
+Three things it established that no reading had. Two are corrections to decisions
+recorded above; the third is a property those decisions turn out to depend on,
+which was not written down anywhere.
+
+### A. The fleet check counted roles, so an absent box read as a pinned fleet (#224)
+
+`bacchus-fleet-check.sh` keyed each registration on **`role id`** and incremented
+its node count once per unseen key. A box serving two roles therefore counted as
+**two nodes**, and a box that never registered counted as none — and its only
+cardinality floor was `nodes == 0`. The run printed `3 node(s) registered` and
+`the fleet is pinned` from three rows carrying **two** distinct ids, with one of
+three boxes dead.
+
+It now counts **ids**, prints one row per box naming every role that box took, and
+takes `--expect N`: `bacchus-pin.sh` passes the size of the `NODE_TARGETS` it had
+already sourced. Every per-node check §2 relied on — `build=unknown`, `-dirty`,
+revision mismatch — was sound; the gap was only presence.
+
+**Absence is not drift, and they now exit differently.** A box on the wrong binary
+is #114 and a reason to distrust every result from the fleet (exit 1). A box that
+did not register in this window may simply be off, and the check runs about 20
+seconds after the coordinator restarts (exit 4, extending that code from its
+`nodes == 0` case to the general one). Both are printed when both hold, and drift
+takes the exit code.
+
+Three limits, stated because a checker that overstates what it knows is the
+failure this record exists to end:
+
+- **A missing box cannot be NAMED.** The journal names node ids — for an exit, its
+  X25519 public key — and the host list names ssh targets. Nothing maps one to the
+  other, and building the map would need a roll call this check exists to avoid
+  making. The report is therefore a count.
+- **`--expect` takes a count and refuses a host list**, and this script prints no
+  hostname at all. That is deliberate and worth keeping: its output is the half of
+  a pin run that is safe to paste into a public issue, while `bacchus-pin.sh`'s
+  own output names every ssh target on every line.
+- **More ids than expected is not a failure.** A volunteer client serves as a relay
+  or an exit (ADR-0053) and registers exactly like a deployed node without being in
+  anyone's host list. So `--expect` is a **floor, not a roll call**: a volunteer
+  present while a deployed box is absent can hold the count up. That is the
+  strongest statement a journal supports.
+
+### B. The relative-path warning read the one surface the failure never touches (#226)
+
+§7 records that the script warns when `WorkingDirectory=` is unset **and**
+`ExecStart` names a relative path. The reasoning was right and the condition was
+backwards: **a flag left at its default never appears in `ExecStart` at all**, so
+the warning stayed silent precisely when the operator had not thought about the
+path and fired only when they had. On the live unit every path written into
+`ExecStart` is absolute, the warning correctly said nothing, and nine
+relative-default flags were resolving under `/` — including both revocation lists,
+where a missing file does not fail, it means **nothing is revoked**, and
+`-country-overrides`, whose corrections then cannot take effect.
+
+Two changes. An empty `WorkingDirectory=` is now the **whole** condition. And the
+coordinator states its own **resolved** paths at startup — each flag, what it
+resolves to, whether it is there, and what its absence MEANS, which is the
+difference between a state file written on first use and a revocation list that is
+off. That report lands in the journal this procedure already reads, and it answers
+for somebody reading the journal without the pin, which is what makes it the more
+useful half.
+
+Rejected, and it was the option the card priced third: enumerating the flag table
+in the shell script. It would be a copy of `cmd/coordinator`'s flags living a
+repository away from them and it would rot. In Go the list **is** the flags — every
+path flag is declared through `pathFlag`, and a test parses `main.go` and fails on
+any `flag.String` whose default looks like a relative path.
+
+### C. The `hello` reject is load-bearing, and bounding its LOG is not bounding the REPLY (#217)
+
+§4 chose a deliberately-mismatched `hello` as the negative control because it is
+older than the capability being probed. What that decision did not say is that it
+makes the coordinator's **reply** a piece of deployment verification infrastructure:
+gate it, rate-limit it, or restrict it to admitted peers, and the probe returns
+`control ABSENT, capability ok` — exit 4, which this record defines as explicitly
+**not a pass** — so every pin from then on fails its own verification against a
+perfectly healthy coordinator.
+
+That mattered immediately, because the same handler was writing one log line per
+unauthenticated datagram, naming a source that may be spoofed, which is a real
+defect (#217) and the shape of fix that suggests itself is to stop answering. The
+LOG is now bounded to one line per minute with a count of what it stood for; the
+REPLY is unchanged, and `cmd/coordinator`'s
+`TestCoordinatorProbePassesAgainstThisBuild` builds the shipped probe and runs it
+against the production packet loop so the dependency is asserted rather than
+assumed.
+
+The reflection cost of keeping it, measured on that path: 16 bytes in draws 59
+back — 3.7x of payload, and 87 bytes against 44 **on the wire**, 1.98x, once the
+IPv4+UDP headers both sides pay for are counted. `answerSTUN` on the same port is
+1.42x on that basis, so the reject is the more amplifying of the two, and both sit
+far below the 50x-500x ADR-0060 priced. A test pins the figure so a longer reason
+string cannot raise it unnoticed.
+
+### D. A node that did not come back is restarted once — a containment, not a fix
+
+Now that a missing node is detectable, the pin restarts the node units **once** and
+re-reads the journal. The cause is one this procedure creates: §2's coordinator-last
+ordering brings every node up against the outgoing coordinator and then removes it a
+second later, and a node in that state never rebuilds the link (#225 — 100 minutes
+observed, recovered by `systemctl restart` in under a second).
+
+The ordering does **not** change: `build=` rides the `registered:` line, which fires
+only for a node the coordinator does not already hold, so coordinator-last is what
+makes the reading fresh at all. The restart is only for exit 4 — drift is never
+restarted away, because the box is on the wrong binary afterwards too and the restart
+destroys the evidence. It restarts **every** node unit, since which one is missing
+cannot be known here; that is cheap exactly here and nowhere else, because this
+script restarted all of them about twenty seconds earlier. `--no-restart-absent`
+keeps the stranded process for whoever is diagnosing #225, and the whole containment
+retires when a client recovers on its own.

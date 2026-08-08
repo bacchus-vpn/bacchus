@@ -23,7 +23,7 @@ import (
 // and main.go wires OnState/OnDetail through fyne.Do (never fyne.DoAndWait) so
 // updates always land on Fyne's UI goroutine regardless of which goroutine called
 // them from here. That split is the seam issues
-// #148/#149 spiked: it is what makes the state machine itself unit- and
+// old #148/#149 spiked: it is what makes the state machine itself unit- and
 // integration-testable with no display driver at all (controller_test.go
 // exercises a real core.Engine over a loopback fake coordinator, driven
 // exactly the way ui.go drives it).
@@ -52,7 +52,7 @@ type Controller struct {
 	// arming). Not the detail line: that is one calm user-facing sentence,
 	// and OS-command failures are neither calm nor actionable by a user.
 	// Whatever this points at, enforcement redacts addresses before writing
-	// (issue #140).
+	// (old #140).
 	Logf func(format string, args ...any)
 
 	// enf is this client's OS enforcement backend, or nil on a platform that
@@ -818,7 +818,7 @@ func (c *Controller) connectAsync(gen uint64) {
 		ListenAddr: volunteer.ListenAddr,
 		ExitKeyHex: volunteer.ExitKeyHex,
 		// No exit is named, and no client can name one: country-only assignment
-		// (issue #146, ADR-0042) means the coordinator picks the exit inside the
+		// (old #146, ADR-0042) means the coordinator picks the exit inside the
 		// country that was asked for. Geo is that country — the picker's choice
 		// (issue #16), canonicalized above.
 		//
@@ -836,7 +836,7 @@ func (c *Controller) connectAsync(gen uint64) {
 		TURNPass: c.cfg.TURNPass,
 		// Passed through, not defaulted: unset means core verifies no exit
 		// credential and checks no revocation (fail-open), so an operator with an
-		// admission anchor loses ADR-0026/#60's backstop against a hostile
+		// admission anchor loses ADR-0026/old #60's backstop against a hostile
 		// coordinator unless these actually reach the engine. See Config's doc.
 		AdmissionPubKey:  c.cfg.AdmissionPubKey,
 		AdmissionCRLPath: c.cfg.AdmissionCRLPath,
@@ -881,7 +881,7 @@ func (c *Controller) connectAsync(gen uint64) {
 		// enforcement/poolroutes.go's file doc). reality is handled late, on
 		// the dial path, by OnUnderlayDial below; webrtc has no such hook
 		// because it is not supposed to need one — it is supposed to be pinned
-		// here. The Windows tray client set this from issue #75 for exactly that
+		// here. The Windows tray client set this from old #75 for exactly that
 		// reason. This client did not, which left its webrtc underlay
 		// unexcluded on the one platform where it enforces; #93 surfaced it
 		// while wiring TransportPool, since a pool whose first member is
@@ -906,7 +906,7 @@ func (c *Controller) connectAsync(gen uint64) {
 		// Wired to the Enforcer, not to a Session: the transport pool's first
 		// reality underlay is dialled inside Connect below, before enforcement
 		// starts, so there is no Session yet to hand it to. The Enforcer
-		// records it and bring-up installs it (issue #109). nil when this
+		// records it and bring-up installs it (old #109). nil when this
 		// platform has no Enforcer, which core treats as "no hook".
 		OnUnderlayDial: c.underlayDialHook(),
 		// The local address a served role's own sockets bind, so other
@@ -1098,7 +1098,7 @@ func (c *Controller) enrollIfNeeded(ctx context.Context, dc deviceCredential) (a
 			c.logf("enrollment: could not clear the spent claim code from the config file: %v", cerr)
 		}
 		c.logf("enrollment: this device now holds a device credential")
-		c.notifyDetail(Detail{Text: "This device is now registered to your account."})
+		c.notifyDetail(Detail{Kind: DetailEnrolled, Text: "This device is now registered to your account."})
 		return nil
 
 	case accountclient.Terminal(err):
@@ -1108,7 +1108,7 @@ func (c *Controller) enrollIfNeeded(ctx context.Context, dc deviceCredential) (a
 		// Unreachable, rate limited, or the service failed. Say so and keep
 		// going: whatever this device already holds is what it will present.
 		c.logf("enrollment: %v", err)
-		c.notifyDetail(Detail{Text: "Could not reach your account service to register this device — connecting with what this device already has."})
+		c.notifyDetail(Detail{Kind: DetailEnrollUnreachable, Text: "Could not reach your account service to register this device — connecting with what this device already has."})
 		return nil
 	}
 }

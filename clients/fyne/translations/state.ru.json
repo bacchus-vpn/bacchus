@@ -20,6 +20,10 @@
     "Your subscription has expired. This device will stop connecting when its current access runs out.": "Срок подписки истёк. Это устройство перестанет подключаться, когда закончится текущий доступ.",
     "This device's access was withdrawn. It will stop connecting when its current access runs out.": "Доступ этого устройства был отозван. Оно перестанет подключаться, когда закончится текущий доступ.",
     "Your subscription is up to date again.": "Подписка снова в порядке.",
+
+    "This device is now registered to your account.": "Это устройство зарегистрировано в вашей учётной записи.",
+    "Could not reach your account service to register this device — connecting with what this device already has.": "Не удалось связаться со службой учётной записи, чтобы зарегистрировать это устройство — подключаемся с тем, что у устройства уже есть.",
+
     "%d hours": "%d ч",
     "an hour": "около часа",
     "%d minutes": "%d мин",
