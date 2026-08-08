@@ -391,3 +391,135 @@ cannot be known here; that is cheap exactly here and nowhere else, because this
 script restarted all of them about twenty seconds earlier. `--no-restart-absent`
 keeps the stranded process for whoever is diagnosing #225, and the whole containment
 retires when a client recovers on its own.
+
+## Amendment (2026-08-09): the fleet describes itself (#232, #234)
+
+- Implementation: `deploy/bacchus-node-id.sh` (new), `deploy/bacchus-unit-check.sh`
+  (new), `deploy/bacchus-pin.sh`, `deploy/bacchus-fleet-check.sh` (`--ids-to`),
+  `deploy/pin_test.go`, `deploy/node_startup_line_test.go` (new),
+  `docs/RUNNING.md` ("Pinning the whole deployment to a commit")
+
+Two limits amendment A recorded as limits of a journal turn out to be limits of
+*one* journal. Both are removed by reading a second one, and neither needed a
+line of Go.
+
+### E. A box that did not register is NAMED, and the log line that pairs it already shipped (#232)
+
+Amendment A stated: *"A missing box cannot be NAMED. The journal names node ids
+… and the host list names ssh targets. Nothing maps one to the other."* The
+second sentence is true and the first no longer follows. **`#232` was filed on a
+premise that is wrong**, and finding that out is most of this section.
+
+`#232` reads that *"`cmd/node` logs nothing at startup that names the id —
+`core/engine.go`'s `ID()` is never printed — so a box cannot be asked what it
+registers as, even over ssh."* `ID()` is indeed never called. The id is not. Every
+node has been stating it at every start since long before this record:
+`core.Engine.Start` emits
+
+```
+exit <id> (<country>) advertising <host:port> + direct WebRTC
+relay <id> online
+```
+
+through `e.emit`, and `e.emit` falls back to `log.Println` whenever
+`Config.OnEvent` is nil. `clients/fyne` sets `OnEvent`; **`cmd/node` does not**.
+So on a node box those go to stderr and systemd files them in the journal. Two
+readers looked at `ID()`, and the value travels by a different route.
+
+The consequence is that the pairing cost nothing but a reader and a map — no
+change to `cmd/node`, no change to `core`, and no new wire field. Which was
+fortunate: `core/engine.go` was frozen for the wave that closed this.
+
+**`deploy/bacchus-node-id.sh` is the reader.** It takes a node's own journal on
+stdin and prints one line, the id. Three decisions inside it:
+
+- **The two shapes are matched WHOLE**, including the trailing `+ direct WebRTC`
+  and `online`. A loose `exit <hex>` also matches `core/pool.go`'s *"exit … did
+  not carry traffic"*, which names an exit this box was **assigned** — somebody
+  else's id, appearing after startup on any volunteer box, which runs a client
+  and an exit at once. That would not fail to answer; it would answer with a
+  stranger's identity, and the roll call would then report a healthy box as
+  absent.
+- **The last match wins.** One process has one id, but a window can hold more
+  than one start.
+- **It prints no hostname**, exactly as `bacchus-fleet-check.sh` prints none. It
+  reads text on stdin and never learns where the text came from.
+
+**The map lives in `bacchus-pin.sh`**, and that is the decision `#232` asked to
+be settled rather than assumed. Naming a box means naming a host. The fleet
+check's one distinguishing property is that its output is the half of a pin run
+that is safe to paste into a public issue, and the pin's output already names ssh
+targets on every line — so the check keeps answering in ids and gains
+`--ids-to FILE`, a side channel that writes the ids it counted and changes
+nothing about what is printed. A node id is public (it is in the signed directory
+and every client holds it), so writing one costs nothing; a hostname is what
+would cost.
+
+**The second limit goes with the first, and it is the one that hides a dead
+box.** Amendment A: *"a volunteer present while a deployed box is absent can hold
+the count up. That is the strongest statement a journal supports."* True of a
+count; a roll call compares identities, so a registration belonging to no
+deployed box cannot stand in for one that is missing. `--expect` stays, because
+it is what answers when a box's own id could not be read and it is what an
+operator running the check by hand gets. The pin now has both, and says which one
+is speaking.
+
+Two things this had to get right that a reading would not have caught:
+
+- **The map is rebuilt after the containment restart, not carried across it.** A
+  relay without `-relay-ingress` takes a fresh random id at every start
+  (`randID`); an exit's id is its X25519 public key and does not move; the map
+  cannot tell which kind it is holding. Reusing it would report a box that came
+  back perfectly as absent, on every run that restarted anything.
+- **A box whose id cannot be read falls back to the count and says so.** A roll
+  call that quietly drops a box it could not ask reports a complete fleet from an
+  incomplete question.
+
+**The startup line is now load-bearing**, which is the cost of not adding one.
+It is a contract between Go and shell, the pair ADR-0069 §4 names as the one that
+drifts silently, so `deploy/node_startup_line_test.go` never hand-writes it:
+it builds `cmd/node`, runs it, and feeds the bytes the real binary produced
+through the real script — the same discipline `deploy/update_rollback_test.go`
+uses for the update marker. Reword those lines and that test goes red, naming the
+pin as what depends on them.
+
+### F. The units are compared, and still never copied (#234)
+
+§7 says unit files are never copied and no flag makes it possible. That stays,
+and every word of the reason stays. What §7 did not say is that nothing
+**compared** them either, so a directive a template *gained* and a live unit
+lacks was invisible — in both directions.
+
+`#222` is the instance. It added `OnFailure=bacchus-update-rollback@%n.service`
+to `deploy/bacchus-exit.service` and `deploy/bacchus-coordinator.service`;
+merging it put it on no box; and every pin run afterwards reported a pinned
+fleet, correctly, because the binaries were pinned. ADR-0069's own consequences
+list says so in as many words. That is `#205`'s finding in a different place: the
+repository holds a mechanism the fleet does not have, and nothing reports the
+difference.
+
+`deploy/bacchus-unit-check.sh` compares `systemctl cat` against the shipped
+template and reports three things: **missing** (shipped here, absent there — the
+finding), **only on the box** (the hand-added flags the no-copy rule exists to
+protect), and **same directive, different value** (`ExecStart=` essentially
+always, which is the no-copy rule being right rather than a fault).
+
+- **Directives, not text.** `systemctl cat` prints a `# /path` provenance header
+  and any drop-ins, the templates carry long comment blocks, and `\`
+  continuations split one directive across lines. A textual diff of those two is
+  pages of noise, and noise is how a report stops being read. Comments, blank
+  lines, ordering and continuations are normalised away; a repeated key
+  accumulates rather than overwriting.
+- **It reports; it does not fail the run.** Same call as §7's
+  `WorkingDirectory=` warning, for the same reason: units are configuration this
+  procedure deliberately does not manage, the binaries genuinely are pinned, and
+  a check that failed every pin until somebody hand-edited three units would be
+  switched off — or answered by adding the copy flag that must not exist. It is
+  loud, it prints the exact commands, and it prints them on every run until the
+  box carries the line.
+- **A unit with no shipped template is stated, not skipped.** `bacchus-relay` is
+  that case today: this repository ships no `deploy/bacchus-relay.service`.
+
+`#234`'s owner action — installing the handler and adding the line on each live
+box — is unchanged and is still an owner action. What changes is that from now on
+the pin says which boxes are still waiting for it.

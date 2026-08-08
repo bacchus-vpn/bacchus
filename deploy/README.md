@@ -122,10 +122,36 @@ node units once and re-reads, which is a containment for issue #225 and not a
 fix; `--no-restart-absent` turns it off when the stranded process is what you
 want to look at.
 
+**Which box did not register** is answered by the pin rather than by the check,
+because only the pin has the host list (issue #232). Every node states its own id
+at startup in its own journal, which `bacchus-node-id.sh` reads:
+
+```bash
+ssh <node-host> "journalctl -u bacchus-exit --since -5min --no-pager" |
+  sh bacchus-node-id.sh
+```
+
+The pin does that per box, takes the coordinator's side from the check's
+`--ids-to`, and names what is missing. It also means a **volunteer** — a client
+serving as a relay or an exit without being in anybody's host list — can no
+longer hold the count up while one of your boxes is dead.
+
 Running `bacchus-fleet-check.sh` on its own is worth knowing about for a reason
 beyond convenience: it prints **no hostname**, so its output is the half of a pin
 run that is safe to paste into a public issue. `bacchus-pin.sh`'s own output
-names every ssh target on every line.
+names every ssh target on every line, which is why the pairing lives there.
+
+**The units are compared, never copied** (issue #234). `bacchus-unit-check.sh`
+diffs the directives of a live unit against the template shipped here and reports
+what the box is missing, what it has that the template does not (the hand-added
+flags), and what differs. It is a warning, not a failure — the binaries are
+pinned either way — and it is how you find out that a merged mechanism has
+reached no machine:
+
+```bash
+ssh <box> "systemctl cat bacchus-exit" |
+  sh bacchus-unit-check.sh bacchus-exit.service
+```
 
 The full procedure, the negative control the probe rests on, and what the exit
 codes mean: [docs/RUNNING.md](../docs/RUNNING.md#pinning-the-whole-deployment-to-a-commit-issue-205-adr-0064).
