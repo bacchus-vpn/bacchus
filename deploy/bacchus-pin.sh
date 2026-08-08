@@ -63,13 +63,19 @@ self="${0##*/}"
 
 usage() {
 	cat >&2 <<'USAGE'
-usage: bacchus-pin.sh [--commit SHA] [--config FILE] [--repo DIR] [--dry-run] [--no-verify]
+usage: bacchus-pin.sh [--commit SHA] [--config FILE] [--repo DIR] [--dry-run]
+                      [--no-verify] [--no-restart-absent]
 
   --commit SHA   refuse unless the repository is already on this commit
   --config FILE  host list (default: deploy/testbed.env beside this script)
   --repo DIR     the checkout to build from (default: this script's repository)
   --dry-run      print every remote command instead of running it, and build nothing
   --no-verify    skip the post-deploy fleet check and capability probe
+  --no-restart-absent
+                 do not restart the node units when one has not re-registered.
+                 The restart is a containment for issue #225 and it destroys the
+                 state that diagnoses it, so pass this when the stranded process
+                 is what you want to look at
 
 Exit: 0 pinned · 1 deploy failed · 2 usage/configuration · 3 built and deployed, but
       verification did not confirm it
@@ -88,6 +94,7 @@ config=""
 repo=""
 dry=0
 verify=1
+restart_absent=1
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -116,6 +123,10 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--no-verify)
 		verify=0
+		shift
+		;;
+	--no-restart-absent)
+		restart_absent=0
 		shift
 		;;
 	*)
@@ -488,9 +499,76 @@ else
 	log "  could not read it (not fatal) — check it by hand before trusting a result from this box"
 fi
 
+# The floor the check could not have on its own: how many node PROCESSES should appear
+# (issue #224). One entry of NODE_TARGETS is one bacchus-node, and a box serving two
+# roles is still one — it prints two `registered:` lines carrying one node id, which is
+# what the check now counts. A count is passed rather than the list itself: the check
+# prints no hostname, which is what keeps its output the half of a run that is safe to
+# paste into an issue, while everything this script prints names ssh targets.
+expected_nodes=0
+for entry in $NODE_TARGETS; do
+	expected_nodes=$((expected_nodes + 1))
+done
+
+fleet_check() {
+	"$SSH" "$COORDINATOR_TARGET" "journalctl -u $COORDINATOR_UNIT --since '-5 min' --no-pager" |
+		sh "$script_dir/bacchus-fleet-check.sh" --expect "$expected_nodes" "$head"
+}
+
 log "reading the coordinator's journal for every node's build"
-if ! "$SSH" "$COORDINATOR_TARGET" "journalctl -u $COORDINATOR_UNIT --since '-5 min' --no-pager" |
-	sh "$script_dir/bacchus-fleet-check.sh" "$head"; then
+fleet_rc=0
+fleet_check || fleet_rc=$?
+
+# ---------------------------------------------------------------------------
+# A node that did not come back is restarted ONCE — a containment, not a fix
+# ---------------------------------------------------------------------------
+# Exit 4 from the check means a node that should be there did not register in this
+# window. The most likely cause is one this script CAUSES: the coordinator restarts
+# last, so every node is brought up against the OUTGOING coordinator and then has it
+# removed a second later — and a node in that state never rebuilds the link. It sits
+# idle, registers with nobody, and is invisible to the coordinator for as long as it is
+# left alone (issue #225: 100 minutes observed, recovered by `systemctl restart` in
+# under a second).
+#
+# So this restarts the node units once and reads the journal again. Three things about
+# that, in order of how easy they are to get wrong:
+#
+#   * It is a CONTAINMENT and it goes away when #225 is fixed. A client that recovers on
+#     its own needs no help from a deploy script.
+#   * It does NOT change the restart order, and must not. `build=` rides the
+#     `registered:` line, which fires only for a node the coordinator does not already
+#     hold, so coordinator-last is what makes the reading fresh at all.
+#   * It restarts EVERY node unit, because which one is missing cannot be known from
+#     here — the journal names node ids and this file names ssh targets. That is cheap
+#     precisely here and nowhere else: this script restarted every one of them about
+#     twenty seconds ago, so the sessions at risk are at most that old.
+#
+# Only on exit 4. Drift (exit 1) is never restarted away: a box on the wrong binary is
+# still on the wrong binary afterwards, and restarting it would destroy the evidence.
+if [ "$fleet_rc" -eq 4 ] && [ "$restart_absent" -eq 1 ]; then
+	log "a node did not re-register — restarting every node unit ONCE (issue #225 containment, not a fix)"
+	for entry in $NODE_TARGETS; do
+		_t=$(node_target "$entry")
+		_u=$(node_unit "$entry")
+		log "restarting $_u on $_t"
+		remote "$_t" "systemctl restart $_u" ||
+			log "  restart failed on $_t — check it by hand"
+	done
+	if [ "$settle" -gt 0 ]; then
+		log "waiting ${settle}s for the restarted nodes to register"
+		sleep "$settle"
+	fi
+	log "re-reading the coordinator's journal"
+	fleet_rc=0
+	fleet_check || fleet_rc=$?
+	if [ "$fleet_rc" -eq 0 ]; then
+		printf '%s: NOTE: the fleet is complete only AFTER a node restart this script had to do itself.\n' "$self" >&2
+		printf '%s: That is issue #225 — a node whose coordinator went away never rebuilds the link — and\n' "$self" >&2
+		printf '%s: every deploy reproduces it, because the coordinator restarts last by design.\n' "$self" >&2
+	fi
+fi
+
+if [ "$fleet_rc" -ne 0 ]; then
 	rc=3
 fi
 

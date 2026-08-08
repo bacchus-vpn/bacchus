@@ -17,6 +17,7 @@
 package deploy
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,8 +144,16 @@ case "$1" in
 show) cat "$FLEET/unit-show" 2>/dev/null || true ;;
 esac
 `, 0o755)
+	// journalctl: the Nth read of the journal answers from $FLEET/journal.N when
+	// that file exists, and from $FLEET/journal otherwise. One pin run can read
+	// the journal twice — the fleet check, and the re-check after it restarts a
+	// node that did not come back (issue #225) — and a fixed answer could not tell
+	// a restart that worked from one that changed nothing.
 	write(t, filepath.Join(bin, "journalctl"), `#!/bin/sh
-cat "$FLEET/journal" 2>/dev/null || true
+n=$(cat "$FLEET/journal.reads" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$FLEET/journal.reads"
+if [ -f "$FLEET/journal.$n" ]; then cat "$FLEET/journal.$n"; else cat "$FLEET/journal" 2>/dev/null || true; fi
 `, 0o755)
 	// go: builds a deterministic stub and answers the two metadata questions the
 	// script asks about it. Every answer is a file the test can rewrite, which is how
@@ -602,6 +611,111 @@ func TestPin_WarnsAboutRelativePathsUnderAnEmptyWorkingDirectory(t *testing.T) {
 	}
 }
 
+// -------------------------------------------------------------------------
+// a node that did not come back (issues #224, #225)
+// -------------------------------------------------------------------------
+
+// The containment wave ruling R4 asked for, and only now that the check can see
+// the condition at all: a node that did not re-register is restarted ONCE and the
+// journal is read again.
+//
+// The cause is one this script creates. The coordinator restarts last — which is
+// what makes `build=` fresh, and is not negotiable — so every node is brought up
+// against the outgoing coordinator and then has it removed a second later, and a
+// node in that state never rebuilds the link (issue #225: 100 minutes observed,
+// fixed by a restart in under a second).
+//
+// MUTATION: drop the `-eq 4` guard so any failure restarts — TestPin_DoesNotRestart
+// OnDrift goes red, which is the pair this one has to be read with.
+func TestPin_RestartsANodeThatDidNotReRegister(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	rev := head[:12]
+	// Two boxes are deployed (NODE_TARGETS) and only one registers.
+	write(t, filepath.Join(f.dir, "journal"), journalOf(rev, registration{"exit", "n7", rev}), 0o644)
+	// After the restart, both do.
+	write(t, filepath.Join(f.dir, "journal.2"), journalOf(rev,
+		registration{"exit", "n7", rev}, registration{"relay", "n9", rev}), 0o644)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — the restart brought the missing node back\n%s", code, out)
+	}
+	if !strings.Contains(out, "1 of 2 expected node(s) did NOT register") {
+		t.Errorf("the absent node was not reported as its own finding:\n%s", out)
+	}
+	// Every node unit, because which one is missing cannot be known from a journal
+	// that names node ids while the host list names ssh targets.
+	for _, want := range []string{exitTarget + "\trestart bacchus-exit", relayTarget + "\trestart bacchus-relay"} {
+		if !strings.Contains(f.log("systemctl.log"), want) {
+			t.Errorf("no %q in:\n%s", want, f.log("systemctl.log"))
+		}
+	}
+	// The coordinator is never restarted here: that would empty the registry again
+	// and the re-read would have nothing to find.
+	if strings.Contains(f.log("systemctl.log"), coordTarget+"\trestart") {
+		t.Errorf("the coordinator was restarted as part of the containment:\n%s", f.log("systemctl.log"))
+	}
+	if !strings.Contains(out, "issue #225") {
+		t.Errorf("the run does not say the restart was a containment for a known bug:\n%s", out)
+	}
+}
+
+// Drift is never restarted away. A box on the wrong binary is on the wrong binary
+// afterwards too, and the restart would destroy the evidence.
+func TestPin_DoesNotRestartOnDrift(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"), journalFor(head[:12], head[:12], "a868e6e3c447"), 0o644)
+
+	out, code := f.pin()
+	if code != 3 {
+		t.Fatalf("exit %d, want 3\n%s", code, out)
+	}
+	if strings.Contains(f.log("systemctl.log"), "restart") {
+		t.Errorf("a unit was restarted to answer a wrong-build finding:\n%s", f.log("systemctl.log"))
+	}
+}
+
+// The escape hatch, for the person who wants to look at the stranded process
+// rather than have it swept up: the restart is what makes #225 undiagnosable.
+func TestPin_NoRestartAbsentLeavesTheStrandedNodeAlone(t *testing.T) {
+	f := newFleet(t)
+	rev := f.head()[:12]
+	write(t, filepath.Join(f.dir, "journal"), journalOf(rev, registration{"exit", "n7", rev}), 0o644)
+
+	out, code := f.pin("--no-restart-absent")
+	if code != 3 {
+		t.Fatalf("exit %d, want 3 — an absent node is still a failed verification\n%s", code, out)
+	}
+	if strings.Contains(f.log("systemctl.log"), "restart") {
+		t.Errorf("--no-restart-absent restarted something anyway:\n%s", f.log("systemctl.log"))
+	}
+}
+
+// registration is one `<role> registered:` line in a rendered journal.
+type registration struct{ role, id, rev string }
+
+// journalOf renders a coordinator journal: a startup line at coord, then one
+// registration line per entry. Roles and ids are given separately because the
+// difference between them is the whole of issue #224 — two roles on one id is one
+// box, and it used to count as two.
+func journalOf(coord string, regs ...registration) string {
+	b := "Aug 08 12:00:00 box bacchus-coordinator[9]: version fence DISABLED (-min-serving-version 0.0.0) — " +
+		"any node version may serve (issue #36); coordinator release 0.1.0 (revision " + coord + ")\n"
+	for i, r := range regs {
+		switch r.role {
+		case "exit":
+			b += fmt.Sprintf("Aug 08 12:00:%02d box bacchus-coordinator[9]: exit registered: %s -> 192.0.2.10:20000 "+
+				"country=NL (observed IP) release=0.1.0 build=%s\n", i+1, r.id, r.rev)
+		default:
+			b += fmt.Sprintf("Aug 08 12:00:%02d box bacchus-coordinator[9]: relay registered: %s (192.0.2.20:41234) "+
+				"country=DE (node hint, unresolved IP) release=0.1.0 build=%s\n", i+1, r.id, r.rev)
+		}
+	}
+	return b
+}
+
 // journalFor renders a coordinator journal in which the coordinator started at coord and
 // two nodes then registered at the given revisions.
 func journalFor(coord, exitRev, relayRev string) string {
@@ -723,6 +837,132 @@ func TestFleetCheck_UnknownAndDirtyAreFailures(t *testing.T) {
 			t.Fatalf("exit %d\n%s", code, out)
 		}
 	})
+}
+
+// One box serving two roles is ONE node. It prints two `registered:` lines
+// carrying one node id — `-role exit,relay` and `-volunteer-relay
+// -volunteer-exit` both do — and keying the table on `role id` counted it twice.
+//
+// That is how the first real pin run printed `3 node(s) registered` and `the fleet
+// is pinned` from three rows carrying two ids, with one of three boxes dead.
+//
+// MUTATION: key on `p[1] " " p[3]` again (role plus id, as before issue #224) —
+// this reports 3 of 3 and passes, which is exactly the false pass that was shipped.
+func TestFleetCheck_CountsADualRoleNodeOnce(t *testing.T) {
+	j := journalOf("2f4f77887c67",
+		registration{"exit", "aaa", "2f4f77887c67"},
+		registration{"relay", "aaa", "2f4f77887c67"},
+		registration{"exit", "bbb", "2f4f77887c67"})
+
+	out, code := fleetCheck(t, j, "--expect", "3", "2f4f77887c67")
+	if code != 4 {
+		t.Fatalf("exit %d, want 4 — three rows carrying two ids is TWO nodes, and a third box is missing\n%s", code, out)
+	}
+	if !strings.Contains(out, "2 of 3 expected node(s) registered") {
+		t.Errorf("the summary does not say how many of how many:\n%s", out)
+	}
+	if !strings.Contains(out, "exit,relay aaa") {
+		t.Errorf("the dual-role box is not shown as one row naming both roles:\n%s", out)
+	}
+	if n := strings.Count(out, "aaa"); n != 1 {
+		t.Errorf("the dual-role box appears %d times, want 1:\n%s", n, out)
+	}
+}
+
+// Absence is its own finding, and the messages must not be interchangeable: a box
+// on the wrong build is serving traffic wrongly (issue #114), a box that never
+// registered is not serving at all and may simply be off. Both non-zero, both
+// different.
+func TestFleetCheck_ReportsAnAbsentNodeSeparatelyFromDrift(t *testing.T) {
+	j := journalOf("2f4f77887c67",
+		registration{"exit", "aaa", "2f4f77887c67"},
+		registration{"relay", "bbb", "2f4f77887c67"})
+
+	out, code := fleetCheck(t, j, "--expect", "3", "2f4f77887c67")
+	if code != 4 {
+		t.Fatalf("exit %d, want 4\n%s", code, out)
+	}
+	if !strings.Contains(out, "did NOT register in this window") {
+		t.Errorf("the absent node is not named as a finding:\n%s", out)
+	}
+	if strings.Contains(out, "NOT on one commit") {
+		t.Errorf("an absent node is being reported as drift:\n%s", out)
+	}
+	// It must not invent a name for the box, and it must say why it cannot.
+	if !strings.Contains(out, "journal names node ids and your host list names ssh targets") {
+		t.Errorf("the message does not say why the missing box cannot be named:\n%s", out)
+	}
+	// And it must name the cause a deploy actually creates.
+	if !strings.Contains(out, "#225") {
+		t.Errorf("the message does not point at the failure the deploy order guarantees:\n%s", out)
+	}
+}
+
+// Both findings at once. Both are printed, and the exit code is drift's: a box
+// serving the wrong binary is the stronger instruction — distrust every result
+// from this fleet — while an absent box is one that is not answering at all.
+func TestFleetCheck_DriftOutranksAbsenceInTheExitCode(t *testing.T) {
+	j := journalOf("2f4f77887c67",
+		registration{"exit", "aaa", "2f4f77887c67"},
+		registration{"relay", "bbb", "a868e6e3c447"})
+
+	out, code := fleetCheck(t, j, "--expect", "3", "2f4f77887c67")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "NOT on one commit") || !strings.Contains(out, "did NOT register in this window") {
+		t.Errorf("both findings must be reported even though one exit code is returned:\n%s", out)
+	}
+}
+
+// MORE ids than expected is not a failure. A volunteer client serves as a relay or
+// an exit (ADR-0053) and registers exactly like a deployed node without being in
+// any host list — so the count is a FLOOR, and the output says so rather than
+// letting a reader take it for a roll call.
+func TestFleetCheck_MoreNodesThanExpectedIsNotAFailure(t *testing.T) {
+	j := journalOf("2f4f77887c67",
+		registration{"exit", "aaa", "2f4f77887c67"},
+		registration{"relay", "bbb", "2f4f77887c67"},
+		registration{"relay", "volunteer", "2f4f77887c67"})
+
+	out, code := fleetCheck(t, j, "--expect", "2", "2f4f77887c67")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — a volunteer is not a failed pin\n%s", code, out)
+	}
+	if !strings.Contains(out, "volunteer") {
+		t.Errorf("nothing explains why there are more nodes than the host list has:\n%s", out)
+	}
+}
+
+// --expect takes a count and never a host list, and the refusal says why: this
+// script prints no hostname, which is what makes its output the half of a pin run
+// that is safe to paste into a public issue. bacchus-pin.sh's own output names
+// every ssh target on every line.
+func TestFleetCheck_RefusesAHostListAsTheExpectedCount(t *testing.T) {
+	for _, arg := range []string{"exit-a=bacchus-exit relay-b=bacchus-relay", "three", "-1", ""} {
+		out, code := fleetCheck(t, "", "--expect", arg, "2f4f77887c67")
+		if code != 2 {
+			t.Errorf("--expect %q: exit %d, want 2\n%s", arg, code, out)
+		}
+	}
+	if out, code := fleetCheck(t, "", "--expect"); code != 2 || !strings.Contains(out, "needs a value") {
+		t.Errorf("a bare --expect: exit %d\n%s", code, out)
+	}
+}
+
+// Without --expect the check is what it was: no floor above zero. It must say that
+// out loud rather than printing a bare count that reads like a roll call — the
+// sentence that made the first real run's `3 node(s) registered` convincing.
+func TestFleetCheck_SaysSoWhenItHasNoFloor(t *testing.T) {
+	j := journalOf("2f4f77887c67", registration{"exit", "aaa", "2f4f77887c67"})
+
+	out, code := fleetCheck(t, j, "2f4f77887c67")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — without --expect there is nothing to compare\n%s", code, out)
+	}
+	if !strings.Contains(out, "No --expect given") {
+		t.Errorf("the absence of a floor is not stated:\n%s", out)
+	}
 }
 
 func TestFleetCheck_RefusesAnUnusableRevisionArgument(t *testing.T) {
