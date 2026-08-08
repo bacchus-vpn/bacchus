@@ -209,9 +209,9 @@ func Apply(target, staged string, a Artifact, release string) error {
 	return nil
 }
 
-// Confirm clears the marker. A process calls it once it has reached a state that
-// proves the new binary works — for a node, serving; for the client, a completed
-// start.
+// Confirm clears the marker for the release THIS PROCESS started. A process calls
+// it once it has reached a state that proves the new binary works — for a node,
+// serving; for the client, a completed start.
 //
 // "Reached a serving state" is deliberately the caller's judgement and not this
 // package's. What counts as working differs per binary, and a definition invented
@@ -219,7 +219,32 @@ func Apply(target, staged string, a Artifact, release string) error {
 //
 // It is idempotent and a missing marker is not an error: an ordinary start with no
 // pending update calls this and finds nothing.
+//
+// A marker that has NOT started is left alone, and that is the whole reason this is
+// not a bare Remove. The process that calls Confirm is normally the process that
+// applied the release, and it applies while running the OLD binary — it keeps the
+// inode it was started from, and the handover happens at the next restart. Its own
+// probation timer therefore fires against a marker belonging to a release that has
+// not run yet, and clearing it would delete the new release's only protection
+// before the new release had been tried once. Confirming what this process's start
+// proved is the exact claim a caller is entitled to make.
 func Confirm(target string) error {
+	m, ok, err := readMarker(MarkerPath(target))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if !m.Started {
+		return nil
+	}
+	return clearMarker(target)
+}
+
+// clearMarker removes the marker unconditionally. Confirm is the exported,
+// conditional form; this is what the startup check uses once it has decided.
+func clearMarker(target string) error {
 	if err := os.Remove(MarkerPath(target)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("update: clear confirmation marker: %w", err)
 	}
@@ -230,15 +255,35 @@ func Confirm(target string) error {
 // calls it as early in main as it can, whether or not updating is configured — it
 // is a stat of one path when there is nothing to do.
 //
-// Three outcomes:
+// Four outcomes:
 //
 //   - No marker: nil. The ordinary start.
-//   - A marker and a previous binary: the previous binary is renamed back over the
-//     target, the marker is cleared, and ErrDemoted is returned. The caller must
-//     exit; the supervisor re-execs the restored binary.
 //   - A marker and NO previous binary: the marker is cleared and nil is returned.
 //     This is the crash-between-marker-and-rename case, where nothing was ever
 //     published.
+//   - A marker that has not started: it is recorded as started and nil is
+//     returned. THIS START IS THE APPLIED RELEASE'S TRIAL.
+//   - A marker that HAS started: the previous start of this release did not
+//     confirm. The previous binary is renamed back over the target, the marker is
+//     cleared, and ErrDemoted is returned. The caller must exit; the supervisor
+//     re-execs the restored binary.
+//
+// # Why the first start is a trial rather than a demotion
+//
+// The marker is written by the APPLY, and an apply runs in the old binary — the
+// running process keeps the inode it was started from, so the new release does not
+// execute until the next restart. "A start that finds a marker" is therefore
+// satisfied by the new release's own first start, which is the start it has to be
+// given. A watchdog that demoted there would roll back every release that works,
+// on the first restart after it was applied, forever: the node would apply, be
+// demoted, apply again on the next check, and never move.
+//
+// So a marker is a PROBATION with two states rather than a trap with one. The
+// first start claims it; a start that finds it already claimed is the second start
+// of a release whose first start never got far enough to call Confirm, and that is
+// exactly the crash loop this exists for. Under RestartSec=2 the cost of the extra
+// state is one two-second cycle before the demotion; the cost of not having it is
+// that the release channel cannot deliver a release.
 //
 // # What this catches, and what it does not
 //
@@ -250,10 +295,12 @@ func Confirm(target string) error {
 // It does NOT catch a binary that cannot execute at all — a corrupt file that
 // verified against a manifest signed over corrupt bytes, a missing loader, the
 // wrong architecture. Nothing in this process can, because this process never
-// starts. That case wants a supervisor-side check, which is deploy/'s to place and
-// not this package's; the previous binary is kept beside the target precisely so
-// that recovery is one rename either way. ADR-0065 §6 records it as a known gap
-// with a named owner rather than as a thing that is handled.
+// starts, so the marker is never read and never claimed. That is deploy/'s to
+// handle, and the unclaimed marker is precisely the signal it acts on:
+// deploy/bacchus-update-rollback.sh, wired to the units by OnFailure=, performs
+// the same rename from the same place when systemd gives up restarting. The two
+// cannot fight, because each acts on a marker state the other never leaves behind
+// (ADR-0069, correcting ADR-0065 §6).
 //
 // It also does not catch "applied, started, and cannot serve" — #114's shape,
 // where a node registers, heartbeats and is assigned work while silently dropping
@@ -273,7 +320,20 @@ func CheckStartup(target string) error {
 		// previous demotion already consumed it. Clearing the marker is the only
 		// correct move — leaving it would demote a healthy binary on the next start
 		// with nothing to demote it TO.
-		if err := Confirm(target); err != nil {
+		if err := clearMarker(target); err != nil {
+			return err
+		}
+		return nil
+	}
+	if !m.Started {
+		// The applied release's first start. Claim the marker before returning, so
+		// that a process which dies one instruction later is still recorded as having
+		// had its turn. A marker that cannot be claimed — a read-only directory — is
+		// reported rather than assumed either way: the caller logs it and continues,
+		// which leaves this release running unprotected rather than demoting a build
+		// that may be perfectly good.
+		m.Started = true
+		if err := writeMarker(MarkerPath(target), m); err != nil {
 			return err
 		}
 		return nil
@@ -282,7 +342,7 @@ func CheckStartup(target string) error {
 		return fmt.Errorf("update: demote to %s: %w", prev, err)
 	}
 	_ = syncDir(filepath.Dir(target))
-	if err := Confirm(target); err != nil {
+	if err := clearMarker(target); err != nil {
 		return err
 	}
 	return fmt.Errorf("%w: %s did not confirm release %s", ErrDemoted, filepath.Base(target), m.Release)

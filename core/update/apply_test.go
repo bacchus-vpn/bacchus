@@ -3,6 +3,7 @@ package update_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -272,11 +273,21 @@ func TestCheckStartupDemotesAnUnconfirmedStart(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	// The new binary starts and never confirms — it crashed, or never reached a
-	// serving state. The NEXT start finds the marker.
+	// The new binary's FIRST start. It claims the marker and is left to run: the
+	// apply happened in the old binary, so this is the release's only opportunity
+	// to prove itself, and demoting here would roll back every release that works.
+	if err := update.CheckStartup(target); err != nil {
+		t.Fatalf("CheckStartup on the applied release's first start = %v, want nil", err)
+	}
+	if got := readFile(t, target); !bytes.Equal(got, releaseBytes) {
+		t.Fatalf("the first start demoted the release it was supposed to try: %q", got)
+	}
+
+	// It starts and never confirms — it crashed, or never reached a serving state.
+	// The NEXT start finds the marker already claimed.
 	err = update.CheckStartup(target)
 	if !errors.Is(err, update.ErrDemoted) {
-		t.Fatalf("CheckStartup after an unconfirmed apply = %v, want ErrDemoted", err)
+		t.Fatalf("CheckStartup after an unconfirmed start = %v, want ErrDemoted", err)
 	}
 	if got := readFile(t, target); !bytes.Equal(got, runningBytes) {
 		t.Fatalf("the demotion did not restore the previous binary: %q", got)
@@ -303,15 +314,134 @@ func TestCheckStartupIsSilentAfterAConfirmedStart(t *testing.T) {
 	if err := update.Apply(target, staged, a, "0.5.0"); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
+	// The whole life of a good release: applied, started once, and confirmed by
+	// that start. Every restart afterwards is ordinary.
+	if err := update.CheckStartup(target); err != nil {
+		t.Fatalf("CheckStartup on the first start = %v, want nil", err)
+	}
 	if err := update.Confirm(target); err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
+	for i := range 3 {
+		if err := update.CheckStartup(target); err != nil {
+			t.Fatalf("CheckStartup %d start(s) after a confirmed release = %v, want nil", i+1, err)
+		}
+		if got := readFile(t, target); !bytes.Equal(got, releaseBytes) {
+			t.Fatalf("a confirmed release was demoted anyway: %q", got)
+		}
+	}
+}
+
+// The defect this shape exists to close, stated as the sequence that produced it.
+//
+// The marker is written by the apply, and the apply runs in the OLD binary: a
+// running process keeps the inode it was started from, so the new release does not
+// execute until the next restart. A watchdog that demoted on merely FINDING a
+// marker therefore demoted the new release on its own first start — every time,
+// including for a release that works — and a node would apply, be demoted, apply
+// again on its next check, and never move off the release it was on.
+//
+// Asserted on bytes and across the full cycle, because "CheckStartup returned nil"
+// is not evidence that the release survived.
+func TestAWorkingReleaseSurvivesTheRestartThatHandsOverToIt(t *testing.T) {
+	target := installed(t)
+	a := artifactOf("linux", "amd64", update.RoleNode, releaseBytes)
+	staged, err := update.Stage(context.Background(), serveSource{blob: releaseBytes}, a, target)
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if err := update.Apply(target, staged, a, "0.5.0"); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	// The applying process is still running the old binary. Its own probation timer
+	// fires here — one minute after ITS start, which has nothing to do with the
+	// release it just applied — and must not clear a marker the new release has not
+	// had the chance to claim.
+	if err := update.Confirm(target); err != nil {
+		t.Fatalf("Confirm from the applying process: %v", err)
+	}
+	if _, err := os.Stat(update.MarkerPath(target)); err != nil {
+		t.Fatalf("the applying process cleared the new release's marker: %v — the release would then "+
+			"run with no demotion protection at all, which is the opposite of what the marker is for", err)
+	}
+
+	// The handover. The supervisor re-execs the target, which is now the release.
 	if err := update.CheckStartup(target); err != nil {
-		t.Fatalf("CheckStartup after a confirmed apply = %v, want nil", err)
+		t.Fatalf("the release's first start = %v, want nil", err)
 	}
 	if got := readFile(t, target); !bytes.Equal(got, releaseBytes) {
-		t.Fatalf("a confirmed release was demoted anyway: %q", got)
+		t.Fatalf("the release was demoted by the very start that was meant to try it: %q", got)
 	}
+
+	// It reaches a serving state and confirms. Now the marker is gone and the
+	// previous binary is dead weight rather than a pending rollback.
+	if err := update.Confirm(target); err != nil {
+		t.Fatalf("Confirm after the release's own start: %v", err)
+	}
+	if _, err := os.Stat(update.MarkerPath(target)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the marker survived a confirmed start: %v", err)
+	}
+	if err := update.CheckStartup(target); err != nil {
+		t.Fatalf("an ordinary restart afterwards = %v, want nil", err)
+	}
+	if got := readFile(t, target); !bytes.Equal(got, releaseBytes) {
+		t.Fatalf("an ordinary restart demoted a confirmed release: %q", got)
+	}
+}
+
+// The marker states which of the two watchdogs owns the case, and it is a fact on
+// disk rather than an inference: a supervisor-side check has no way to ask a
+// process that never started what it did.
+//
+//   - started=false — no process of this release has reached main. Either the
+//     handover has not happened yet, or the binary cannot execute at all, which is
+//     the case only something outside the process can reach (#222).
+//   - started=true — a process reached main. A crash loop puts it through
+//     CheckStartup again and the demotion happens in-process.
+func TestTheMarkerRecordsWhetherTheReleaseEverStarted(t *testing.T) {
+	target := installed(t)
+	a := artifactOf("linux", "amd64", update.RoleNode, releaseBytes)
+	staged, err := update.Stage(context.Background(), serveSource{blob: releaseBytes}, a, target)
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	if err := update.Apply(target, staged, a, "0.5.0"); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	m := readMarker(t, target)
+	if m.Started {
+		t.Fatal("a freshly applied release is recorded as started, so nothing outside the process " +
+			"could tell a binary that will not execute from one that ran and crashed")
+	}
+	if m.Release != "0.5.0" {
+		t.Fatalf("marker release = %q, want 0.5.0 — the supervisor-side rollback logs it", m.Release)
+	}
+
+	if err := update.CheckStartup(target); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if !readMarker(t, target).Started {
+		t.Fatal("a start that reached CheckStartup did not claim the marker, so a crash loop would " +
+			"never be demoted and the supervisor-side check would act on a case it does not own")
+	}
+}
+
+// readMarker reads the on-disk marker beside target. The supervisor-side rollback
+// reads the same file with the same field names, from shell, so the encoding is
+// part of the contract rather than an implementation detail.
+func readMarker(t *testing.T, target string) update.Marker {
+	t.Helper()
+	b, err := os.ReadFile(update.MarkerPath(target))
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	var m update.Marker
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("parse marker %q: %v", b, err)
+	}
+	return m
 }
 
 // A crash between the marker and the rename leaves a marker with nothing to go

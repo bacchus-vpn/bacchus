@@ -60,7 +60,7 @@ set -eu
 # calls skip(), which counts. The only such case today is the user+mount
 # namespace one at the bottom.
 expected_cases=29
-expected_checks=138
+expected_checks=144
 
 failures=0
 checks=0
@@ -468,6 +468,11 @@ expect_ok node --role exit --binaries "$bins"
 
 assert_file "$stage/usr/local/bin/bacchus-node" 755
 assert_file "$stage/etc/systemd/system/bacchus-exit.service" 644
+# The supervisor-side half of the demotion watchdog (issue #222). bacchus-exit
+# names it in OnFailure=, so an install that placed the unit without it would
+# leave every failure of that unit pointing at a unit that is not on the box.
+assert_file "$stage/usr/local/lib/bacchus/bacchus-update-rollback" 755
+assert_file "$stage/etc/systemd/system/bacchus-update-rollback@.service" 644
 assert_file "$stage/etc/bacchus/node.env" 600
 assert_dir_mode "$stage/etc/bacchus" 700
 
@@ -527,6 +532,8 @@ case_start 'node: uninstall keeps the identity unless asked to purge'
 expect_ok uninstall node
 assert_absent "$stage/usr/local/bin/bacchus-node"
 assert_absent "$stage/etc/systemd/system/bacchus-exit.service"
+assert_absent "$stage/usr/local/lib/bacchus/bacchus-update-rollback"
+assert_absent "$stage/etc/systemd/system/bacchus-update-rollback@.service"
 assert_present "$stage/etc/bacchus/node.env"
 assert_grep "$work/out.log" 'KEPT' 'uninstall says loudly that it kept the identity'
 
@@ -545,6 +552,8 @@ expect_ok node --role coordinator --binaries "$bins"
 assert_file "$stage/usr/local/bin/bacchus-coordinator" 755
 assert_file "$stage/etc/systemd/system/bacchus-coordinator.service" 644
 assert_file "$stage/etc/bacchus/coordinator.env" 600
+assert_file "$stage/usr/local/lib/bacchus/bacchus-update-rollback" 755
+assert_file "$stage/etc/systemd/system/bacchus-update-rollback@.service" 644
 assert_file "$stage/usr/local/bin/bacchus-geoip-refresh.sh" 755
 assert_file "$stage/etc/systemd/system/bacchus-geoip-refresh.service" 644
 assert_file "$stage/etc/systemd/system/bacchus-geoip-refresh.timer" 644

@@ -90,9 +90,10 @@ func main() {
 	upd := registerUpdateFlags()
 	flag.Parse()
 
-	// BEFORE anything else: if a previous run applied a release and never confirmed
-	// it, put the previous binary back and exit so the supervisor starts it. This is
-	// unconditional — the marker was written by a run that may have been configured
+	// BEFORE anything else: if a previous START of an applied release never
+	// confirmed it, put the previous binary back and exit so the supervisor starts
+	// it. This start is that release's trial when it is the first one (ADR-0069).
+	// Unconditional — the marker was written by a run that may have been configured
 	// differently — and with no marker it is one stat.
 	updTarget := updateTarget(*upd.target)
 	if updTarget != "" {

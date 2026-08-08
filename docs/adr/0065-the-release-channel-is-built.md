@@ -357,3 +357,45 @@ that the entire fleet refuses, discovered after the ceremony and by the fleet.
   ruled it (the existing root) and this record only provides the slot.
 - **The update key's custody**, which ADR-0052's amendment holds provisional until
   the owner is re-asked, before the delegation is minted.
+
+## Amendment (2026-08-08, `#223`): the second correction is closed — `bacchus-netd` states a release
+
+The second correction above recorded that `cmd/bacchus-netd` did not link
+`core/version`, so the `-ldflags -X …core/version.current=` that three build
+paths pass for it named a symbol the binary had no reference to and was **ignored
+silently, with a zero exit**. `#223` asked the question that record deliberately
+left open — whether the helper should carry a stamp at all, or whether the build
+paths should stop claiming one — and it is answered the first way.
+
+**It imports `core/version`, logs its release on the first line, and answers
+`-version`.** Three grounds, in order of weight:
+
+- **It is a release artifact.** §7 above emits a `role=netd` row and
+  `core/update.RoleNetd` is a closed-vocabulary role, so a signed release
+  *replaces this binary*. A component the channel updates and that cannot say
+  which release it is leaves the update unverifiable on the box by any means
+  short of hashing the file.
+- **It is the component that outlives everything else on a routed machine.** It
+  holds `CAP_NET_ADMIN` and owns the routing, firewall and DNS state; "which netd
+  is on this box" is `#114`'s question asked about the one process whose answer an
+  operator most needs.
+- **The dependency costs nothing that ADR-0049's dependency argument was
+  protecting.** That argument is about code running as root reachable from an
+  unprivileged process; `core/version` is stdlib-only by design and adds no
+  module, which is the property its own doc comment exists to preserve.
+
+The cost, stated: `core/version.Current` panics on a malformed stamp, so the root
+helper now shares that failure mode. It is the right way round — a netd that
+refuses to start leaves the client unable to open a session while the kill-switch
+stays in force, because that is nftables state in the kernel — and three
+validators reject a malformed `VERSION` before one can be linked.
+
+**§7's assertion started applying on its own**, exactly as it was built to: the
+release workflow derives which binaries to assert a stamp for from `go list
+-deps`, so nothing in `release.yml` changed. What did change is that the
+derivation is now also checked on **every push** rather than only on a tag:
+`core/version.TestEveryStampedBuildLinksTheVersionPackage` reads the
+`resolve_binary` calls out of `deploy/install.sh` and fails if any package a
+build path stamps does not link `core/version`. That is the check whose absence
+let this sit — `TestStampMatchesTheVersionFile` can only ever prove the symbol
+path resolves, because it is linked into a binary that references the package.
