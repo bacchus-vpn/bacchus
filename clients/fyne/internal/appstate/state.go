@@ -1,6 +1,6 @@
-// Package appstate is the connection-state model and engine controller (old
-// #148/#149), kept deliberately free of any Fyne import. That split is what
-// lets this package's tests run as plain `go test`, with no GUI toolchain
+// Package appstate is the connection-state model and engine controller
+// (old #148/#149), kept deliberately free of any Fyne import. That split is
+// what lets this package's tests run as plain `go test`, with no GUI toolchain
 // (glfw/OpenGL need cgo - see the ADR) - only the outer main package touches
 // fyne.* and needs that toolchain to build.
 //
