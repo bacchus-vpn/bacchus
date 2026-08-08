@@ -261,6 +261,67 @@ func TestSanitizePoolOrderAdmitsOnlyTunnelSafeTransports(t *testing.T) {
 	}
 }
 
+// TestSanitizePoolOrderKeepsAVersionedTransport is bacchus#201: a configured
+// pool name may carry a protocol version (issue #176), and matching the allowed
+// set by exact string dropped every one of them silently.
+//
+// The last row is the one that made this worse than "a transport is missing".
+// SanitizePoolOrder returns the survivors, core reads an EMPTY TransportPool as
+// the pool being OFF (Engine.poolOn), and a fleet mid-rollout configures exactly
+// that ladder — so bumping a transport version turned a client's failover ladder
+// into a single-transport dial with nothing said anywhere.
+//
+// Mutation check: reverting either poolTransportBase call in SanitizePoolOrder
+// to a bare `t` makes every versioned row go red; keying `seen` on the base name
+// instead of the full one collapses the two-versions row to one member.
+func TestSanitizePoolOrderKeepsAVersionedTransport(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"a versioned name is allowed exactly when its base is", []string{"reality/2"}, []string{"reality/2"}},
+		{"an explicit version 1 is the same transport", []string{"reality/1"}, []string{"reality/1"}},
+		{"two versions of one transport are two pool members", []string{"reality/2", "reality"}, []string{"reality/2", "reality"}},
+		{"the same versioned name twice is still one member", []string{"reality/2", "reality/2"}, []string{"reality/2"}},
+		{"a versioned unknown transport is still unknown", []string{"tor/2", "webrtc"}, []string{"webrtc"}},
+		{"a version with no base name is not a transport", []string{"/2", "webrtc"}, []string{"webrtc"}},
+		{
+			"a fleet mid-rollout keeps its whole ladder rather than losing the pool",
+			[]string{"reality/2", "webrtc/2"},
+			[]string{"reality/2", "webrtc/2"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SanitizePoolOrder(tc.in)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("SanitizePoolOrder(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSanitizePoolOrderDoesNotPreEmptCoreOnAMalformedVersion pins the deliberate
+// asymmetry between this client's parser and core's.
+//
+// core REFUSES "reality/two" — silently reading it as version 1 would hand an
+// operator the transport they were trying to move off, under the name of the one
+// they asked for — and that refusal happens at construction, named, from the
+// field that caused it (core's setupPool builds every pool member). This layer
+// must therefore carry the entry through: deleting it here would replace core's
+// named refusal with the exact silent drop bacchus#201 exists to close, and the
+// user would see a ladder that quietly lost a row instead of a connect that said
+// why.
+func TestSanitizePoolOrderDoesNotPreEmptCoreOnAMalformedVersion(t *testing.T) {
+	for _, in := range []string{"reality/two", "reality/0", "reality/"} {
+		got := SanitizePoolOrder([]string{in})
+		if !reflect.DeepEqual(got, []string{in}) {
+			t.Fatalf("SanitizePoolOrder(%q) = %v — a malformed version is core's to refuse, loudly, not this layer's to delete", in, got)
+		}
+	}
+}
+
 // TestLadderDisplayOrderShowsEveryKnownTransport: a never-configured ladder
 // must still show what it could contain, or the pool looks like it has one
 // option. A partially-configured one keeps the user's order and gains the rest.
@@ -297,6 +358,64 @@ func TestLadderDisplayOrderShowsEveryKnownTransport(t *testing.T) {
 			t.Fatalf("LadderDisplayOrder aliased its input: in = %v", in)
 		}
 	})
+}
+
+// TestLadderDisplayOrderGivesAVersionedTransportNoPhantomTwin is the other half
+// of bacchus#201, and the half the card warned would survive a fix to
+// SanitizePoolOrder alone: this function appends every knownPoolTransports entry
+// the saved order is "missing", and judged by exact string a ladder holding
+// "reality/2" is missing "reality".
+//
+// The user would then see one transport twice at two versions, be able to
+// reorder both, and save a two-member pool they never configured.
+//
+// Mutation check: reverting either poolTransportBase call to a bare `t` makes
+// both versioned rows go red.
+func TestLadderDisplayOrderGivesAVersionedTransportNoPhantomTwin(t *testing.T) {
+	t.Run("a versioned member is not missing its own base name", func(t *testing.T) {
+		got := LadderDisplayOrder([]string{"reality/2"})
+		want := []string{"reality/2", core.TransportWebRTC}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("LadderDisplayOrder([reality/2]) = %v, want %v", got, want)
+		}
+	})
+	t.Run("a fully versioned ladder gains nothing", func(t *testing.T) {
+		in := []string{"reality/2", "webrtc/2"}
+		got := LadderDisplayOrder(in)
+		if !reflect.DeepEqual(got, in) {
+			t.Fatalf("LadderDisplayOrder(%v) = %v, want it unchanged", in, got)
+		}
+	})
+}
+
+// TestAVersionedLadderStaysTickedThroughTheSettingsWindow drives the two
+// expressions clients/fyne/settings.go actually evaluates, in the order it
+// evaluates them, because bacchus#201's user-visible damage was done by their
+// composition rather than by either one alone.
+//
+// `poolCheck.SetChecked(len(SanitizePoolOrder(cfg.TransportPool)) > 0)` unticked
+// itself for an all-versioned ladder, and `LadderDisplayOrder(SanitizePoolOrder(
+// …))` seeded the rows. So opening Settings on a mid-rollout config showed the
+// pool switched off over a ladder that had lost its rows to phantoms, and saving
+// that window wrote the loss back to disk.
+//
+// It lives here rather than in clients/fyne because that package needs a
+// cgo/GUI toolchain to test at all (ADR-0039's Fyne-free/Fyne-touching split);
+// what is asserted is the logic, and settings.go is the wiring over it.
+func TestAVersionedLadderStaysTickedThroughTheSettingsWindow(t *testing.T) {
+	saved := []string{"reality/2", "webrtc/2"}
+	sanitized := SanitizePoolOrder(saved)
+	if len(sanitized) == 0 {
+		t.Fatalf("the pool checkbox would untick itself: SanitizePoolOrder(%v) = %v", saved, sanitized)
+	}
+	ladder := LadderDisplayOrder(sanitized)
+	if !reflect.DeepEqual(ladder, saved) {
+		t.Fatalf("the ladder shown = %v, want the saved order %v", ladder, saved)
+	}
+	// What Save writes back: the same ladder, not a subset of it.
+	if back := SanitizePoolOrder(ladder); !reflect.DeepEqual(back, saved) {
+		t.Fatalf("saving the displayed ladder wrote %v, want %v", back, saved)
+	}
 }
 
 // TestMoveLadderItemIsInertAtTheEdges pins that a click at either end does

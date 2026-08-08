@@ -236,8 +236,8 @@ bundle ships the example beside the exe, and `deploy/install.sh` copies it verba
 Linux. The match is exact and only on the host, so a real deployment is never refused
 for a hostname that merely resembles one.
 
-**`coordinators`, `stun` and `turn` are the one group Settings cannot set** — there
-is no widget for any of them, deliberately (ADR-0039 separates operator config from
+**`coordinators`, `stun`, `turn` and `invite` are the one group Settings cannot set** —
+there is no widget for any of them, deliberately (ADR-0039 separates operator config from
 user preference). So the Connect refusal names this file by its full path and says
 that outright, rather than sending you to a window with no such field (bacchus#134).
 It names the file to *edit* when one is already there — `deploy/install.sh` seeds one
@@ -308,8 +308,9 @@ soon as it enters its renewal margin and holds the rest as slack, so a service
 that becomes unreachable at *T* takes the first devices offline at *T* + ~6 h —
 not the 42 hours between renewals. Naming the successor address here *before* the
 move is what makes a planned move survivable: the client rotates to it by itself,
-with nothing to re-download and nobody to tell. It does not help an *unplanned*
-move, where a list the client cannot update goes stale together.
+with nothing to re-download and nobody to tell. On its own it does not help an
+*unplanned* move, where a list the client cannot update goes stale together —
+that is what `invite` and the signed directory below are for (bacchus#193).
 
 Every address shares the one `accountServiceAudience` and the one
 `accountServiceCa`. There is deliberately no per-address CA or audience, which is
@@ -329,6 +330,53 @@ comfortable credential life left says so calmly, and the sentence escalates on t
 clock as the remaining life shrinks, so the warning arrives while it is still only
 a warning. Both the device credential and the admission credential are refreshed
 together and stored together (bacchus#166).
+
+### The signed directory (bacchus#193, ADR-0061)
+
+One optional key, `invite`, and it is what makes every address above **learnable**
+rather than fixed. Without it this client is exactly what it was: it dials the
+addresses in this file and nothing can tell it one has moved. With it, at each
+Connect (and at each country refresh) it fetches the coordinator's signed
+cold-start directory, verifies the signature and the validity window, caches the
+signed bytes, and reads two things out of it:
+
+- **The coordinator pool.** The directory's address is dialled *first* and the
+  configured ones stay behind it. It **leads** rather than replacing, because a
+  coordinator publishes only its own address in a snapshot — it has nothing to
+  say about its peers — so replacing would narrow a three-coordinator pool to
+  whichever one signed the directory the client happened to fetch.
+- **The account service.** Here the directory's list **replaces** the configured
+  one, because a coordinator states that list in full (`-account-service`, one
+  occurrence per address) and because the configured address is precisely the one
+  that goes stale. A directory that names no account service leaves your
+  `accountServiceUrls` alone.
+
+An entry is a **location and never a trust root**: `accountServiceAudience` and
+`accountServiceCa` stay in this file, arrive out of band, and are what an address
+still has to satisfy. An address the directory names is not more trusted than one
+you typed — it is only somewhere else.
+
+| key | what it is |
+| --- | --- |
+| `invite` | A `bacchus1:` string from `cmd/coldstart-issue`, carrying the coordinator's bootstrap address, a per-user fetch secret and the snapshot-signing public key. Optional; empty is the pre-#193 client. A *malformed* one refuses the Connect and says so, rather than silently disabling directory updates. |
+
+**It is per-recipient and must never ship in an installer or a template.** A
+coordinator's bootstrap secrets file has no vouch or trust system under it — every
+entry in it is trusted equally — so an invite embedded in a downloadable artifact
+is a working credential for the whole network, held by everyone who downloads it.
+The template ships this key **empty**, which is a slot and not a credential, and a
+test fails the build if that ever changes. The accepted price is that provisioning
+a device now takes **two** out-of-band strings rather than one: an invite alongside
+the claim code.
+
+Three things it deliberately does *not* do. An **expired** snapshot is never
+adopted — the fallback is always the addresses in this file, never nothing — and
+since a coordinator's snapshot lives five minutes, the on-disk cache serves a rapid
+reconnect rather than the next day's launch. A snapshot that does not verify
+against *your current* invite is passed over, which is what makes re-issuing an
+invite take effect at the next Connect. And a session that is already up keeps the
+addresses it started with: the directory is read at Connect, so a move is picked up
+by reconnecting.
 
 ## Settings (`old #152`, then #93)
 

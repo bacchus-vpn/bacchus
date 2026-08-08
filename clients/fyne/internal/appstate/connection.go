@@ -54,10 +54,42 @@ import (
 //
 // Unexported, and reachable only through the functions below, so neither list
 // can be mutated by a caller holding a package-level slice header.
+//
+// The two hold the same two names today and are deliberately NOT collapsed into
+// one value (bacchus#201 asked the question explicitly). They answer different
+// questions — "may this client enable it" and "does the ladder control list it"
+// — and the case that separates them is the one above: a transport that is
+// displayable before it is provably tunnel-safe. Merging them costs one line of
+// duplication now and deletes the seam that difference lives in, which is only
+// re-addable by whoever next has to notice it exists.
+//
+// Both lists hold BARE names, and every comparison against them goes through
+// poolTransportBase. A configured pool member may carry a protocol version
+// (issue #176, "reality/2"), and the version is a property of the WIRE SHAPE,
+// never of whether this client's tunnel can carry the transport at all.
 var (
 	allowedPoolTransports = []string{core.TransportWebRTC, core.TransportReality}
 	knownPoolTransports   = []string{core.TransportWebRTC, core.TransportReality}
 )
+
+// poolTransportBase is a configured pool name with any protocol-version suffix
+// removed: "reality/2" is "reality", and a bare "reality" is itself. It mirrors
+// core's own splitTransportName, which is unexported, so this is the client-side
+// half of one split — and deliberately the FORGIVING half.
+//
+// It reports no error, where core's refuses a version that is not a positive
+// integer. That asymmetry is the point (bacchus#201): the client's job here is
+// to decide whether a transport is one this tunnel can carry, which is a
+// question about the base name alone. What to do about a version — one this
+// build does not implement (report it and build it anyway, issue #176 decision
+// B3) or one that is not a number at all (refuse at construction) — is core's
+// decision to make, and it cannot make it about an entry this layer already
+// deleted. So "reality/two" survives this and meets core's named refusal, rather
+// than vanishing from the ladder with nothing said.
+func poolTransportBase(name string) string {
+	base, _, _ := strings.Cut(name, "/")
+	return base
+}
 
 // ErrRelayChainConfig is ValidateRelayChainConfig's error for a hop count that
 // asks for a chain with no directory to build one from. Exported so settings.go
@@ -167,15 +199,36 @@ func ValidateAdmissionConfig(pubKey, crlPath string) (trimmedPubKey, trimmedCRLP
 // Controller.connectAsync before core.Config is built, so a hand-edited config
 // file cannot smuggle an unsafe transport into the pool either. Mirrors
 // sanitizePoolOrder in the retired Windows client's settings.go.
+//
+// # Membership is decided on the BASE name, the dedupe on the FULL one
+//
+// The two keys are different on purpose and bacchus#201 is what happens when
+// they are the same. Membership asks "can this client's tunnel carry this
+// transport", which the protocol version does not bear on — so "reality/2" is
+// admitted exactly when "reality" is. The dedupe asks "is this the same pool
+// member twice", and two versions of one transport are two DISTINCT members:
+// that is the whole point of the version being part of the pool's key
+// (core.Engine.transports and selection.Candidate.Transport are both the
+// configured string, so a bump invalidates the learned winner instead of
+// re-trying a route validated against the old shape).
+//
+// Before that split this matched by exact string, so the moment any transport
+// version was bumped the configured name matched nothing and was dropped with no
+// message and no log line. The visible outcome was not a short ladder: a fleet
+// mid-rollout configured ["reality/2", "webrtc/2"], every member was dropped,
+// and core reads an empty TransportPool as THE POOL IS OFF (Engine.poolOn) — so
+// the client silently fell back to dialing one transport with no failover, on
+// the client whose entire reason for a pool is that no single transport works
+// for everyone.
 func SanitizePoolOrder(order []string) []string {
 	allowed := map[string]bool{}
 	for _, t := range allowedPoolTransports {
-		allowed[t] = true
+		allowed[poolTransportBase(t)] = true
 	}
 	seen := map[string]bool{}
 	out := make([]string, 0, len(order))
 	for _, t := range order {
-		if !allowed[t] || seen[t] {
+		if !allowed[poolTransportBase(t)] || seen[t] {
 			continue
 		}
 		seen[t] = true
@@ -189,14 +242,20 @@ func SanitizePoolOrder(order []string) []string {
 // never-configured or partially-configured ladder still shows every transport
 // the control knows about in a stable default order. Mirrors
 // ladderDisplayOrder in the retired Windows client's settings.go.
+//
+// "Missing" is judged on the BASE name (bacchus#201). Judged on the full one, a
+// ladder holding "reality/2" would be missing "reality" and gain it as an extra
+// row — a phantom second copy of one transport at a different version, which the
+// user can then reorder, save, and connect through as two pool members where
+// they configured one.
 func LadderDisplayOrder(saved []string) []string {
 	out := append([]string(nil), saved...)
 	have := map[string]bool{}
 	for _, t := range out {
-		have[t] = true
+		have[poolTransportBase(t)] = true
 	}
 	for _, t := range knownPoolTransports {
-		if !have[t] {
+		if !have[poolTransportBase(t)] {
 			out = append(out, t)
 		}
 	}
