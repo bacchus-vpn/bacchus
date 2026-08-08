@@ -816,7 +816,36 @@ func handle(m wire, src *net.UDPAddr) {
 		// return to the peer as-is.
 		peer := handshake.Hello{Magic: m.Magic, Version: m.Version, Capabilities: m.Capabilities}
 		if ok, reason := handshake.Check(peer); !ok {
-			log.Printf("hello from %s: rejected (%s)", src, reason)
+			// The LOG is bounded (issue #217, see noteHelloReject): this line
+			// answered any spoofable source once per datagram, which is how a log
+			// becomes as good as no log.
+			//
+			// The REPLY is deliberately NOT bounded, and that is load-bearing.
+			// cmd/coordinator-probe uses exactly this reject as its NEGATIVE
+			// CONTROL — the one question only a Bacchus signaling port answers and
+			// which every build has answered since issue #8. Without it a probe
+			// pointed one port sideways passes against a coordinator of any age,
+			// because the TURN port answers a Binding Request byte-identically on
+			// every build ever shipped (ADR-0060). Silence this and the probe
+			// returns "control ABSENT, capability ok" — exit 4, which ADR-0064
+			// defines as explicitly NOT a pass — so every deployment pin from then
+			// on fails its own verification. cmd/coordinator's
+			// TestCoordinatorProbePassesAgainstThisBuild asserts it rather than
+			// assuming it.
+			//
+			// What that costs is measured rather than waved at. 16 bytes in draws
+			// 59 back — 3.7x of PAYLOAD, as issue #217 measured it, but 87 bytes
+			// against 44 ON THE WIRE, 2.0x, once the 28 bytes of IPv4+UDP header
+			// every datagram carries are counted. Bandwidth is what a reflector
+			// spends, so the wire figure is the one to compare, and the comparison
+			// on this very port is answerSTUN: 20 bytes drawing 40 is 2.0x of
+			// payload and 1.4x on the wire. So this reply IS the more amplifying of
+			// the two, by about 40%, and both sit far below the 50x-500x that makes
+			// a reflector worth building a campaign on — ADR-0060's own accepted
+			// threshold, restated here for a second exposure of the same class.
+			// TestHelloRejectAmplificationStaysBounded pins the number so a longer
+			// reason string cannot raise it unnoticed.
+			noteHelloReject(now, reason)
 			send(src, wire{Type: "reject", Reason: reason})
 		}
 	case "register":
