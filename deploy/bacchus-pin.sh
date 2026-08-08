@@ -584,9 +584,20 @@ roll_extra=0
 
 # roll_call compares the ids the boxes state with the ids the coordinator saw. It NAMES
 # what it finds, which is the whole point, and it is silent when it has nothing to add.
+# It takes the fleet check's exit code, because half of "silent" is knowing when the
+# other side of the comparison is not evidence.
 roll_call() {
 	roll_absent=0
 	roll_extra=0
+	# Only a window the check could READ says anything about who registered. Exit 3
+	# is a window with no `coordinator release` line in it and exit 2 is a usage
+	# error; both leave an empty ids file, and an ssh that failed would then read as
+	# every box being absent — naming all of them and restarting the whole fleet
+	# because a journal could not be fetched.
+	case "$1" in
+	0 | 1 | 4) ;;
+	*) return 0 ;;
+	esac
 	[ -s "$node_ids" ] || return 0
 	[ -f "$registered_ids" ] || return 0
 
@@ -631,7 +642,7 @@ read_node_ids
 log "reading the coordinator's journal for every node's build"
 fleet_rc=0
 fleet_check || fleet_rc=$?
-roll_call
+roll_call "$fleet_rc"
 
 # ---------------------------------------------------------------------------
 # A node that did not come back is restarted ONCE — a containment, not a fix
@@ -688,7 +699,7 @@ if [ "$absent" -eq 1 ] && [ "$fleet_rc" -ne 1 ] && [ "$restart_absent" -eq 1 ]; 
 	log "re-reading the coordinator's journal"
 	fleet_rc=0
 	fleet_check || fleet_rc=$?
-	roll_call
+	roll_call "$fleet_rc"
 	if [ "$fleet_rc" -eq 0 ] && [ "$roll_absent" -eq 0 ]; then
 		printf '%s: NOTE: the fleet is complete only AFTER a node restart this script had to do itself.\n' "$self" >&2
 		printf '%s: That is issue #225 — a node whose coordinator went away never rebuilds the link — and\n' "$self" >&2
@@ -731,9 +742,12 @@ compare_unit() {
 		log "  could not read it (not fatal) — compare it by hand before trusting this box"
 		return 0
 	fi
+	# Any non-zero counts, not only the missing-directive 5: an EMPTY answer from
+	# `systemctl cat` (3) means the unit does not exist on that box at all, which is
+	# the same finding arriving in its strongest form and must not be the quiet case.
 	_urc=0
 	printf '%s\n' "$_live" | sh "$script_dir/bacchus-unit-check.sh" "$_tmpl" || _urc=$?
-	if [ "$_urc" -eq 5 ]; then
+	if [ "$_urc" -ne 0 ]; then
 		unit_gap=$((unit_gap + 1))
 	fi
 	return 0
@@ -746,10 +760,11 @@ done
 compare_unit "$COORDINATOR_TARGET" "$COORDINATOR_UNIT"
 
 if [ "$unit_gap" -gt 0 ]; then
-	printf '%s: WARNING: %d live unit(s) are missing a directive this commit ships. The binaries\n' "$self" "$unit_gap" >&2
-	printf '%s: ARE pinned — this is not drift and it does not fail the run — but a mechanism that\n' "$self" >&2
-	printf '%s: is present here and absent there is exactly issue #205, and it stays that way until\n' "$self" >&2
-	printf '%s: somebody edits those units by hand. Nothing was copied; see the lines above.\n' "$self" >&2
+	printf '%s: WARNING: %d live unit(s) do not carry what this commit ships — a missing directive,\n' "$self" "$unit_gap" >&2
+	printf '%s: or no such unit on the box at all. The binaries ARE pinned; this is not drift and it\n' "$self" >&2
+	printf '%s: does not fail the run. But a mechanism that is present here and absent there is\n' "$self" >&2
+	printf '%s: exactly issue #205, and it stays that way until somebody edits those units by hand.\n' "$self" >&2
+	printf '%s: Nothing was copied; see the lines above for what to add and where.\n' "$self" >&2
 fi
 
 log "probing the deployed coordinator's capability"

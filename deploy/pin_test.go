@@ -846,6 +846,36 @@ func TestPin_SaysSoWhenABoxCannotStateItsId(t *testing.T) {
 	}
 }
 
+// A journal that could not be READ is not evidence that anybody is absent, and this is
+// the way a roll call gets that wrong: the ids file is empty in both cases. An ssh that
+// failed, or a window that does not reach the coordinator's restart, would then name
+// every deployed box and restart the entire fleet to answer a fetch that did not
+// happen — the loudest possible response to the least informative input.
+//
+// MUTATION: drop the `case "$1" in 0|1|4)` guard from roll_call — this goes red with
+// both boxes named and both units restarted.
+func TestPin_AnUnreadableJournalIsNotEvidenceOfAbsence(t *testing.T) {
+	f := newFleet(t)
+	// A window with no `coordinator release` line in it: the check exits 3 and says
+	// so, and it has counted nothing.
+	write(t, filepath.Join(f.dir, "journal"),
+		"Aug 08 12:00:03 box bacchus-coordinator[9]: exit registered: "+exitNodeID+" -> 192.0.2.10:20000 release=0.1.0 build=deadbeefdead\n", 0o644)
+
+	out, code := f.pin()
+	if code != 3 {
+		t.Fatalf("exit %d, want 3 — the window cannot answer the question\n%s", code, out)
+	}
+	if !strings.Contains(out, "Widen the window") {
+		t.Fatalf("the check did not report the case this test is about:\n%s", out)
+	}
+	if strings.Contains(out, "ROLL CALL") {
+		t.Errorf("an unread journal was reported as boxes being absent:\n%s", out)
+	}
+	if strings.Contains(f.log("systemctl.log"), "restart") {
+		t.Errorf("the fleet was restarted to answer a journal that could not be read:\n%s", f.log("systemctl.log"))
+	}
+}
+
 // The map is re-read after the containment restart, not carried across it. A relay
 // without -relay-ingress takes a FRESH RANDOM id at every start (core/engine.go,
 // randID), so the ids read before a restart name processes that no longer exist —
