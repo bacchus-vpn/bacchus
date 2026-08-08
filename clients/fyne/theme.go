@@ -1,10 +1,10 @@
-// Custom theme (issue #148): a calm, trustworthy palette, not Fyne's stock
+// Custom theme (old #148): a calm, trustworthy palette, not Fyne's stock
 // blue/orange. It overrides colors only - icons, fonts, and sizes fall through
 // to theme.DefaultTheme() unchanged, since nothing about this app needs a
 // different icon set or type scale, just different colors. Reusing Fyne's own
 // semantic names (rather than inventing app-specific ones) means the same
 // palette drives both ordinary widgets (buttons, links) and the connection-
-// state indicator (issue #149, ui.go) for free - Protected reads
+// state indicator (old #149, ui.go) for free - Protected reads
 // theme.ColorNameSuccess, Blocked reads theme.ColorNameError, and so on.
 package main
 

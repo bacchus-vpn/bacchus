@@ -16,7 +16,7 @@ import (
 )
 
 // Config holds this client's settings. Coordinators/STUN/TURN are the
-// connection endpoints, unchanged since the #148 skeleton and still hand-edited
+// connection endpoints, unchanged since the old #148 skeleton and still hand-edited
 // in the config file - there is no in-app editor for those. Everything from
 // AdmissionPubKey down is the user-facing Settings window's surface, edited via
 // settings.go and persisted the same way.
@@ -38,7 +38,7 @@ import (
 // finished until a client can reach it.
 type Config struct {
 	// Coordinators is the rendezvous pool: one or more coordinator UDP
-	// host:port endpoints (issue #6). Required - Controller.Connect has no
+	// host:port endpoints (old #6). Required - Controller.Connect has no
 	// coordinator to dial without it.
 	Coordinators []string `json:"coordinators"`
 	STUN         string   `json:"stun"` // stun:host:port
@@ -102,14 +102,14 @@ type Config struct {
 	// core treats an unset AdmissionPubKey as fail-open, so the client verifies
 	// nothing and accepts any exit it can complete a Noise_NK handshake with.
 	//
-	// That silently discards the entire point of ADR-0026/#60. Admission
+	// That silently discards the entire point of ADR-0026/old #60. Admission
 	// verification is the client's END-TO-END backstop against a HOSTILE
 	// COORDINATOR — the one check that does not trust the party doing the
 	// matchmaking. A coordinator that hands out an exit it controls is exactly
 	// the attack it exists to catch, and without this field it succeeds. There
 	// was no field to set it, so no config could have turned it on.
 	//
-	// AdmissionCRLPath is #69's half: a signed, short-TTL revocation bundle, hot
+	// AdmissionCRLPath is old #69's half: a signed, short-TTL revocation bundle, hot
 	// reloaded, so a revoked exit is rejected before its credential expires on
 	// its own. Meaningless without AdmissionPubKey, and empty means revocation is
 	// not checked at all — also fail-open.
@@ -157,7 +157,7 @@ type Config struct {
 
 	// TransportPool mirrors core.Config.TransportPool and the Windows tray client's
 	// same-named field, JSON key included: a preference-ordered ladder the
-	// client races and then converges on, per network (issue #15, ADR-0028).
+	// client races and then converges on, per network (old #15, ADR-0028).
 	// Empty turns the pool off and keeps the single-transport connect, which
 	// is what this client did before issue #93 — so the zero value is exactly
 	// pre-#93 behaviour.
@@ -588,7 +588,7 @@ func LoadConfig() (Config, string, error) {
 var errNoConfigPath = errors.New("no config file path to save to")
 
 // SaveConfig writes c back to path as indented JSON. Mirrors
-// the retired Windows client's config.go's saveConfig (issue #75 there; issue #152 here,
+// the retired Windows client's config.go's saveConfig (old #75 there; old #152 here,
 // settings.go's save handler is the only caller): path is normally whatever
 // LoadConfig reported reading from, so a Settings save lands back in the same
 // file the user is already using, and DefaultConfigPath covers the

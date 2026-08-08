@@ -1,11 +1,11 @@
-// Bacchus cross-platform client (issues #148/#149) - an all-Go Fyne app that
+// Bacchus cross-platform client (old #148/#149) - an all-Go Fyne app that
 // calls the Go core in-process: no FFI bridge, one language, one binary per
 // platform, no bundled webview (Fyne renders its own widgets - the smallest
 // attack surface a security tool can have). See docs/adr for the seam this
 // was spiked to prove.
 //
 // App shell, calm/trustworthy theme, Russian-first i18n, and the
-// connection-state indicator. Settings (#152) covers
+// connection-state indicator. Settings (old #152) covers
 // split-tunnel/kill-switch/DNS/auto-connect/launch-on-boot; whether the first
 // three do anything depends on the platform having an enforcement.Enforcer
 // (Windows does, bacchus#59) - see settings.go's doc. The window's centre is the
@@ -127,7 +127,7 @@ func main() {
 	// user, the file for whoever they ask for help.
 	//
 	// (The trap this used to be the sole workaround for — no console under
-	// -H=windowsgui, `issue #50` in the retired Windows tray client's numbering —
+	// -H=windowsgui, old #50 in the retired Windows tray client's numbering —
 	// is what bacchus#187 fixed generally.)
 	cfg, cfgPath, err := appstate.LoadConfig()
 	var cfgErr error
@@ -146,7 +146,7 @@ func main() {
 	// kill-switch arming) go to the log, not to the detail line: that line is
 	// one calm user-facing sentence, and a PowerShell error is neither calm
 	// nor actionable by a user. Addresses are redacted twice over — once by
-	// enforcement itself (issue #140) and again at the sink, which is what
+	// enforcement itself (old #140) and again at the sink, which is what
 	// covers every OTHER writer reaching this same logger.
 	ctrl.Logf = log.Printf
 	indicator := newStateIndicator()

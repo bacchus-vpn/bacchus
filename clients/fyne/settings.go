@@ -1,4 +1,4 @@
-// Settings window (issue #152): split-tunnel bypass list, kill-switch, DNS,
+// Settings window (old #152): split-tunnel bypass list, kill-switch, DNS,
 // auto-connect, launch-on-boot — and, since issue #93, the connection-strategy
 // half the walk client had and this one did not: the transport ladder, relay
 // hop count and its directory pair, and the exit-admission anchor. Issue #12
@@ -32,7 +32,7 @@
 // The #93 controls carry no such caveat: they are core config, enforced by
 // core on every platform, so they mean the same thing everywhere this client
 // runs. Deliberately NOT ported from the walk client's dialog: its exit-ID
-// pin, which ADR-0042/`old #146` made inert everywhere — see that dialog, from
+// pin, which ADR-0042/old #146 made inert everywhere — see that dialog, from
 // which #93 also deletes it.
 //
 // This file stays wiring. Every decision a wrong answer to which produces a

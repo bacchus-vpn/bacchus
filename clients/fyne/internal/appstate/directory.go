@@ -12,7 +12,7 @@
 // than at the forty-two-hour renewal period. A moved COORDINATOR is worse: it
 // takes the client offline immediately.
 //
-// core/coldstart has carried the answer since issue #18 and no client had
+// core/coldstart has carried the answer since old #18 and no client had
 // adopted it. A coordinator signs a directory of entry points with a validity
 // window; a client authenticated by a per-user secret fetches it over a
 // STUN-shaped exchange on the coordinator's TURN port, verifies the signature,
@@ -37,7 +37,7 @@
 //
 // # What is deliberately NOT here
 //
-// Mesh-walk recovery (issue #31) is the other half of coldstart and stays out.
+// Mesh-walk recovery (old #31) is the other half of coldstart and stays out.
 // It fetches a directory from a PEER when every coordinator is unreachable, and
 // its peers are nodes running a courier listener on a separate -courier-listen
 // address that the snapshot does not carry — so the relay and exit entries of a

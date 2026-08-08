@@ -1,5 +1,5 @@
 // admission-issue is the operator-side authority for cryptographic node
-// admission (issue #42). It mints signed credentials that clients and nodes
+// admission (old #42). It mints signed credentials that clients and nodes
 // present to the coordinator, and manages the revocation list. It holds the
 // admission root private key — the trust anchor whose public half is configured
 // into the coordinator (-admission-pubkey) — so it is run offline / on the
@@ -18,7 +18,7 @@
 //	admission-issue -revoke 1a2b3c4d5e6f7788
 //
 //	# sign the current revocation list as a short-lived bundle for clients
-//	# (issue #69) — feed the result to cmd/coldstart-issue -admission-crl or a
+//	# (old #69) — feed the result to cmd/coldstart-issue -admission-crl or a
 //	# node's -admission-crl, and re-run this periodically before it lapses:
 //	admission-issue -crl -crl-ttl 24h > revocations.crl
 //
@@ -54,7 +54,7 @@ func main() {
 	printPub := flag.Bool("pubkey", false, "print the admission public key (for the coordinator's -admission-pubkey) and exit")
 	revoke := flag.String("revoke", "", "revoke this credential serial instead of issuing: add it to -revocations and exit")
 	revocationsPath := flag.String("revocations", "secrets/admission-revocations.json", "revocation file to append to with -revoke, or to sign with -crl")
-	crlMode := flag.Bool("crl", false, "sign -revocations as a short-lived bundle instead of issuing a credential (issue #69); distribute it alongside the admission anchor (e.g. cmd/coldstart-issue -admission-crl) so a client can reject a revoked exit before it naturally expires")
+	crlMode := flag.Bool("crl", false, "sign -revocations as a short-lived bundle instead of issuing a credential (old #69); distribute it alongside the admission anchor (e.g. cmd/coldstart-issue -admission-crl) so a client can reject a revoked exit before it naturally expires")
 	crlTTL := flag.Duration("crl-ttl", 24*time.Hour, "validity window for -crl; short-lived by design — the recipient must be handed a fresh one before it lapses")
 	flag.Parse()
 
@@ -156,7 +156,7 @@ func revokeSerial(path, serial string) error {
 }
 
 // emitCRL signs the current contents of the revocations file as a short-TTL
-// bundle (issue #69) and prints it to stdout; diagnostics go to stderr,
+// bundle (old #69) and prints it to stdout; diagnostics go to stderr,
 // mirroring issue. A missing file signs an empty bundle rather than erroring
 // — a freshly-signed "nothing revoked as of now" attestation is meaningful
 // too, and is exactly what an operator with no revocations yet should be able
