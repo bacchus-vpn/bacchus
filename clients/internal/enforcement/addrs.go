@@ -9,7 +9,7 @@
 // so a Linux or macOS implementation ([E10] bacchus#37, [E9] bacchus#36)
 // re-deriving it would be re-deriving the same edge cases: hostOf's bracketed
 // IPv6 form, ensureCIDR's /128, the IPv4/IPv6 split resolveExclusionsV6 exists
-// for (issue #117). Two of those are fixes that were made once, after the
+// for (old #117). Two of those are fixes that were made once, after the
 // original shipped; the point of moving them here rather than leaving them
 // behind a build tag is that all three platforms get them, and their tests run
 // on every push instead of only on a Windows runner.
@@ -56,7 +56,7 @@ func resolveExclusions(endpoints ...string) []string {
 	return ips
 }
 
-// resolveExclusionsV6 is resolveExclusions' IPv6 counterpart (issue #117): a
+// resolveExclusionsV6 is resolveExclusions' IPv6 counterpart (old #117): a
 // separate function, rather than a parameter on resolveExclusions, so every
 // existing caller (the control-plane/bypass exclusions, always IPv4 in
 // practice) is untouched — only poolExcluder's reserve() calls this, for a
@@ -97,7 +97,7 @@ func resolveExclusionsV6(endpoints ...string) []string {
 
 // isIPv6Literal reports whether ip (already a parsed, resolved address string
 // — as reserve()'s dedup set holds) is IPv6. Used to route an exclusion
-// through addExclusionRoutes or its V6 counterpart (issue #117).
+// through addExclusionRoutes or its V6 counterpart (old #117).
 func isIPv6Literal(ip string) bool {
 	parsed := net.ParseIP(ip)
 	return parsed != nil && parsed.To4() == nil
@@ -129,7 +129,7 @@ func hostOf(endpoint string) string {
 }
 
 // ensureCIDR normalizes s to a CIDR prefix: a bare IP address becomes a host
-// route — /32 for IPv4, /128 for a bare IPv6 literal (issue #117), since
+// route — /32 for IPv4, /128 for a bare IPv6 literal (old #117), since
 // removeRoutes is family-agnostic and now also reaps IPv6 exclusions
 // (poolroutes.go) through this same helper. A value that already has a "/" (a
 // real CIDR) passes through unchanged.

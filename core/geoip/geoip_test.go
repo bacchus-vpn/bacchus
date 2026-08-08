@@ -117,7 +117,7 @@ func TestLookupResolvesAndRespectsBoundaries(t *testing.T) {
 // TestLookupUnmapsV4MappedV6 guards a silent whole-family failure. A dual-stack UDP
 // socket hands back a v4 peer as ::ffff:a.b.c.d; if Lookup searched the v6 table for
 // that, every IPv4 node would resolve to "unknown" and the coordinator would fall
-// back to the self-reported hint for the entire fleet — issue #136 defeated, with
+// back to the self-reported hint for the entire fleet — old #136 defeated, with
 // nothing failing visibly.
 func TestLookupUnmapsV4MappedV6(t *testing.T) {
 	db := mustLoad(t, locationsCSV, blocksV4CSV, blocksV6CSV)
@@ -195,7 +195,7 @@ func TestLoadRejectsOverlappingPrefixes(t *testing.T) {
 // TestLoadAddressesColumnsByName proves the parser is not index-positional. MaxMind
 // has reordered and added columns before; a positional parser would keep loading and
 // silently read the wrong field as the country, which is exactly the class of
-// invisible corruption #136 exists to remove.
+// invisible corruption old #136 exists to remove.
 func TestLoadAddressesColumnsByName(t *testing.T) {
 	// Same data, columns shuffled and an extra one inserted first.
 	shuffledLocations := `is_in_european_union,country_iso_code,geoname_id,locale_code,country_name

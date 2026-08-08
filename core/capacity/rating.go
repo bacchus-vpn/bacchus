@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// NodeRating holds the TWO capacity estimates issue #157 settled a node must carry,
+// NodeRating holds the TWO capacity estimates old #157 settled a node must carry,
 // and the rule for combining them into the single number the coordinator uses
 // (design §8.1.1). It is the shape of the owner decision, in code.
 //
@@ -14,7 +14,7 @@ import (
 //     rating the coordinator uses wherever it exists, and the ONLY stream that may rise
 //     above Ceiling. In this build it is PERMANENTLY EMPTY: vouched-ness reaches the
 //     coordinator through the admission credential, no issuer stamps it yet, and the
-//     coordinator cannot import the private account service that will (issue #157 seam).
+//     coordinator cannot import the private account service that will (old #157 seam).
 //     The stream is defined and wired so the account service can feed it later with no
 //     coordinator change — see cmd/coordinator's classifier.
 //   - untrusted is fed by samples from anyone holding a client credential. It is clamped
@@ -52,7 +52,7 @@ func NewNodeRating(p Params, now time.Time) (*NodeRating, error) {
 	return &NodeRating{trusted: trusted, untrusted: untrusted}, nil
 }
 
-// ObserveTrusted records a sample from a VOUCHED attester (issue #157). No production
+// ObserveTrusted records a sample from a VOUCHED attester (old #157). No production
 // caller feeds this yet: it is the seam the account service plugs into once it stamps
 // vouched-ness into the credential the coordinator can read.
 func (r *NodeRating) ObserveTrusted(s Sample) { r.trusted.Observe(s) }
@@ -71,7 +71,7 @@ func (r *NodeRating) Advance(now time.Time) Rate {
 }
 
 // Measured is the single number the coordinator consumes, and it encodes the whole of
-// issue #157's decision:
+// old #157's decision:
 //
 //   - trusted DECIDES OUTRIGHT wherever it exists — no weighted average, no blend, no
 //     tiebreak (design §8.1.1, rule 2). "Exists" means the trusted estimator holds a
@@ -84,7 +84,7 @@ func (r *NodeRating) Advance(now time.Time) Rate {
 // out of rule 2 rather than being a separate branch: if trusted is informed it decides,
 // whatever untrusted says. With trusted permanently empty in this build, Measured always
 // returns the untrusted (≤ Ceiling) rating — exactly "lift a free-tier-only node off
-// Floor to at most Ceiling", which is what #157 intends.
+// Floor to at most Ceiling", which is what old #157 intends.
 func (r *NodeRating) Measured() Rate {
 	if r.trusted.Informed() {
 		return r.trusted.Estimate()
@@ -237,7 +237,7 @@ func (s *RatingStore) TrustedRating(nodeID string) (Rate, bool) {
 // surfaces call it. declared 0 means uncapped.
 //
 // It is deliberately NOT an eligibility test. Whether `usable` clears a bar to serve is
-// issue #145's policy call, which this lane does not make and does not enable — with the
+// old #145's policy call, which this lane does not make and does not enable — with the
 // trusted stream empty every rating clamps to Ceiling, so a floor on `usable` would
 // strand the whole fleet (design §8.6). Usable is computed and available; it gates
 // nothing here.

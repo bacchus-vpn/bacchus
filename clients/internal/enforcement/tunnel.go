@@ -2,13 +2,13 @@
 // default route at it (split-default, so the physical default route is
 // preserved rather than replaced), excludes the coordinator/STUN/TURN
 // endpoints — and the pool's own reality underlay addresses, learned late via
-// the excluder (poolroutes.go, issue #109) — so the session's own transport
+// the excluder (poolroutes.go, old #109) — so the session's own transport
 // doesn't loop into the tunnel, and bridges the adapter to the existing local
 // SOCKS5 server via tun2socks.go.
 //
 // Split-tunnel "include" mode (splittunnel.go) inverts the middle part: no
 // split-default is installed at all, and the bypass/include set gets routed
-// into the tunnel adapter instead of out of it (issue #64).
+// into the tunnel adapter instead of out of it (old #64).
 //
 // This is ADR-0039's "Orchestration only" row: the sequencing below is
 // portable, but it used to call routes.go/killswitch.go's functions directly
@@ -62,7 +62,7 @@ func (t *tunnel) log(format string, args ...any) {
 // every coordinator pool member plus cfg.STUNURL/cfg.TURNURL are excluded from
 // the tunnel's route so the underlying signalling/relay session keeps flowing
 // over the physical interface — the client can rotate to any pool member, so
-// all of them must stay reachable outside the tunnel (issue #6), regardless of
+// all of them must stay reachable outside the tunnel (old #6), regardless of
 // split-tunnel mode. cfg.DNSUpstream is the plain-DNS server queried (over
 // DNS-over-TCP, through the tunnel) for every intercepted DNS query. policy is
 // the destination-based split-tunnelling decision (splittunnel.go): its
@@ -70,8 +70,8 @@ func (t *tunnel) log(format string, args ...any) {
 // seeded with a one-time resolution now, but which *direction* that route
 // goes — carved out of the tunnel, or pulled into it — depends on policy.mode
 // (see the mode-branches below and splittunnel.go's file doc comment).
-// pe carries the pool's dynamically-dialled reality underlay addresses (issue
-// #109): any reserved before now (during the initial pooled Connect) are
+// pe carries the pool's dynamically-dialled reality underlay addresses
+// (old #109): any reserved before now (during the initial pooled Connect) are
 // excluded here alongside the control plane, and the excluder is switched live
 // so a mid-session failover excludes its new address as it dials.
 // cfg.KillSwitch arms the fail-closed lockdown once the tunnel is up.
@@ -102,7 +102,7 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 		}
 	}()
 
-	// Exclude the pool's already-dialled reality underlays (issue #109) the same
+	// Exclude the pool's already-dialled reality underlays (old #109) the same
 	// way and at the same point as the control plane — before the split-default
 	// route flips further down — and switch the excluder live so any failover
 	// from here on excludes its own new address on the dial path. Teardown
@@ -111,7 +111,7 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 	pe.goLive(gw)
 	defer func() {
 		if !ok {
-			// disable() first (issue #117): a concurrent failover reserve()
+			// disable() first (old #117): a concurrent failover reserve()
 			// that races past this point self-reaps instead of installing a
 			// route after this snapshot already ran and missed it.
 			pe.disable()
@@ -155,7 +155,7 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 	// without its route getting installed. armed is read by learn() under the
 	// same lock as the dynamic-set mutation that triggers this call, atomically
 	// with respect to policy.arm() below — see splittunnel.go's arm()/learn()
-	// doc comments (issue #73): this is what closes the race a plain post-hoc
+	// doc comments (old #73): this is what closes the race a plain post-hoc
 	// atomic.Bool check would leave open. The route direction depends on mode:
 	// include pulls the IP into the tun adapter, exclude carves it out via the
 	// gateway.
@@ -188,7 +188,7 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 
 	// Exclude mode captures everything into the tunnel and relies on the
 	// gw-routed exclusions above to carve the bypass set back out. Include
-	// mode does the opposite (issue #64): no split-default at all, so the
+	// mode does the opposite (old #64): no split-default at all, so the
 	// real default route stays authoritative for "direct" traffic, and the
 	// bypass/include set is pulled in via its own tun-adapter-bound routes —
 	// without this, include mode's "direct" traffic (everything not in the
@@ -244,7 +244,7 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 	// there is no window where routes point at the tunnel but the lockdown
 	// isn't in force. policy.arm() takes a *fresh* dynamic snapshot atomically
 	// with the actual arming (not the stale early bypassEntries computed above,
-	// which is only safe for the earlier route-adding step) — issue #73:
+	// which is only safe for the earlier route-adding step) — old #73:
 	// reusing that early snapshot here left a window where a bypass IP learned
 	// between startNetstack going live and this point could miss both the
 	// initial allowlist and the live refresh.
@@ -315,7 +315,7 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 		// reserved underlays and the bypass dynamic set are both snapshotted
 		// atomically with the single enableKillSwitch call — each excluder's own
 		// lock is held across it, so an address either lands in this snapshot or
-		// is live-refreshed afterwards, never dropped (issue #73 / #109). The
+		// is live-refreshed afterwards, never dropped (old #73 / old #109). The
 		// pool underlays join the control-plane allow-list (they are as
 		// load-bearing as coordinator/STUN/TURN — the session rides them), while
 		// the bypass set stays in the bypass allow-list argument.
@@ -385,12 +385,12 @@ func (t *tunnel) Close() {
 	t.os.enablePhysicalIPv6(t.gw.ifAlias)
 	t.os.removeRoutes(t.excludedIPs)
 	if t.excluder != nil {
-		// The pool's underlay exclusions (issue #109) are gateway-bound host
+		// The pool's underlay exclusions (old #109) are gateway-bound host
 		// routes like the control-plane ones, so they need explicit removal too;
 		// reserved() re-derives the full set, including any a failover added
 		// mid-session. Kill-switch allowlist entries need no separate cleanup —
 		// disableKillSwitch above removes the whole rule group. disable() first
-		// (issue #117), same reasoning as startTunnel's failure-cleanup defer:
+		// (old #117), same reasoning as startTunnel's failure-cleanup defer:
 		// a failover reserve() racing this Close self-reaps if it lands after
 		// the reserved() snapshot below.
 		t.excluder.disable()

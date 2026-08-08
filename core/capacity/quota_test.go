@@ -22,7 +22,7 @@ func mustQuota(t *testing.T, l Limits, path string, now time.Time) *Quota {
 	return q
 }
 
-// TestCycleStartAnchorsToTheBillingDay pins the detail that decides whether #143
+// TestCycleStartAnchorsToTheBillingDay pins the detail that decides whether old #143
 // is usable by its target population at all: residential caps reset on the
 // customer's BILLING day, not the 1st. An operator billed on the 17th whose node
 // resets on the 1st sails past their real cap mid-cycle and eats the overage —
@@ -133,7 +133,7 @@ func TestQuotaCheckpointsWithoutAnExplicitFlush(t *testing.T) {
 	}
 }
 
-// TestSmallQuotaIsCheckpointedToo is the regression test for the bug the #143
+// TestSmallQuotaIsCheckpointedToo is the regression test for the bug the old #143
 // smoke test caught, which every unit test here had missed.
 //
 // The byte trigger was a FIXED 16 MB. A node with a small declared quota spends it

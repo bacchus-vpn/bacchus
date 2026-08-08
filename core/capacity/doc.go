@@ -1,6 +1,6 @@
 // Package capacity models what a Bacchus node will carry: the limits its
-// operator declares (issue #143) and the rate the network observes it actually
-// delivering (issue #144).
+// operator declares (old #143) and the rate the network observes it actually
+// delivering (old #144).
 //
 //	usable = min(declared, measured)
 //
@@ -17,7 +17,7 @@
 //
 //   - Declared (Limits, Quota) is SELF-REPORTED and safe. A node declaring less
 //     than it has only reduces what it is given — the operator's right, and the
-//     point of #143. A node declaring MORE than it has gains nothing, because the
+//     point of old #143. A node declaring MORE than it has gains nothing, because the
 //     measured term of the min() binds. The only effective direction of the lie is
 //     self-limiting, which is exactly the condition under which a self-report can
 //     be trusted, so declared limits ride the register wire with no verification.
@@ -49,7 +49,7 @@
 // Nothing here probes anything. An active speed test fails four ways at once (see
 // the design note §6.1): the tester is identifiable and gets whitelisted, it
 // measures the wrong path, its traffic shape is self-identifying, and it burns the
-// very quota #143 exists to protect. Instead, measurement IS serving: a node's
+// very quota old #143 exists to protect. Instead, measurement IS serving: a node's
 // rate is defined by what it delivers to real clients under real load, so there is
 // no separate thing for a node to be fast at, and there is no steady-state
 // measurement cost at all.

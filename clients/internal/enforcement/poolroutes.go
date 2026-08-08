@@ -1,4 +1,4 @@
-// Late underlay-address exclusion for the transport pool (issue #109).
+// Late underlay-address exclusion for the transport pool (old #109).
 //
 // The full-device tunnel keeps its own control plane reachable by excluding a
 // fixed, known-ahead-of-time set of addresses (coordinator/STUN/TURN) from the
@@ -10,7 +10,7 @@
 // to exclude in advance. Without an exclusion, a reality underlay connection
 // would follow the split-default straight back into the tunnel it is carrying
 // (a loop, and — once the kill-switch is armed — a Block), which is exactly why
-// #75 shipped webrtc-only.
+// old #75 shipped webrtc-only.
 //
 // poolExcluder closes that gap. core.Config.OnUnderlayDial hands it each
 // reality underlay address the instant the transport has learned it but BEFORE
@@ -22,13 +22,13 @@
 // new exit excludes its address as it dials it, never after, so the "route flip
 // races the real address" leak never reopens.
 //
-// The arm/allowlist timing mirrors splittunnel.go's arm()/learn() (issue #73):
+// The arm/allowlist timing mirrors splittunnel.go's arm()/learn() (old #73):
 // a reserve() that lands in the narrow window around kill-switch arming must end
 // up either in the initial allowlist snapshot or on the live-refresh path, never
 // neither. reserve() and armAllowlist() take the same lock across their whole
 // critical section for exactly that reason.
 //
-// Hardening (issue #117), all fail-closed before this change and additive now:
+// Hardening (old #117), all fail-closed before this change and additive now:
 //
 //   - reserve()'s live-install path keeps the physical gateway fresh via a
 //     background refresh (triggerGatewayRefresh) rather than trusting the
@@ -38,10 +38,10 @@
 //     own initial batch install is unaffected: its gw parameter is already
 //     fresh, resolved instead by startTunnel moments before calling it. (This
 //     bullet originally had reserve() re-resolve synchronously on every live
-//     install; issue #123c moved that off the dial path itself — see
+//     install; old #123c moved that off the dial path itself — see
 //     triggerGatewayRefresh's doc comment.)
 //   - reserve() no longer holds mu across the excludeFn/allowFn shell-outs
-//     (mirroring the #73 single-lock discipline for the *recording*, not the
+//     (mirroring the old #73 single-lock discipline for the *recording*, not the
 //     I/O): a slow PowerShell call must not stall a concurrent reserve() or
 //     the arm/teardown snapshot.
 //   - Narrowing that lock reopens a race the old whole-call lock incidentally
@@ -51,7 +51,7 @@
 //     in flight, landing after the snapshot and orphaning a route nothing is
 //     tracking. disable() plus reserve()'s post-install closed check close
 //     that window: any install that lands after teardown's snapshot self-reaps
-//     — and (issue #123b) that same post-lock closed read now also gates
+//     — and (old #123b) that same post-lock closed read now also gates
 //     allowFn, so a kill-switch allow rule is never installed for an address
 //     whose route install we already know raced past teardown.
 //   - reserve() also resolves IPv6 addresses (resolveExclusionsV6) and dispatches
@@ -69,23 +69,23 @@ import (
 // keeps each one excluded from the full-device tunnel. All state transitions
 // hold mu so reserve() is atomic with respect to goLive()/armAllowlist() —
 // specifically, the *recording* of which IPs are reserved/armed/closed; the
-// actual route/firewall I/O for a live install runs unlocked (issue #117).
+// actual route/firewall I/O for a live install runs unlocked (old #117).
 type poolExcluder struct {
 	mu           sync.Mutex
-	gw           gatewayInfo     // physical default gateway; set by goLive, kept fresh in the background by triggerGatewayRefresh (issue #117/#123c)
+	gw           gatewayInfo     // physical default gateway; set by goLive, kept fresh in the background by triggerGatewayRefresh (old #117/#123c)
 	routesLive   bool            // gateway known — reserve() installs routes immediately
 	armed        bool            // kill-switch armed — reserve() live-refreshes the allowlist
-	closed       bool            // bring-up failed, or the tunnel is tearing down — reserve() self-reaps any install racing past that cleanup (issue #117)
+	closed       bool            // bring-up failed, or the tunnel is tearing down — reserve() self-reaps any install racing past that cleanup (old #117)
 	seen         map[string]bool // dialled underlay IPs already excluded (dedup)
-	gwRefreshing bool            // a background gatewayFn call is already in flight — dedups triggerGatewayRefresh (issue #123c)
+	gwRefreshing bool            // a background gatewayFn call is already in flight — dedups triggerGatewayRefresh (old #123c)
 
 	// excludeFn / allowFn are the actual route + kill-switch-allowlist side
 	// effects, injected so the ordering logic here is testable without shelling
 	// out to real routes/firewall (the same reason bypassPolicy takes onLearn).
 	// gatewayFn re-resolves the physical gateway, called only from the
-	// background triggerGatewayRefresh (issue #123c), never synchronously from
+	// background triggerGatewayRefresh (old #123c), never synchronously from
 	// reserve(); removeFn reaps a route reserve() installed into a
-	// since-disabled excluder (issue #117). All four injected for the same
+	// since-disabled excluder (old #117). All four injected for the same
 	// reason: testable ordering/self-reap logic without a real Windows route
 	// table. newPoolExcluder wires them to the platform's osNet (osnet.go).
 	excludeFn func(gw gatewayInfo, ip string)
@@ -98,7 +98,7 @@ type poolExcluder struct {
 // "only the wiring changes per platform" half of ADR-0039's poolroutes.go row
 // — the state machine above it is untouched, and every one of the four still
 // arrives as a function value rather than being called by name, so the
-// existing tests that drive the #109/#117/#123b/#123c orderings keep working
+// existing tests that drive the old #109/#117/#123b/#123c orderings keep working
 // against fakes with no osNet at all.
 func newPoolExcluder(osn osNet) *poolExcluder {
 	return &poolExcluder{
@@ -138,7 +138,7 @@ func (p *poolExcluder) reserve(addr string) {
 	// yields nothing here, so the dial proceeds unexcluded and simply fails into
 	// the tunnel (fail-safe: it never leaks), the same posture the control-plane
 	// exclusions already take when one fails to resolve. Both address families
-	// are resolved (issue #117); in practice a real exit's address is one or
+	// are resolved (old #117); in practice a real exit's address is one or
 	// the other, never both.
 	ips := append(resolveExclusions(addr), resolveExclusionsV6(addr)...)
 	if len(ips) == 0 {
@@ -163,7 +163,7 @@ func (p *poolExcluder) reserve(addr string) {
 	}
 
 	// Keep p.gw current for whoever reserves next, without this call waiting
-	// on it (issue #123c): a live install uses whatever gw the snapshot above
+	// on it (old #123c): a live install uses whatever gw the snapshot above
 	// just read — goLive's seed, or a prior background refresh — rather than
 	// shelling out to PowerShell itself on the dial path. See
 	// triggerGatewayRefresh's doc comment for the staleness trade-off this
@@ -174,7 +174,7 @@ func (p *poolExcluder) reserve(addr string) {
 		// Route first: fails safe either way (a missing route loops the dial
 		// into the tunnel), so this only has to land before returning, not in
 		// a particular order relative to the allowlist below. Doesn't hold mu
-		// (issue #117): a slow PowerShell call must not stall a concurrent
+		// (old #117): a slow PowerShell call must not stall a concurrent
 		// reserve() or the arm/teardown snapshot it could otherwise block.
 		p.excludeFn(gw, ip)
 
@@ -185,11 +185,11 @@ func (p *poolExcluder) reserve(addr string) {
 			// Bring-up already failed (or the tunnel already tore down) and
 			// took its final removeRoutes(reserved()) snapshot before this
 			// install landed — reap the route now instead of leaving an
-			// orphaned one nothing is tracking (issue #117), and skip the
+			// orphaned one nothing is tracking (old #117), and skip the
 			// allowlist entry below entirely: installing a firewall rule for
 			// an address we already know raced past teardown just leaves a
 			// duplicate-DisplayName rule for the next teardown's group sweep
-			// to clean up, with no self-reap of its own (issue #123b).
+			// to clean up, with no self-reap of its own (old #123b).
 			p.removeFn([]string{ip})
 			continue
 		}
@@ -201,10 +201,10 @@ func (p *poolExcluder) reserve(addr string) {
 
 // triggerGatewayRefresh kicks off a background re-resolve of the physical
 // gateway if one isn't already in flight, and returns immediately either way
-// — reserve() never blocks on it (issue #123c). A successful refresh updates
+// — reserve() never blocks on it (old #123c). A successful refresh updates
 // p.gw for the next reserve() to read; a failed one (a transient PowerShell
 // hiccup) leaves p.gw exactly as it was, the same last-known-good fallback
-// reserve()'s old synchronous re-resolve used (issue #117).
+// reserve()'s old synchronous re-resolve used (old #117).
 //
 // This trades reserve()'s previous "always fresh, synchronously, on every
 // live install" guarantee for "fresh as of the most recent reserve() call
@@ -213,7 +213,7 @@ func (p *poolExcluder) reserve(addr string) {
 // stale gateway. That one dial fails exactly like any other missed exclusion
 // (fail-closed, not a leak — see reserve()'s doc comment), and the pool's own
 // failover retries moments later, by which point this refresh has landed.
-// What #117 actually protected against — an indefinitely stale gateway,
+// What old #117 actually protected against — an indefinitely stale gateway,
 // never re-resolved for the rest of the session — is unchanged: every live
 // install still triggers a refresh, so staleness never persists past one
 // call.
@@ -239,7 +239,7 @@ func (p *poolExcluder) triggerGatewayRefresh() {
 
 // disable marks the excluder torn down: called once bring-up has failed, or
 // the tunnel is closing, right before that path takes its final
-// removeRoutes(reserved()) snapshot (issue #117). Any reserve() install
+// removeRoutes(reserved()) snapshot (old #117). Any reserve() install
 // already past its recording step and in flight, unlocked, at that moment
 // self-reaps via the closed check at the end of reserve()'s install loop,
 // instead of leaving an orphaned route the snapshot missed. Idempotent (a
@@ -272,8 +272,8 @@ func (p *poolExcluder) goLive(gw gatewayInfo) {
 // armAllowlist snapshots the reserved addresses and hands them to install (which
 // builds them into the kill-switch's initial allowlist), then marks the excluder
 // armed so any address reserved afterwards is live-refreshed into the allowlist
-// instead. install runs while mu is held, so — mirroring bypassPolicy.arm (issue
-// #73) — no reserve() can slip between "the snapshot install sees" and "armed
+// instead. install runs while mu is held, so — mirroring bypassPolicy.arm
+// (old #73) — no reserve() can slip between "the snapshot install sees" and "armed
 // becomes true": a racing reserve() either already added its IP to p.seen (so
 // it's in this snapshot) or observes armed already true and refreshes live. It is
 // nested inside bypassPolicy.arm at the call site so both dynamic sets feed one

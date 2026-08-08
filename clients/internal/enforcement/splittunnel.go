@@ -16,8 +16,8 @@
 //     default route stays authoritative for everything, so "direct" traffic
 //     needs no route changes and never even reaches the netstack. Instead the
 //     bypass/include set itself needs *inclusion* routes pulling it into the
-//     tun adapter, or it would never be captured in the first place (issue
-//     #64 — the original implementation only ever added exclusion routes,
+//     tun adapter, or it would never be captured in the first place
+//     (old #64 — the original implementation only ever added exclusion routes,
 //     which in include mode left "direct" meaning "the entire internet," none
 //     of it excluded from a split-default that was still being installed).
 //
@@ -39,7 +39,7 @@
 // fails toward that one flow going direct/untunnelled, not toward a leak.
 //
 // "If the kill-switch is armed" has to be answered atomically with respect to
-// learn()'s own mutation of the dynamic set (issue #73), or a bypass IP
+// learn()'s own mutation of the dynamic set (old #73), or a bypass IP
 // learned in the narrow window around arming can end up on neither side of
 // that check: not in the kill-switch's initial allowlist (built from a
 // snapshot taken before it existed), and not live-refreshed either (armed
@@ -92,8 +92,8 @@ type bypassPolicy struct {
 
 	// onLearn, if set, fires synchronously the first time an IP is added to
 	// the dynamic set, with armed reporting whether arm() has already run —
-	// read under the same lock as the dynamic-set mutation itself (issue
-	// #73), not a separate atomic checked after the fact. tunnel.go wires
+	// read under the same lock as the dynamic-set mutation itself
+	// (old #73), not a separate atomic checked after the fact. tunnel.go wires
 	// this to add a route (exclusion or inclusion, depending on mode) and, if
 	// armed, refresh the kill-switch's live allowlist.
 	onLearn func(ip string, armed bool)
@@ -229,7 +229,7 @@ func (p *bypassPolicy) learn(ip net.IP) {
 // p.dynamic by the time arm() can read it) or arm() acquires it first (that
 // learn() call, once it gets the lock, observes armed already true and fires
 // onLearn's live-refresh path instead). Every learned IP ends up on exactly
-// one of those two paths — never neither, which was issue #73: a snapshot
+// one of those two paths — never neither, which was old #73: a snapshot
 // read and an armed flip that weren't synchronized against learn() at all
 // could both miss the same IP.
 //
