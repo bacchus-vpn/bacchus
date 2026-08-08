@@ -104,6 +104,13 @@ const keyFileName = "device.key"
 // there — and nothing about it is fixed by inventing a call, which is why this
 // is a comment and not a syscall.
 //
+// The LAST step of that sequence has an answer that owes nothing to any
+// platform, and it is issue #244: the credential this key would strand lives in
+// the same directory, so a missing device.key beside a present credential.json
+// is not a cold start and this function could refuse instead of minting. That is
+// the fail-closed rule the paragraph above already applies to a corrupt file,
+// not yet applied to a missing one.
+//
 // A write that fails partway leaves a SHORT file on purpose. It is caught loudly
 // on the next read by the malformed-key check above, which is fail-closed;
 // removing it would hand the next run a missing file and a silent fresh key,

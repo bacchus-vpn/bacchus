@@ -206,9 +206,10 @@ func (s *State) RaiseFloor(seq uint64) error {
 //
 // In the ordinary flow the floor has already been raised by RaiseFloor earlier
 // in the same check, so this write does not move it and is not durable — the
-// raise was already made durable where it happened. The test is on this write's
-// own effect rather than on the caller, because that is what ADR-0066 §5's rule
-// is about and because a future caller may reach this first.
+// raise was already made durable where it happened. The discriminator is still
+// this write's own effect rather than an assumption about the caller, because
+// that is what ADR-0066 §5's rule is about and because a future caller may reach
+// this one first.
 func (s *State) SetPending(p Pending) error {
 	f, _ := s.read()
 	raises := p.Seq > f.MinSeq
