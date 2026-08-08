@@ -309,3 +309,38 @@ func TestRenewalDetailsAreRenderedHereNotRelayed(t *testing.T) {
 		}
 	}
 }
+
+// TestEnrollmentDetailsAreRenderedHereNotRelayed is bacchus#181, and it is
+// TestRenewalDetailsAreRenderedHereNotRelayed's check applied to the two
+// sentences bacchus#171 named and did not widen to.
+//
+// Both are fixed sentences this app wrote, so both have to be rendered here
+// through lang.L rather than relayed from appstate as English. A kind with no
+// case falls through to Detail.Text, which compiles and passes every other
+// check while handing a Russian-speaking user an English line — and for the
+// second of these that line is what they read when enrollment could not reach
+// the account service, at a moment they have something to act on.
+func TestEnrollmentDetailsAreRenderedHereNotRelayed(t *testing.T) {
+	const fallback = "the English copy appstate always fills in"
+	for _, kind := range []appstate.DetailKind{
+		appstate.DetailEnrolled,
+		appstate.DetailEnrollUnreachable,
+	} {
+		got := detailText(appstate.Detail{Kind: kind, Text: fallback})
+		if got == fallback {
+			t.Errorf("kind %d fell through to Detail.Text; it needs a lang.L case in detailText", kind)
+		}
+		if got == "" {
+			t.Errorf("kind %d rendered nothing", kind)
+		}
+	}
+
+	// And the two are distinct sentences rather than one kind doing both jobs:
+	// "registered" and "could not register" are opposite outcomes and the
+	// unreachable one is the only one a user can act on.
+	enrolled := detailText(appstate.Detail{Kind: appstate.DetailEnrolled})
+	unreachable := detailText(appstate.Detail{Kind: appstate.DetailEnrollUnreachable})
+	if enrolled == unreachable {
+		t.Errorf("both enrollment kinds render the same sentence: %q", enrolled)
+	}
+}

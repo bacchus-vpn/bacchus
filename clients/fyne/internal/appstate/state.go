@@ -1,6 +1,6 @@
-// Package appstate is the connection-state model and engine controller (issues
-// #148/#149), kept deliberately free of any Fyne import. That split is what
-// lets this package's tests run as plain `go test`, with no GUI toolchain
+// Package appstate is the connection-state model and engine controller
+// (old #148/#149), kept deliberately free of any Fyne import. That split is
+// what lets this package's tests run as plain `go test`, with no GUI toolchain
 // (glfw/OpenGL need cgo - see the ADR) - only the outer main package touches
 // fyne.* and needs that toolchain to build.
 //
@@ -140,6 +140,23 @@ const (
 	// make the line flicker with news that nothing is wrong, which is how a line
 	// that also carries real warnings stops being read.
 	DetailRenewalRecovered
+
+	// Enrollment (bacchus#181). The two sentences enrollIfNeeded puts on the
+	// detail line went out as DetailVerbatim for the same reason the renewal
+	// ladder did — nobody had given them kinds — and bacchus#171 moved the ladder
+	// without widening to them. They are the same case: fixed sentences this
+	// client wrote, not core diagnostics, so the verbatim path is the wrong one.
+
+	// DetailEnrolled: this device just completed enrollment and now holds a
+	// device credential. A fixed sentence this client wrote, not core
+	// diagnostics, so it is a kind rather than DetailVerbatim (bacchus#171's
+	// rule, bacchus#181).
+	DetailEnrolled
+	// DetailEnrollUnreachable: enrollment could not reach the account service, so
+	// the connect proceeds on whatever this device already holds. The one of the
+	// two that matters — it is what a user sees at a moment they have something
+	// to act on.
+	DetailEnrollUnreachable
 )
 
 // Detail is one detail-line message: what to say, and enough structure for the

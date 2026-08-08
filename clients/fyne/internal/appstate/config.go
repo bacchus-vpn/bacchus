@@ -11,10 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 )
 
 // Config holds this client's settings. Coordinators/STUN/TURN are the
-// connection endpoints, unchanged since the #148 skeleton and still hand-edited
+// connection endpoints, unchanged since the old #148 skeleton and still hand-edited
 // in the config file - there is no in-app editor for those. Everything from
 // AdmissionPubKey down is the user-facing Settings window's surface, edited via
 // settings.go and persisted the same way.
@@ -36,7 +38,7 @@ import (
 // finished until a client can reach it.
 type Config struct {
 	// Coordinators is the rendezvous pool: one or more coordinator UDP
-	// host:port endpoints (issue #6). Required - Controller.Connect has no
+	// host:port endpoints (old #6). Required - Controller.Connect has no
 	// coordinator to dial without it.
 	Coordinators []string `json:"coordinators"`
 	STUN         string   `json:"stun"` // stun:host:port
@@ -100,14 +102,14 @@ type Config struct {
 	// core treats an unset AdmissionPubKey as fail-open, so the client verifies
 	// nothing and accepts any exit it can complete a Noise_NK handshake with.
 	//
-	// That silently discards the entire point of ADR-0026/#60. Admission
+	// That silently discards the entire point of ADR-0026/old #60. Admission
 	// verification is the client's END-TO-END backstop against a HOSTILE
 	// COORDINATOR — the one check that does not trust the party doing the
 	// matchmaking. A coordinator that hands out an exit it controls is exactly
 	// the attack it exists to catch, and without this field it succeeds. There
 	// was no field to set it, so no config could have turned it on.
 	//
-	// AdmissionCRLPath is #69's half: a signed, short-TTL revocation bundle, hot
+	// AdmissionCRLPath is old #69's half: a signed, short-TTL revocation bundle, hot
 	// reloaded, so a revoked exit is rejected before its credential expires on
 	// its own. Meaningless without AdmissionPubKey, and empty means revocation is
 	// not checked at all — also fail-open.
@@ -155,7 +157,7 @@ type Config struct {
 
 	// TransportPool mirrors core.Config.TransportPool and the Windows tray client's
 	// same-named field, JSON key included: a preference-ordered ladder the
-	// client races and then converges on, per network (issue #15, ADR-0028).
+	// client races and then converges on, per network (old #15, ADR-0028).
 	// Empty turns the pool off and keeps the single-transport connect, which
 	// is what this client did before issue #93 — so the zero value is exactly
 	// pre-#93 behaviour.
@@ -586,7 +588,7 @@ func LoadConfig() (Config, string, error) {
 var errNoConfigPath = errors.New("no config file path to save to")
 
 // SaveConfig writes c back to path as indented JSON. Mirrors
-// the retired Windows client's config.go's saveConfig (issue #75 there; issue #152 here,
+// the retired Windows client's config.go's saveConfig (old #75 there; old #152 here,
 // settings.go's save handler is the only caller): path is normally whatever
 // LoadConfig reported reading from, so a Settings save lands back in the same
 // file the user is already using, and DefaultConfigPath covers the
@@ -611,6 +613,12 @@ var errNoConfigPath = errors.New("no config file path to save to")
 // file with O_TRUNC and refills it: a process killed in that window left the
 // user's whole configuration empty or short rather than losing one field, and the
 // next launch read what the killed one left.
+//
+// The shape is core/atomicfile's, and that package's doc carries the reasoning.
+// It was a full copy in this file until bacchus#215; what stayed here is the
+// os.MkdirAll below, which core/atomicfile deliberately does not absorb
+// (ADR-0066 §2) because three of its callers want a parent directory created and
+// three deliberately do not.
 //
 // That window is reached by an ordinary gesture rather than a rare
 // administrative one. ClearClaimCode's caller is a CONNECT attempt, so this runs
@@ -638,32 +646,33 @@ func SaveConfig(path string, c Config) error {
 	return writeConfigAtomic(path, b)
 }
 
-// writeConfigAtomic installs b at path by staging a complete file under
-// ".<name>.tmp*" in path's own directory, flushing it, and renaming it over the
-// target.
+// writeConfigAtomic installs b at path through core/atomicfile: a complete file
+// is staged under ".<name>.tmp*" in path's own directory, flushed, and renamed
+// over the target, so the live config is never opened for writing and there is
+// no instant at which it holds a partial one.
 //
-// Two mechanics are load-bearing rather than tidy, and they are the same two
-// core/coldstart/atomic.go names:
+// 0600 rather than whatever os.CreateTemp's mode survived the umask: this
+// replaces a file SaveConfig has always written 0600, and its contents are the
+// reason — turnPass, volunteerExitKey, an exit identity key, and a bypass list
+// naming the sites this user does not tunnel. The mode is carried EVERY time
+// rather than only at creation, which for this file only ever narrows.
 //
-//   - The staged file is created IN THE TARGET'S DIRECTORY. os.Rename is atomic
-//     only within one filesystem, and a rename across one degrades to
-//     copy-then-delete — exactly the half-written file this exists to prevent.
-//   - The bytes are flushed BEFORE the rename, so a rename that becomes visible
-//     ahead of the data it points at cannot leave the next launch reading an
-//     empty config.
+// # Why it takes Write and not WriteDurable
 //
-// Three consequences of replacing the file rather than rewriting it, each a real
-// change from os.WriteFile: the result is mode 0600 every time rather than only
-// at creation, which only ever narrows and this file holds turnPass and
-// volunteerExitKey; a path that is a SYMLINK is replaced rather than written
-// through; and a writer killed mid-save leaves its staged file behind, named so
-// it sorts beside the config, is hidden from a plain ls, and can never be
-// mistaken for the config itself.
+// A file's own flush makes the BYTES durable; it does not commit the directory
+// entry, so a power loss straight after the rename can restore the previous
+// file. ADR-0066 §5 rules that boundary per WRITE, on whether anything will
+// write the same state again, and this writer is on the ordinary side of it
+// twice over: the next save re-establishes the whole file, and what a lost
+// rename restores is a configuration this user was already running rather than a
+// torn one. Nothing here is unreconstructable the way bacchus#178's bootstrap
+// secrets are.
 //
-// It does not fsync the directory, which is where every atomic writer in this
-// repository stops: that is a question about whether the RENAME is durable, not
-// whether the bytes are whole, and its failure mode restores a complete older
-// file rather than a torn one.
+// This function's doc used to end by saying the directory fsync "is where every
+// atomic writer in this repository stops". That stopped being true when
+// ADR-0066 put core/admission's revocation list and core/coldstart's secrets
+// ledger on the durable side. The line above is the same choice made for a
+// reason rather than by default.
 //
 // # On Windows the replacement can be refused
 //
@@ -675,45 +684,8 @@ func SaveConfig(path string, c Config) error {
 // been given the chance to truncate. The one thing that must not happen on that
 // path is a config that is neither the old one nor the new one, and replacing
 // the file is what rules it out on every platform.
-//
-// It is package-local, as coldstart's is, and for the reason coldstart's doc
-// gives: consolidating the copies means editing correct, separately tested code
-// in packages this did not own. bacchus#188 holds that question, and its own body
-// asks for a wave in which those packages are not in flight.
 func writeConfigAtomic(path string, b []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp")
-	if err != nil {
-		return err
-	}
-	staged := tmp.Name()
-	// Removed on every path that does not rename it away, so a failure leaves the
-	// live config untouched AND nothing beside it for the user to wonder about. A
-	// no-op once the rename has succeeded.
-	defer func() { _ = os.Remove(staged) }()
-	if err := writeStagedConfig(tmp, b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(staged, path)
-}
-
-// writeStagedConfig fills the staged file and flushes it, so everything that can
-// fail has failed before anything is renamed over the file the next launch reads.
-func writeStagedConfig(f *os.File, b []byte) error {
-	// 0600 explicitly rather than whatever os.CreateTemp's mode survived the
-	// umask: this replaces a file SaveConfig has always written 0600, and its
-	// contents are the reason (see the doc above).
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		return err
-	}
-	return f.Sync()
+	return atomicfile.Write(path, b, 0o600)
 }
 
 // ClearClaimCode erases Config.ClaimCode from whichever config file is actually

@@ -30,7 +30,7 @@ import (
 	"github.com/pion/turn/v4"
 )
 
-// TestController_RealLoopback is the issues #148/#149 acceptance test: a
+// TestController_RealLoopback is the old #148/#149 acceptance test: a
 // Controller - exactly the seam the outer package's ui.go drives, through
 // fyne.Do - brings a real client-role core.Engine up to Protected against a
 // real exit-role core.Engine, rendezvoused through a minimal fake coordinator
@@ -53,7 +53,7 @@ func TestController_RealLoopback(t *testing.T) {
 		t.Fatalf("state = %v, want Protected (details so far: %v)", s, rec.detailsSnapshot())
 	}
 
-	// A real transport-level drop (issue #149's "Blocked (kill-switch)"
+	// A real transport-level drop (old #149's "Blocked (kill-switch)"
 	// signal, appstate.StateFor's ICE branch): kill the exit's session and
 	// confirm the headline state reacts to a genuine ICE disconnect, not just
 	// the synthetic string match already covered by state_test.go. ICE
@@ -529,7 +529,7 @@ func waitForState(t *testing.T, c *Controller, want ConnState) {
 // actually happens on the engine that connects.
 //
 // Admission is the client's END-TO-END backstop against a HOSTILE COORDINATOR
-// (ADR-0026/#60): the one check that does not trust the party doing the matchmaking.
+// (ADR-0026/old #60): the one check that does not trust the party doing the matchmaking.
 // core reads an unset AdmissionPubKey as fail-open, so a client that never passes the
 // field accepts any exit it can complete a handshake with — and a coordinator handing
 // out an exit it controls is precisely the attack the check exists to catch. This
@@ -547,12 +547,12 @@ func waitForState(t *testing.T, c *Controller, want ConnState) {
 // So this uses a WELL-FORMED anchor for an authority nothing here is signed by.
 // pickExit then succeeds (a valid key really is inert there), and the assertion falls
 // on the connecting engine, where the exit presents no admission credential and must
-// be refused. That is the actual claim of #60 — a client with an anchor does not take
+// be refused. That is the actual claim of old #60 — a client with an anchor does not take
 // the coordinator's word for which exit it got — rather than a claim about hex
 // parsing.
 func TestAdmissionAnchorRejectsAnUncredentialedExit(t *testing.T) {
 	// The rig's exit carries no admission credential: it presents none, which an
-	// anchored client must refuse and an unanchored one accepts (fail-open, pre-#60).
+	// anchored client must refuse and an unanchored one accepts (fail-open, as it did before old #60).
 	coord, _ := startLoopbackExit(t)
 	echoAddr := startEchoServer(t)
 
@@ -586,7 +586,7 @@ func TestAdmissionAnchorRejectsAnUncredentialedExit(t *testing.T) {
 	// refuse it. Nothing reaches the internet through an exit that proved nothing.
 	if _, err := socksEchoRoundTrip(SocksAddr, echoAddr, []byte("this must not arrive")); err == nil {
 		t.Fatal("an anchored client round-tripped traffic through an exit that presented no admission credential: " +
-			"ADR-0026/#60's end-to-end backstop is not running on the engine that connects, so a hostile coordinator's exit is accepted on the client's own authority")
+			"ADR-0026/old #60's end-to-end backstop is not running on the engine that connects, so a hostile coordinator's exit is accepted on the client's own authority")
 	}
 }
 
@@ -1427,7 +1427,7 @@ func TestEnforcementPolicyCarriesTheUsersConfiguration(t *testing.T) {
 // path — a crash in the middle of a connect, not a failed connect.
 //
 // Wired to the ENFORCER and not to a Session when there is one, which is issue
-// #109 itself: the transport pool dials its first reality underlay during the
+// old #109 itself: the transport pool dials its first reality underlay during the
 // initial Connect, BEFORE startEnforcement has run, so there is no Session to
 // hand it to. A hook pointing at a Session would silently drop that first
 // address, and the underlay it names would ride the tunnel it is carrying.
@@ -1439,7 +1439,7 @@ func TestUnderlayDialHookIsWiredToTheEnforcer(t *testing.T) {
 	enf := &fakeEnforcer{}
 	hook := newEnforcedController(Config{}, enf).underlayDialHook()
 	if hook == nil {
-		t.Fatal("a controller WITH an Enforcer handed core no OnUnderlayDial: the pool's first reality underlay is never excluded, which is the leak issue #109 closed")
+		t.Fatal("a controller WITH an Enforcer handed core no OnUnderlayDial: the pool's first reality underlay is never excluded, which is the leak old #109 closed")
 	}
 	hook("192.0.2.10:443")
 	if got := enf.reservedUnderlays(); len(got) != 1 || got[0] != "192.0.2.10:443" {
@@ -1550,6 +1550,8 @@ func TestEnrollmentRedeemsAClaimCodeAndErasesIt(t *testing.T) {
 	t.Cleanup(func() { appstateClearClaimCode = restore })
 
 	ctrl := newProxyOnlyController(s.config(t, "BC1-GOODCODE"))
+	var details []Detail
+	ctrl.OnDetail = func(d Detail) { details = append(details, d) }
 	dc, err := ctrl.openDeviceCredential(ctrl.cfg.AccountServiceAddresses())
 	if err != nil {
 		t.Fatalf("openDeviceCredential: %v", err)
@@ -1559,6 +1561,11 @@ func TestEnrollmentRedeemsAClaimCodeAndErasesIt(t *testing.T) {
 	}
 	if !dc.dev.Enrolled() {
 		t.Fatal("the device holds no credential after a successful enrollment")
+	}
+	// The success line is classified too (bacchus#181), so the UI renders it
+	// through lang.L instead of relaying the English appstate filled in.
+	if len(details) == 0 || details[0].Kind != DetailEnrolled {
+		t.Errorf("the enrolled line went out as %+v, want kind DetailEnrolled", details)
 	}
 	if !cleared {
 		t.Fatal("the spent claim code was left in the config file")
@@ -1648,6 +1655,13 @@ func TestAnUnreachableAccountServiceDoesNotBlockConnecting(t *testing.T) {
 	}
 	if len(details) == 0 || !strings.Contains(details[0].Text, "Could not reach") {
 		t.Fatalf("the user was told nothing about the failed registration: %+v", details)
+	}
+	// And it carries its KIND, not just its English (bacchus#181). This is the
+	// one of the two enrollment sentences a user can act on, and DetailVerbatim
+	// is the path meant for core's own error text — a sentence sent that way is
+	// rendered as the English it arrived as, whatever language the user reads.
+	if details[0].Kind != DetailEnrollUnreachable {
+		t.Errorf("the unreachable-service line went out as kind %d, want DetailEnrollUnreachable: the UI cannot translate what it cannot classify", details[0].Kind)
 	}
 }
 
