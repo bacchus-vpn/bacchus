@@ -327,7 +327,7 @@ func (r *RevocationList) Revoke(serial string) {
 
 // Serials returns every revoked serial, sorted for a stable, diff-friendly
 // order (used by SaveFile and by cmd/admission-issue -crl to sign the current
-// set as a distributable CRL, issue #69).
+// set as a distributable CRL, old #69).
 func (r *RevocationList) Serials() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

@@ -1,4 +1,4 @@
-// coldstart-probe (issue #18 design spike) — a throwaway measurement tool.
+// coldstart-probe (old #18 design spike) — a throwaway measurement tool.
 //
 // It answers the one empirical question the cold-start spike hinges on: does a
 // STUN-shaped UDP packet reach a target from this vantage and get a valid reply

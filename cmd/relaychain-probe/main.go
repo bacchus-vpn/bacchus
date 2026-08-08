@@ -1,4 +1,4 @@
-// relaychain-probe (issue #76 design spike) — a throwaway feasibility demonstrator.
+// relaychain-probe (old #76 design spike) — a throwaway feasibility demonstrator.
 //
 // It answers the one question the multi-hop relay-chaining design hinges on before
 // any production wiring exists: do nested Noise_NK layers peel exactly one-per-hop,
@@ -29,7 +29,7 @@ import (
 	"github.com/flynn/noise"
 )
 
-// A stand-in for the exit's #60/#69 admission credential. In the real system this is
+// A stand-in for the exit's old #60/#69 admission credential. In the real system this is
 // a signed Credential the client verifies against the admission root (see
 // core/exit_admission.go); here it is an opaque token, enough to show the credential
 // transits the onion intact and a mismatch is detectable.
@@ -73,7 +73,7 @@ func (h *hop) serve(inbound net.Conn) {
 
 	var cred []byte
 	if h.isExit {
-		cred = exitAdmissionCred // the exit presents its admission credential in msg2 (#60)
+		cred = exitAdmissionCred // the exit presents its admission credential in msg2 (old #60)
 	}
 	l, err := acceptResponder(inbound, h.key, cred)
 	if err != nil {

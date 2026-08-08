@@ -48,7 +48,7 @@ type secretFile map[string]string
 // LoadMemStore reads a secrets file written by [MemStore.SaveFile] (or by
 // cmd/coldstart-issue) into a fresh MemStore. The file is operator-managed
 // out-of-band provisioning (design doc §4.2.2/§7.3) — there is no vouch/trust
-// system wired in yet (issue #18's follow-on work), so every entry here is
+// system wired in yet (old #18's follow-on work), so every entry here is
 // trusted equally.
 func LoadMemStore(path string) (*MemStore, error) {
 	b, err := os.ReadFile(path)

@@ -55,7 +55,7 @@ func newLayer(raw io.ReadWriteCloser) *layer {
 
 // dialInitiator runs the Noise_NK initiator against peerPub. verifyCred, when
 // non-nil, is handed the credential the responder presents in msg2 and may reject
-// the peer (the #60/#69 end-to-end exit-admission check, modelled here) — on
+// the peer (the old #60/#69 end-to-end exit-admission check, modelled here) — on
 // rejection the handshake aborts before any target is sent. This is core/e2e.go's
 // clientHandshake, minus sending the target (the caller sends it per layer).
 func dialInitiator(raw io.ReadWriteCloser, peerPub []byte, verifyCred func([]byte) error) (*layer, error) {

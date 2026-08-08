@@ -1,5 +1,5 @@
 // coldstart-issue is the operator-side half of the cold-start bootstrap
-// (issue #18): it mints a fresh per-user secret, appends it to the
+// (old #18): it mints a fresh per-user secret, appends it to the
 // coordinator's secrets file (hot-reloaded by cmd/coordinator, no restart
 // needed), and prints a copy-pasteable invite string carrying that secret —
 // the "signed invite bundle" of docs/design/rendezvous-cold-start.md §4.2.2,
@@ -30,8 +30,8 @@ func main() {
 	secretsPath := flag.String("secrets", "secrets/bootstrap-secrets.json", "coordinator's bootstrap secrets file (created if missing)")
 	coordinator := flag.String("coordinator", "", "coordinator bootstrap host:port the recipient should dial (required)")
 	pubKeyHex := flag.String("pubkey", "", "coordinator's bootstrap public key, hex (required; logged by cmd/coordinator on first run)")
-	admissionPubKeyHex := flag.String("admission-pubkey", "", "optional: the admission authority's public key, hex (issue #60). When set it is embedded in the invite so the recipient verifies exits against it end-to-end (a v2 invite); when empty a v1 invite is minted and the recipient must obtain the anchor another way")
-	admissionCRLPath := flag.String("admission-crl", "", "optional: path to a signed revocation bundle from cmd/admission-issue -crl (issue #69). Requires -admission-pubkey; embeds it in the invite (a v3 invite) so the recipient rejects a revoked exit with no extra setup")
+	admissionPubKeyHex := flag.String("admission-pubkey", "", "optional: the admission authority's public key, hex (old #60). When set it is embedded in the invite so the recipient verifies exits against it end-to-end (a v2 invite); when empty a v1 invite is minted and the recipient must obtain the anchor another way")
+	admissionCRLPath := flag.String("admission-crl", "", "optional: path to a signed revocation bundle from cmd/admission-issue -crl (old #69). Requires -admission-pubkey; embeds it in the invite (a v3 invite) so the recipient rejects a revoked exit with no extra setup")
 	flag.Parse()
 
 	if *coordinator == "" || *pubKeyHex == "" {
@@ -42,7 +42,7 @@ func main() {
 	if err != nil || len(pub) != ed25519.PublicKeySize {
 		log.Fatalf("bad -pubkey: expected %d hex-encoded bytes", ed25519.PublicKeySize)
 	}
-	// The admission anchor (issue #60) is optional; when supplied it must be a
+	// The admission anchor (old #60) is optional; when supplied it must be a
 	// well-formed ed25519 public key so a typo fails here rather than shipping an
 	// invite the recipient can't verify against.
 	var admissionKey ed25519.PublicKey
@@ -53,7 +53,7 @@ func main() {
 		}
 		admissionKey = ed25519.PublicKey(ak)
 	}
-	// The revocation bundle (issue #69) rides alongside the anchor and is
+	// The revocation bundle (old #69) rides alongside the anchor and is
 	// unverifiable without it.
 	if *admissionCRLPath != "" && admissionKey == nil {
 		log.Fatal("-admission-crl requires -admission-pubkey")
@@ -71,7 +71,7 @@ func main() {
 		// and check expiry too (VerifyCRL, not just ParseCRL), so an operator
 		// who fat-fingers a stale bundle path finds out at mint time, not by
 		// puzzling over a client that silently never enforced revocation
-		// (issue #90: an expired CRL is a construction error on the client
+		// (old #90: an expired CRL is a construction error on the client
 		// exactly as it is here).
 		if _, err := admission.VerifyCRL(admissionKey, encoded, time.Now()); err != nil {
 			log.Fatalf("bad -admission-crl %s: %v", *admissionCRLPath, err)

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// This file covers the mesh-walk courier (issue #31, design §4.3): a relay/exit
+// This file covers the mesh-walk courier (old #31, design §4.3): a relay/exit
 // node caching a coordinator-signed snapshot and serving it, verbatim, to a
 // recovering client that can no longer reach any coordinator. The security bar is
 // the courier model — a courier is a dispenser, not an author — so the tests prove
@@ -211,8 +211,8 @@ func TestCourierAcceptsStaleProof(t *testing.T) {
 	}
 }
 
-// TestCourierWithholdsExpiredSnapshot is the serve-side of the freshness rule (issue
-// #115): a courier whose only cached snapshot has aged past the coordinator TTL —
+// TestCourierWithholdsExpiredSnapshot is the serve-side of the freshness rule
+// (old #115): a courier whose only cached snapshot has aged past the coordinator TTL —
 // because its coordinator went unreachable for longer than one refresh could bridge —
 // must serve nothing, not hand out entries that may already be gone. Even a valid
 // proof of prior contact unlocks only a still-fresh snapshot; an expired cache draws
@@ -236,12 +236,12 @@ func TestCourierWithholdsExpiredSnapshot(t *testing.T) {
 		t.Fatalf("parse response: %v", err)
 	}
 	if _, has := m.get(attrSnapshot); has {
-		t.Fatal("a courier must withhold an expired snapshot even from a valid proof (issue #115)")
+		t.Fatal("a courier must withhold an expired snapshot even from a valid proof (old #115)")
 	}
 }
 
 // TestFetchSnapshotRejectsExpiredResponse is the client-side backstop for the same
-// rule: even if a courier does NOT honour the withhold — a pre-#115 node, or a
+// rule: even if a courier does NOT honour the withhold — a node predating old #115, or a
 // hostile one — and attaches an expired snapshot anyway, the client rejects it (its
 // entries may be gone) and, in a real walk, moves to the next peer. serveForcedSnapshot
 // stands in for that non-conforming courier so the client check is exercised in
@@ -317,7 +317,7 @@ func TestFetchSnapshotUnservedIsNotAuthenticated(t *testing.T) {
 }
 
 // TestCourierForwardsRelayMetadataVerbatim proves the courier stays a byte-exact
-// dispenser as the directory grows: a snapshot whose relay entry carries the #124
+// dispenser as the directory grows: a snapshot whose relay entry carries the old #124
 // onion-forward ingress and operator tag is handed back unaltered, so both survive
 // re-verification and the relay stays eligible. A courier caches opaque signed bytes and
 // re-signs nothing (SnapshotCache holds no key), so it can neither strip nor forge the

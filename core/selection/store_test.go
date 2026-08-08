@@ -96,7 +96,7 @@ func TestStorePersistRoundTrip(t *testing.T) {
 }
 
 // TestStoreDropsCountrylessRecords covers the one shape a file written before
-// country-only assignment (issue #146) decodes to: it keyed on an exit id, so
+// country-only assignment (old #146) decodes to: it keyed on an exit id, so
 // Country is absent and unmarshals empty.
 //
 // Such a record must not become a candidate. A connect naming no country is refused by
@@ -106,7 +106,7 @@ func TestStorePersistRoundTrip(t *testing.T) {
 func TestStoreDropsCountrylessRecords(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	path := filepath.Join(t.TempDir(), "selection.json")
-	// The pre-#146 on-disk shape: an "exit" key, no "country".
+	// The on-disk shape from before old #146: an "exit" key, no "country".
 	old := `[{"net":"net1","geo":"RU","exit":"deadbeef","tr":"reality","mode":"direct","rttMs":25,"at":"2023-11-14T22:13:20Z"}]`
 	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
 		t.Fatal(err)

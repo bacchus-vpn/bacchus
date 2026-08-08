@@ -12,12 +12,12 @@ import (
 	"time"
 )
 
-// CRL is a short-lived, signed bundle of revoked credential serials (issue
-// #69): the piece that lets a client reject a revoked-but-unexpired exit
+// CRL is a short-lived, signed bundle of revoked credential serials
+// (old #69): the piece that lets a client reject a revoked-but-unexpired exit
 // credential without a live connection to the coordinator's own hot-reloaded
 // RevocationList. That list is a plain local file the coordinator trusts
 // because it reads its own disk; a CRL instead travels to the client over the
-// network, possibly via the same hostile coordinator #60/ADR-0026 already
+// network, possibly via the same hostile coordinator old #60/ADR-0026 already
 // assumes may lie, so — like a Credential — it is signed by the admission
 // root and verified against the anchor the client already holds, trustworthy
 // independent of whatever relayed it.
@@ -130,7 +130,7 @@ func (c CRL) Revoked(serial string) bool {
 }
 
 // ClientCRL holds a client's currently trusted revocation bundle behind an
-// atomically swappable pointer, so a background reload (issue #90) can
+// atomically swappable pointer, so a background reload (old #90) can
 // install a freshly verified bundle without a Verifier's concurrent Revoked
 // reads ever observing a torn or partial update — the same "swap, don't
 // mutate" shape as the coordinator's own RevocationList reload. The zero

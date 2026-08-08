@@ -81,7 +81,7 @@ type Credential struct {
 	Note      string    `json:"note,omitempty"` // free-form operator label (e.g. who it was issued to); not security-relevant
 
 	// Vouched marks a credential issued to an account a real person vouched for, the
-	// signal issue #157's two-rating capacity decision turns on: only a vouched
+	// signal old #157's two-rating capacity decision turns on: only a vouched
 	// attester may feed a node's TRUSTED capacity estimate (design §8.1.1). It is the
 	// seam between capacity measurement (this public repo, which the coordinator reads)
 	// and the account/vouch trust-graph (the private productization design, §5), which
@@ -90,7 +90,7 @@ type Credential struct {
 	// issuer in this repo: cmd/admission-issue never sets it, so in this build every
 	// credential is unvouched and the trusted stream stays empty until the account
 	// service issues vouched credentials. Additive and omitempty: a credential that
-	// leaves it false is byte-identical to one from before #157, and an older verifier
+	// leaves it false is byte-identical to one from before old #157, and an older verifier
 	// that does not know the field ignores it and reads false — never a spurious vouch.
 	Vouched bool `json:"vouched,omitempty"`
 
@@ -134,8 +134,8 @@ type Credential struct {
 	Plan string `json:"plan,omitempty"`
 }
 
-// IsVouched reports whether this credential was issued to a vouched account (issue
-// #157). The coordinator uses it to route a capacity attestation to a node's trusted vs.
+// IsVouched reports whether this credential was issued to a vouched account
+// (old #157). The coordinator uses it to route a capacity attestation to a node's trusted vs.
 // untrusted estimate. See the Vouched field: nothing in this repo sets it, so it is
 // always false here — the seam is defined, the account service will feed it.
 func (c Credential) IsVouched() bool { return c.Vouched }

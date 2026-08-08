@@ -84,8 +84,8 @@ func TestVerifyRejectsMalformed(t *testing.T) {
 }
 
 // relaySnapshot is a snapshot whose sole relay entry advertises an onion-forward
-// ingress and an operator tag (issue #124) — the directory metadata the relay-chaining
-// epic (#76) gates on. Addr (the observed signaling address) is deliberately a DIFFERENT
+// ingress and an operator tag (old #124) — the directory metadata the relay-chaining
+// epic (old #76) gates on. Addr (the observed signaling address) is deliberately a DIFFERENT
 // host from Ingress so a test can tell the two fields apart.
 func relaySnapshot() Snapshot {
 	return Snapshot{
@@ -102,7 +102,7 @@ func relaySnapshot() Snapshot {
 	}
 }
 
-// TestVerifyCoversRelayFields is the load-bearing signing test for #124: the new
+// TestVerifyCoversRelayFields is the load-bearing signing test for old #124: the new
 // ingress and operator fields round-trip through Sign/Verify, AND each is inside the
 // signed body — mutating its bytes after signing makes Verify reject, and restoring
 // them makes it accept again. The restore step is what makes the test non-vacuous: it
@@ -150,15 +150,15 @@ func TestVerifyCoversRelayFields(t *testing.T) {
 }
 
 // TestSnapshotBackwardCompatible proves the addition is wire-compatible both ways, so
-// it needs no version bump: a pre-#124 snapshot (no ingress/operator keys) verifies
-// under the current parser, and a #124 snapshot decodes under a parser that predates
+// it needs no version bump: a snapshot predating old #124 (no ingress/operator keys) verifies
+// under the current parser, and an old #124 snapshot decodes under a parser that predates
 // the fields.
 func TestSnapshotBackwardCompatible(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(nil)
 
-	// Direction 1 — pre-#124 wire, current parser. A relay that advertises no ingress
+	// Direction 1 — the wire predating old #124, current parser. A relay that advertises no ingress
 	// and no operator marshals to JSON with NEITHER key (omitempty), byte-identical to a
-	// coordinator predating #124. It still verifies, and its relay is simply not
+	// coordinator predating old #124. It still verifies, and its relay is simply not
 	// relay-eligible.
 	old := Snapshot{
 		Version:   SnapshotVersion,
@@ -182,7 +182,7 @@ func TestSnapshotBackwardCompatible(t *testing.T) {
 		t.Fatal("a relay advertising no ingress must not be relay-eligible")
 	}
 
-	// Direction 2 — #124 wire, pre-#124 parser. A snapshot carrying the new fields still
+	// Direction 2 — the old #124 wire, a parser predating it. A snapshot carrying the new fields still
 	// decodes under a struct that predates them; the unknown keys are ignored and every
 	// field an old client knows survives.
 	newSigned, err := Sign(priv, relaySnapshot())
@@ -203,7 +203,7 @@ func TestSnapshotBackwardCompatible(t *testing.T) {
 	}
 	var parsed oldSnapshot
 	if err := json.Unmarshal(newSigned[:len(newSigned)-signedLen], &parsed); err != nil {
-		t.Fatalf("pre-field parser must decode a #124 snapshot: %v", err)
+		t.Fatalf("pre-field parser must decode an old #124 snapshot: %v", err)
 	}
 	if len(parsed.Entries) != 2 || parsed.Entries[1].ID != "relay-1" || parsed.Entries[1].Addr != "198.51.100.7:20000" {
 		t.Fatalf("pre-field parser lost a known field: %+v", parsed.Entries)

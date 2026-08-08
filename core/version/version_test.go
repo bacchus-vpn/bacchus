@@ -253,7 +253,7 @@ func TestUnstampedWarnsOnceAndKeepsRunning(t *testing.T) {
 	}
 }
 
-// --- Policy predicates (TODO(#36)): the tables below are the spec the two
+// --- Policy predicates (TODO(old #36)): the tables below are the spec the two
 // predicates must satisfy. They stay RED until ServingAllowed / ClientMustUpdate
 // are implemented. ---
 
