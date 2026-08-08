@@ -546,9 +546,45 @@ func TestPin_VerificationFailsWhenTheProbeDoes(t *testing.T) {
 	}
 }
 
-// The live mis-set on the box today: the unit has WorkingDirectory unset, so a relative
-// path in ExecStart resolves under /, and a revocation file that is not there does not
-// fail — it means nothing is revoked.
+// The live mis-set on the box today, and the one the warning could not see
+// (issue #226).
+//
+// Every path written into the real unit's ExecStart is ABSOLUTE. `WorkingDirectory=`
+// is empty all the same, and cmd/coordinator's nine relative-default flags — both
+// revocation lists among them — are not in ExecStart at all, because a flag left at its
+// default never is. So the old condition (empty WorkingDirectory AND a relative path in
+// ExecStart) stayed silent on exactly the deployment it was written for, and this input
+// was a clean pass.
+//
+// MUTATION: put the `[ -n "$rel" ]` guard back around the warning — this goes red and
+// TestPin_VerifiesByReadingTheJournalAndProbing keeps passing, which is how the case
+// stayed invisible.
+func TestPin_WarnsOnAnEmptyWorkingDirectoryEvenWhenExecStartIsAllAbsolute(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"), journalFor(head[:12], head[:12], head[:12]), 0o644)
+	write(t, filepath.Join(f.dir, "unit-show"),
+		"ExecStart={ path=/usr/local/bin/bacchus-coordinator ; argv[]=/usr/local/bin/bacchus-coordinator "+
+			"-advertise 192.0.2.1:8080 -operators /etc/bacchus/operators.json }\nWorkingDirectory=\n", 0o644)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d — the warning is a warning, not a failure\n%s", code, out)
+	}
+	if !strings.Contains(out, "no WorkingDirectory=") {
+		t.Errorf("an empty WorkingDirectory drew no warning, because nothing in ExecStart was relative:\n%s", out)
+	}
+	if !strings.Contains(out, "NOTHING IS REVOKED") {
+		t.Errorf("the warning does not say what a path resolving nowhere costs:\n%s", out)
+	}
+	// It must not claim ExecStart names relative paths, because it does not.
+	if strings.Contains(out, "ExecStart also spells out relative paths") {
+		t.Errorf("the warning reports relative paths in an ExecStart that has none:\n%s", out)
+	}
+}
+
+// A unit that DOES name a relative path still gets it listed — the extra detail was
+// worth having, and issue #226 removed only its role as the gate.
 func TestPin_WarnsAboutRelativePathsUnderAnEmptyWorkingDirectory(t *testing.T) {
 	f := newFleet(t)
 	head := f.head()
@@ -557,8 +593,12 @@ func TestPin_WarnsAboutRelativePathsUnderAnEmptyWorkingDirectory(t *testing.T) {
 		"ExecStart={ argv[]=/usr/local/bin/bacchus-coordinator -device-revocations secrets/device-revocations.json }\nWorkingDirectory=\n", 0o644)
 
 	out, _ := f.pin()
-	if !strings.Contains(out, "secrets/device-revocations.json") || !strings.Contains(out, "nothing is revoked") {
-		t.Errorf("the relative-path warning did not fire:\n%s", out)
+	if !strings.Contains(out, "NOTHING IS REVOKED") {
+		t.Errorf("the warning did not fire:\n%s", out)
+	}
+	if !strings.Contains(out, "ExecStart also spells out relative paths") ||
+		!strings.Contains(out, "secrets/device-revocations.json") {
+		t.Errorf("the relative path in ExecStart is no longer listed:\n%s", out)
 	}
 }
 

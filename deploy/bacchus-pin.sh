@@ -452,19 +452,37 @@ rc=0
 # like `secrets/device-revocations.json` resolves to `/secrets/…` — a path that does not
 # exist. A missing revocation file does not fail; it means NOTHING IS REVOKED, quietly,
 # which is the worst way for a security control to be off.
+#
+# It used to warn only when ExecStart ALSO named a relative path, and that condition is
+# exactly backwards (issue #226). A flag left at its default never appears in ExecStart
+# at all, so the warning stayed silent precisely when the operator had not thought about
+# the path, and fired only when they had. On the first real run of this script every
+# path written into the live ExecStart was absolute, the warning correctly stayed quiet,
+# and nine relative-default flags — including both revocation lists — were resolving
+# under /. So the empty WorkingDirectory is now the whole condition.
+#
+# The list of flags is deliberately NOT enumerated here. It would be a copy of
+# cmd/coordinator's flag table living in a shell script a repository away from it, and
+# it would rot. The binary states its own resolved paths at startup instead
+# (cmd/coordinator/paths.go), which the journal read below already carries, and which
+# also answers for somebody reading the journal without this script.
 log "the coordinator's effective unit configuration"
 if unit_cfg=$("$SSH" "$COORDINATOR_TARGET" "systemctl show -p ExecStart -p WorkingDirectory $COORDINATOR_UNIT" 2>/dev/null); then
 	printf '%s\n' "$unit_cfg" | sed 's/^/    /'
 	wd=$(printf '%s\n' "$unit_cfg" | sed -n 's/^WorkingDirectory=//p')
 	if [ -z "$wd" ] || [ "$wd" = "/" ]; then
+		printf '%s: WARNING: this unit has no WorkingDirectory=, so for a system service it is /.\n' "$self" >&2
+		printf '%s: Every relative path this coordinator uses therefore resolves under the root\n' "$self" >&2
+		printf '%s: directory, where nothing is staged — and cmd/coordinator has nine flags whose\n' "$self" >&2
+		printf '%s: default is a relative secrets/ path, none of which appear in ExecStart at all.\n' "$self" >&2
+		printf '%s: A missing revocation file does not fail: it means NOTHING IS REVOKED.\n' "$self" >&2
 		rel=$(printf '%s\n' "$unit_cfg" | sed -n 's/^ExecStart=//p' |
 			tr ' ' '\n' | grep -E '^[A-Za-z0-9_.-]+/' || true)
 		if [ -n "$rel" ]; then
-			printf '%s: WARNING: WorkingDirectory is unset (so it is /) and ExecStart names relative paths:\n' "$self" >&2
+			printf '%s: ExecStart also spells out relative paths, which resolve the same way:\n' "$self" >&2
 			printf '%s\n' "$rel" | sed 's/^/      /' >&2
-			printf '%s: each of those resolves under / on this box. Confirm they exist there — a missing\n' "$self" >&2
-			printf '%s: revocation file in particular does not fail, it means nothing is revoked.\n' "$self" >&2
 		fi
+		printf '%s: Read the `paths:` lines in the journal below for what is actually in effect.\n' "$self" >&2
 	fi
 else
 	log "  could not read it (not fatal) — check it by hand before trusting a result from this box"
