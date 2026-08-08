@@ -803,6 +803,37 @@ failure is logged and retried against the running engine (15s, doubling to a
 10-minute ceiling) while the serve roles keep serving throughout. It no longer ends
 the process. A node that only clients still exits on a failed connect, as before.
 
+### When the coordinator restarts underneath you (issue #225, ADR-0067)
+A running client holds a live rendezvous association with its coordinator, and a
+coordinator that restarts forgets it. Nothing on the client's side errors when that
+happens — a datagram sent into a forgotten association is accepted by the local
+network stack and dropped on arrival — so until this was fixed the client sent into
+it forever, reported `no coordinator reachable` on every attempt, and only a restart
+of the client recovered it. **On a volunteer that took the exit and relay
+registrations down with it**, silently, because they ride the same connection: the
+coordinator simply stopped hearing from the node and logged nothing at all.
+
+A client now notices within one failed connect attempt and rebuilds the link on a
+fresh socket, with no user action; the serve-side registrations come back with it.
+The log line to recognise names the fault as a local one:
+
+```
+the link this client held to coordinator <addr> has gone stale and is being rebuilt …
+This is a LOCAL fault — this client's own link, NOT the network …
+```
+
+That sentence is the point of it. `no coordinator reachable` means every coordinator
+was silent and is a reason to suspect the network or a block; this one means the
+connection this process was holding stopped working and has been replaced. If you see
+it once around a coordinator deploy, that is the mechanism working. If you see it on
+every attempt for minutes, the coordinator is answering handshakes and nothing else,
+which is worth looking at from the coordinator's side.
+
+One case is not covered: a volunteer sitting in a **healthy session** when its
+coordinator restarts has nothing to ask it, so it does not find out until that session
+ends. Its registrations come back then. A coordinator answers a `register` only to
+reject it, so there is no reply for the node to miss.
+
 ### The same choice on the desktop client
 The desktop client has the same two opt-ins, as two checkboxes in `File → Settings…`,
 with the exit's cost printed next to the exit's own checkbox — see
