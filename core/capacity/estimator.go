@@ -9,7 +9,7 @@ import (
 )
 
 // Sample is one observation of what a node delivered to one client over one
-// scoring window (issue #144). It is derived from a co-signed usage receipt
+// scoring window (old #144). It is derived from a co-signed usage receipt
 // (core/accounting, ADR-0021) — bytes/interval is a throughput both the exit and
 // the client had to agree on, so neither can move it ALONE.
 //
@@ -118,7 +118,7 @@ type Params struct {
 
 	// HardCeiling makes Ceiling a PERMANENT clamp rather than the provisional one
 	// CeilingASes releases. It is the untrusted estimator's whole security property
-	// (issue #158, design §8.1.1): a rating attested by anyone-with-a-credential may
+	// (old #158, design §8.1.1): a rating attested by anyone-with-a-credential may
 	// never exceed Ceiling no matter how many ASes attest, so forging the cheap
 	// (untrusted) signal buys exactly what silence already buys — the ceiling, never
 	// more. The clamp lives HERE, inside the estimator, not in the caller that reads
@@ -131,7 +131,7 @@ type Params struct {
 
 	// Floor is the estimate's lower bound and its starting value. It MUST be > 0:
 	// the ratchet is multiplicative, and a multiplicative ratchet starting at zero
-	// never moves. It is NOT a serve-eligibility floor — that is issue #145's
+	// never moves. It is NOT a serve-eligibility floor — that is old #145's
 	// decision and is policy, not a constant (see DefaultParams).
 	Floor Rate
 
@@ -149,7 +149,7 @@ type Params struct {
 // there).
 //
 // Note what is NOT here: the serve-eligibility floor. Whether a node rated at
-// 2 Mbit is allowed to serve is issue #145's call, and it is POLICY, not a
+// 2 Mbit is allowed to serve is old #145's call, and it is POLICY, not a
 // constant — a 2 Mbit exit is worthless in Frankfurt and precious in a region
 // where it is the only one, and the answer changes with how starved the network
 // is. Floor below is estimator mechanics (the ratchet's zero point), not
@@ -247,12 +247,12 @@ type Estimator struct {
 
 	// informed is true once a window has closed with enough distinct ASes to move the
 	// estimate on real evidence, and false again once decay has pulled that evidence
-	// all the way back to Floor. It is what lets a NodeRating (issue #158) ask whether
+	// all the way back to Floor. It is what lets a NodeRating (old #158) ask whether
 	// a TRUSTED rating actually EXISTS for a node — "trusted decides wherever it exists"
 	// (design §8.1.1, rule 2) — versus the node merely sitting at its unfed Floor, in
 	// which case the untrusted rating decides. An unfed estimator is never informed,
 	// which is exactly the trusted stream's state until the account service stamps
-	// vouched-ness (issue #157 seam). Seed does NOT set it: an install-probe seed is a
+	// vouched-ness (old #157 seam). Seed does NOT set it: an install-probe seed is a
 	// provisional starting point, not earned attestation.
 	informed bool
 }
@@ -410,7 +410,7 @@ func (e *Estimator) Advance(now time.Time) Rate {
 	e.lastObs = observed
 
 	// The provisional ceiling holds until enough distinct ASes have attested — or, for
-	// the untrusted stream (HardCeiling), permanently (issue #158, design §8.1.1).
+	// the untrusted stream (HardCeiling), permanently (old #158, design §8.1.1).
 	ceil := Rate(math.MaxUint64)
 	if e.p.Ceiling != 0 && (e.p.HardCeiling || ases < e.p.CeilingASes) {
 		ceil = e.p.Ceiling
@@ -440,7 +440,7 @@ func (e *Estimator) Advance(now time.Time) Rate {
 	}
 	// This window carried information, whichever way it moved the estimate (a node
 	// sitting exactly at its rating is being re-earned too). Re-base the decay clock,
-	// and mark the estimator informed: a rating now EXISTS (issue #158), even if the
+	// and mark the estimator informed: a rating now EXISTS (old #158), even if the
 	// evidence put it at Floor, until decay expires it.
 	e.lastInform, e.baseEst, e.informed = now, e.est, true
 	return e.est
@@ -499,7 +499,7 @@ func (e *Estimator) decay(now time.Time) {
 		next = e.p.Floor
 		// Decayed all the way back to Floor: the informative evidence has fully
 		// expired, so this estimator no longer holds a rating that "exists" for the
-		// NodeRating combine (issue #158). A future window with fresh evidence re-sets
+		// NodeRating combine (old #158). A future window with fresh evidence re-sets
 		// it (Advance).
 		e.informed = false
 	}
@@ -549,8 +549,8 @@ func (e *Estimator) Status() Status {
 // halves of the lane meet, and the direction of each is what makes the other safe
 // — see the package doc's trust asymmetry.
 //
-// It is NOT an eligibility test. Whether `usable` clears a bar to serve is issue
-// #145's policy decision.
+// It is NOT an eligibility test. Whether `usable` clears a bar to serve is
+// old #145's policy decision.
 func Usable(declared Rate, measured Rate) Rate {
 	if declared == 0 {
 		return measured

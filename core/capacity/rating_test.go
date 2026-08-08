@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// These tests pin the owner decision of issue #157 (design §8.1.1) as encoded in
+// These tests pin the owner decision of old #157 (design §8.1.1) as encoded in
 // NodeRating, and the coordinator-side lifecycle of RatingStore (§8.6). Like the
 // estimator simulations, each pins one rule; if one fails, the decision is not
 // implemented, not the test.
@@ -134,7 +134,7 @@ func TestTrustedDecidesEvenWhenLowerThanUntrusted(t *testing.T) {
 }
 
 // TestUnfedTrustedFallsBackToUntrusted is the whole v1 posture and the seam: with the
-// trusted stream PERMANENTLY EMPTY (no vouched issuer yet, issue #157), a node's rating
+// trusted stream PERMANENTLY EMPTY (no vouched issuer yet, old #157), a node's rating
 // is its untrusted estimate — lifted off Floor to at most Ceiling — NOT pinned at Floor.
 // If Measured returned trusted unconditionally, every node would sit at Floor and the
 // feed would strand the fleet; this is the test that the fleet survives it.

@@ -160,13 +160,13 @@ func (b Bytes) String() string {
 	}
 }
 
-// Limits is what a node's operator declares it is WILLING to serve (issue #143):
+// Limits is what a node's operator declares it is WILLING to serve (old #143):
 // a speed cap and a monthly traffic quota. It is the operator's statement about
 // their own uplink and their own ISP contract — facts no measurement could ever
 // discover, since no probe can read a data cap off a bill.
 //
 // Every field's zero value means "no limit", so the zero Limits is a node with no
-// declared limits at all: exactly today's behaviour, which is what keeps #143
+// declared limits at all: exactly today's behaviour, which is what keeps old #143
 // opt-in and the existing datacenter fleet byte-for-byte unaffected.
 //
 // Limits is self-reported and that is safe — see the package doc's trust

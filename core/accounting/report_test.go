@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The capacity-report signature (issue #158) binds a receipt's client-asserted
+// The capacity-report signature (old #158) binds a receipt's client-asserted
 // saturation bit to the client key that co-signed the receipt, so a node holding the
 // finished receipt can neither forge a report nor flip the bit. These tests pin that.
 
