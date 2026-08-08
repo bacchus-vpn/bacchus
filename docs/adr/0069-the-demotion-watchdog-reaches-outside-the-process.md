@@ -120,6 +120,17 @@ script beside it, and asserts on bytes that the target is unchanged, the marker 
 still there, and the unit was not restarted; then that the in-process demotion
 still happens afterwards.
 
+Both cases were also exercised end to end against a live systemd manager, with the
+shipped script and a unit carrying this `OnFailure=`, using `update.Apply` to
+publish the release. A release whose loader does not exist was rolled back about
+two seconds after the restart that handed over to it, with the unit running the
+restored binary — and `systemctl restart` had returned 0 and reported
+`active/running` for it first, which is §3's second fact happening rather than
+being described. A release that reached `main` and then died produced, in order:
+the script declining the case, the in-process demotion on the next start, the
+supervisor re-execing the previous binary, and a final firing of the script that
+found no marker and did nothing.
+
 ### 3. Two systemd facts, measured rather than assumed
 
 **`OnFailure=` fires on EVERY failed start, not once when the start limit is
