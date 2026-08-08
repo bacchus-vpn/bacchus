@@ -4,7 +4,7 @@
 // coordinator and a node may ship from different releases — a volunteer relay
 // can lag, a client can be mid-update — and without an explicit check, a wire
 // shape neither side actually agrees on fails silently deep inside role logic
-// instead of being caught at the door (issue #8, ADR-0016). Catching drift
+// instead of being caught at the door (old #8, ADR-0016). Catching drift
 // here also matters for detection: an unexpected wire shape from stale nodes
 // is itself a fingerprint (see ADR-0015).
 //
@@ -56,7 +56,7 @@ func Local() Hello {
 // Check validates a peer's Hello against this build's version and reports
 // whether the channel may proceed to role logic. On rejection, reason says
 // which side is behind so the failure is actionable ("clear reject/upgrade
-// path", issue #8) — it contains only protocol/version data, never anything
+// path", old #8) — it contains only protocol/version data, never anything
 // that identifies the peer, so it is always safe to log.
 func Check(peer Hello) (ok bool, reason string) {
 	if peer.Magic != Magic {

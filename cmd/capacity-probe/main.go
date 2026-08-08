@@ -1,4 +1,4 @@
-// capacity-probe (issue #144 design spike) — what an active speed test can and
+// capacity-probe (old #144 design spike) — what an active speed test can and
 // cannot tell you.
 //
 // It does two things, and the second is the point.
@@ -74,7 +74,7 @@ func main() {
 // ordinary clients; whitelist is the set of source IPs it treats specially.
 //
 // A node with an empty whitelist is honest: everyone gets the same rate. A node with
-// the prober's IP in its whitelist is the adversary of issue #144 — "fast to the
+// the prober's IP in its whitelist is the adversary of old #144 — "fast to the
 // tester and throttled to real clients" — and it is a dozen lines. That is the whole
 // argument against active probing, in code: this is not a sophisticated attack, it
 // is an afternoon's work and it defeats any tester whose address can be learned.
@@ -123,8 +123,8 @@ func (n *servingNode) serveOnce(ln net.Listener) {
 
 // measure pulls bytes from addr for d and reports the throughput it saw, plus what
 // the measurement cost. The cost line matters as much as the rate: a periodic active
-// re-test spends this much, on every node, forever — out of the very quota issue
-// #143 exists to protect (design note §6.1, failure 4).
+// re-test spends this much, on every node, forever — out of the very quota
+// old #143 exists to protect (design note §6.1, failure 4).
 func measure(addr string, d time.Duration) (bitsPerSec float64, got int64, err error) {
 	c, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {

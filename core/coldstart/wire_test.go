@@ -96,10 +96,10 @@ func TestBuildResponseCarriesSnapshotWhenGiven(t *testing.T) {
 	}
 }
 
-// TestBuildResponseCarriesFingerprint pins issue #46: a Binding Success
+// TestBuildResponseCarriesFingerprint pins old #46: a Binding Success
 // Response must carry FINGERPRINT, as the last attribute (RFC 5389 §15.5),
 // regardless of whether SNAPSHOT is present — matching the shape pion/turn's
-// own Binding Success response carries on the same shared port (issue #30).
+// own Binding Success response carries on the same shared port (old #30).
 func TestBuildResponseCarriesFingerprint(t *testing.T) {
 	tx := newTxID()
 	addr := netip.MustParseAddrPort("198.51.100.9:3478")
@@ -124,9 +124,9 @@ func TestBuildResponseCarriesFingerprint(t *testing.T) {
 // TestBuildResponseMatchesPionTurnShape pins byte-for-byte parity against
 // pion/turn's actual Binding Success response (built with the real pion/stun
 // library, not a hand-rolled reimplementation of what we think it does) —
-// XOR-MAPPED-ADDRESS + FINGERPRINT, nothing else. This is what issue #46
+// XOR-MAPPED-ADDRESS + FINGERPRINT, nothing else. This is what old #46
 // flagged as missing: without it, the two response shapes sharing the port
-// since issue #30 were trivially separable by a censor doing shape analysis.
+// since old #30 were trivially separable by a censor doing shape analysis.
 func TestBuildResponseMatchesPionTurnShape(t *testing.T) {
 	tx := newTxID()
 	addr := netip.MustParseAddrPort("203.0.113.7:51820")

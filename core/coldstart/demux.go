@@ -6,7 +6,7 @@ import (
 )
 
 // Demux wraps pc so that bootstrap-shaped requests and ordinary STUN/TURN
-// traffic can share one UDP socket and port (issue #30): a STUN Binding
+// traffic can share one UDP socket and port (old #30): a STUN Binding
 // Request carrying the bootstrap USERNAME attribute is answered directly,
 // using the same authenticate-then-maybe-attach-SNAPSHOT logic [Serve] uses;
 // every other packet — a bare Binding Request (ordinary reflexive-address

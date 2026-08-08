@@ -160,7 +160,7 @@ func TestLoadRevocationListMissingFileIsErrNotExist(t *testing.T) {
 
 // TestRevocationListSerialsSorted: Serials returns every revoked serial in a
 // stable sorted order regardless of insertion order — cmd/admission-issue -crl
-// (issue #69) signs exactly this slice, so its output must be deterministic.
+// (old #69) signs exactly this slice, so its output must be deterministic.
 func TestRevocationListSerialsSorted(t *testing.T) {
 	rl := NewRevocationList()
 	if got := rl.Serials(); len(got) != 0 {

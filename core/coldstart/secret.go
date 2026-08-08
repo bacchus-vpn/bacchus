@@ -21,7 +21,7 @@ const (
 )
 
 // GenerateSecret mints a fresh random per-user secretID + secret, for an
-// operator to hand a new user (issue #18 §4.2.2's "signed invite bundle").
+// operator to hand a new user (old #18 §4.2.2's "signed invite bundle").
 func GenerateSecret() (secretID string, secret []byte, err error) {
 	id := make([]byte, SecretIDLen)
 	if _, err := rand.Read(id); err != nil {
@@ -47,7 +47,7 @@ type Invite struct {
 	Secret      []byte // len SecretLen
 	PublicKey   ed25519.PublicKey
 
-	// AdmissionKey is the admission authority's public key (issue #60), the
+	// AdmissionKey is the admission authority's public key (old #60), the
 	// anchor a client verifies an exit's admission credential against. It is
 	// optional: an operator who distributes the anchor out of band (or runs no
 	// admission) leaves it nil and a v1 invite is minted; supplying it selects
@@ -56,7 +56,7 @@ type Invite struct {
 	// bootstrapped purely from an invite verify exits with no extra setup.
 	AdmissionKey ed25519.PublicKey
 
-	// CRL is a signed revocation bundle (issue #69), the encoded string form of
+	// CRL is a signed revocation bundle (old #69), the encoded string form of
 	// a core/admission.CRL, distributed alongside the admission anchor so a
 	// client bootstrapped purely from an invite can reject a revoked exit
 	// credential with no extra setup. Opaque here — coldstart only carries the
@@ -69,7 +69,7 @@ type Invite struct {
 var errInviteFormat = errors.New("coldstart: malformed invite")
 
 // Invite wire versions. The version byte doubles as the presence flag for the
-// optional admission anchor (issue #60) and revocation bundle (issue #69): v1
+// optional admission anchor (old #60) and revocation bundle (old #69): v1
 // has neither, v2 adds the anchor before the coordinator address, v3 adds the
 // length-prefixed CRL after the anchor — so there is never an ambiguous
 // all-zero/empty slot on the wire. Decode accepts all three; Encode picks the
@@ -91,8 +91,8 @@ const crlLenPrefixSize = 2
 const maxCRLLen = 1<<16 - 1
 
 // EncodeInvite packs inv into a compact, copy-pasteable / QR-able string. The
-// version emitted is v3 when inv carries a CRL (issue #69), v2 when it carries
-// only an admission anchor (issue #60), v1 otherwise, so an operator using
+// version emitted is v3 when inv carries a CRL (old #69), v2 when it carries
+// only an admission anchor (old #60), v1 otherwise, so an operator using
 // neither produces exactly the old bytes. A CRL without an anchor is rejected:
 // the recipient would have no key to verify it against.
 func EncodeInvite(inv Invite) (string, error) {
@@ -139,8 +139,8 @@ func EncodeInvite(inv Invite) (string, error) {
 	return "bacchus1:" + base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-// DecodeInvite reverses [EncodeInvite], accepting v1 (neither), v2 (issue
-// #60, admission anchor only), and v3 (issue #69, anchor + CRL) invites. A v1
+// DecodeInvite reverses [EncodeInvite], accepting v1 (neither), v2
+// (old #60, admission anchor only), and v3 (old #69, anchor + CRL) invites. A v1
 // invite decodes with a nil AdmissionKey and CRL; a v2 invite with a nil CRL.
 func DecodeInvite(s string) (Invite, error) {
 	const prefix = "bacchus1:"

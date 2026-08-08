@@ -22,8 +22,8 @@ import (
 // real money out of a volunteer's pocket, and "let in-flight sessions drain" is an
 // UNBOUNDED overshoot (any number of sessions, each with any amount left to send).
 // The cost is bounded on the other side — a cut client reconnects onto another
-// exit through the pool's existing ladder (ADR-0028) and its auto-reconnect (issue
-// #2), so the user loses a moment and the operator does not lose the bill.
+// exit through the pool's existing ladder (ADR-0028) and its auto-reconnect
+// (old #2), so the user loses a moment and the operator does not lose the bill.
 var ErrQuotaExhausted = errors.New("capacity: declared monthly quota exhausted")
 
 // Checkpointing bounds how much quota a crash can lose.
@@ -68,8 +68,8 @@ func (q *Quota) granularity() Bytes {
 	return g
 }
 
-// Quota tracks bytes served against the operator's declared monthly cap (issue
-// #143) and answers the one question the rest of the system asks: may this node
+// Quota tracks bytes served against the operator's declared monthly cap
+// (old #143) and answers the one question the rest of the system asks: may this node
 // still be given work?
 //
 // It is safe for concurrent use by the goroutines copying each direction of every
@@ -86,14 +86,14 @@ func (q *Quota) granularity() Bytes {
 // resumes the cycle it was in.
 //
 // "Never" is true of everything that reaches this counter. It holds across every
-// path the FORWARDER takes (see core/forwarder.go's meter), and — since issue #163 —
+// path the FORWARDER takes (see core/forwarder.go's meter), and — since old #163 —
 // across the reality transport's camouflage splice too, which now counts its bytes
 // here through realitySpliceLimits (design §8.7). The one caveat is that the splice
 // is enforced at ADMISSION, not per byte: a new splice is refused once the cap is
 // spent, but one already in flight completes rather than being cut mid-response
 // (cutting is the tell ADR-0027 exists to avoid). So "never exceeded" holds up to a
 // bounded overshoot — whatever the in-flight splices drain before their timeout — not
-// the unbounded, silent overshoot a node running -transport reality had before #163.
+// the unbounded, silent overshoot a node running -transport reality had before old #163.
 //
 // # Whose clock
 //
@@ -320,7 +320,7 @@ func (q *Quota) Remaining(now time.Time) Bytes {
 // nothing — so every byte it handles is carried, and billed, twice.
 //
 // This is why a forwarded byte costs the quota 2. MonthlyQuota is the operator's ISP
-// cap, and a residential cap — the population #143 exists to serve — meters both
+// cap, and a residential cap — the population old #143 exists to serve — meters both
 // directions against one number. Counting each byte once would let a declared 400GB
 // spend 800GB of a real 400GB cap: a 100% overshoot, silently, in precisely the
 // direction that produces the overage bill this feature exists to prevent. Compare
@@ -342,7 +342,7 @@ func (q *Quota) Remaining(now time.Time) Bytes {
 // The case this over-counts is a node billed for egress only, as most VPSes are;
 // there the operator declares twice what they mean to donate. That asymmetry is
 // deliberate. Over-counting costs a node that stops early; under-counting costs a
-// volunteer an overage bill they did not agree to. #143 prefers under-serving every
+// volunteer an overage bill they did not agree to. Old #143 prefers under-serving every
 // time, and the same preference decides the low quantile in Estimator.
 const LinkCrossings = 2
 

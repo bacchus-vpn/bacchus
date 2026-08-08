@@ -16,7 +16,7 @@ const (
 // a mode. It is comparable, so it doubles as a map key for de-duplication and
 // health memory.
 //
-// The country replaced an exit id here (issue #146, ADR-0042), and the substitution is
+// The country replaced an exit id here (old #146, ADR-0042), and the substitution is
 // not cosmetic: a candidate must name something the client can actually ASK FOR, and
 // under country-only assignment the client cannot ask for an exit. The coordinator
 // picks the exit, so which exit a candidate lands on is an OUTCOME of dialing it — it
@@ -33,7 +33,7 @@ type Candidate struct {
 // measured client<->exit round-trip observed for that country; zero means unknown
 // (never validated), which sorts after every known-RTT country but is still tried.
 //
-// Available/Busy come straight from the coordinator's aggregate (#147) and are what
+// Available/Busy come straight from the coordinator's aggregate (old #147) and are what
 // let the ladder skip a country that cannot take a session at all, rather than
 // spending a whole race discovering it by refusal.
 type Country struct {
@@ -76,7 +76,7 @@ type LadderInput struct {
 // sinking can otherwise repeat an entry — so the ladder never dials one path
 // twice.
 //
-// A BUSY country is dropped entirely rather than sunk (#147): the coordinator has
+// A BUSY country is dropped entirely rather than sunk (old #147): the coordinator has
 // already said it will refuse, so dialing it spends a whole candidate's stagger and
 // timeout to be told what we were told at list time. That is the one place the
 // aggregate the client is shown feeds selection directly.

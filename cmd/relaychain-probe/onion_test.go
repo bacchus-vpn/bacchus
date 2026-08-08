@@ -55,7 +55,7 @@ func TestWrongHopKeyFails(t *testing.T) {
 	}
 }
 
-// TestCredentialSurvivesChain pins the #60/#69 property the design leans on: the
+// TestCredentialSurvivesChain pins the old #60/#69 property the design leans on: the
 // innermost admission credential the exit presents must reach the client unchanged
 // through every relay layer. run() verifies the credential inside the client and
 // fails if it did not, so this exercises the longest chain the probe supports.

@@ -7,9 +7,9 @@ import (
 )
 
 // The ladder's per-exit dimension became per-COUNTRY with country-only assignment
-// (issue #146, ADR-0042): a candidate must name something the client can ask the
-// coordinator for, and it can no longer ask for an exit. These tests are the pre-#146
-// ones translated to that surface — same tier order, same learned-winner and cooling
+// (old #146, ADR-0042): a candidate must name something the client can ask the
+// coordinator for, and it can no longer ask for an exit. These tests predate old #146,
+// translated to that surface — same tier order, same learned-winner and cooling
 // behaviour — plus the two properties the country dimension adds (busy countries, and
 // a chosen geo that is honoured even when busy).
 
@@ -18,7 +18,7 @@ func at(code string, rttMs int) Country {
 	return Country{Code: code, Available: 2, RTT: time.Duration(rttMs) * time.Millisecond}
 }
 
-// busy builds a country the coordinator has said it will refuse (#147).
+// busy builds a country the coordinator has said it will refuse (old #147).
 func busy(code string) Country {
 	return Country{Code: code, Available: 0, Busy: true}
 }
@@ -73,7 +73,7 @@ func TestLadderGeoRestrictsToOneCountry(t *testing.T) {
 }
 
 // TestLadderSkipsBusyCountriesWhenChoosingFreely: with no geo set, a country the
-// coordinator has already said it will refuse is not raced (#147). Dialing it would
+// coordinator has already said it will refuse is not raced (old #147). Dialing it would
 // spend a whole candidate's stagger and timeout to be told what the list already said.
 func TestLadderSkipsBusyCountriesWhenChoosingFreely(t *testing.T) {
 	got := Ladder(LadderInput{
@@ -96,7 +96,7 @@ func TestLadderSkipsBusyCountriesWhenChoosingFreely(t *testing.T) {
 // Silently substituting a different country for the one the user asked for would
 // egress them somewhere they did not choose — the worst failure this feature has. So a
 // user-chosen country is raced even when busy; the connect is refused, and the refusal
-// (#147's country-busy) reaches them as an answer rather than as a silent reroute.
+// (old #147's country-busy) reaches them as an answer rather than as a silent reroute.
 func TestLadderHonoursAChosenBusyCountry(t *testing.T) {
 	got := Ladder(LadderInput{
 		Geo:        "NL",

@@ -90,7 +90,7 @@ func TestVerifyCRLBadSignature(t *testing.T) {
 	}
 }
 
-// TestParseCRLMalformed covers issue #69's malformed-CRL requirement directly
+// TestParseCRLMalformed covers old #69's malformed-CRL requirement directly
 // against the admission package: every shape of bad input is rejected, none
 // panics.
 func TestParseCRLMalformed(t *testing.T) {
@@ -166,7 +166,7 @@ func TestCRLEmptyBundleRevokesNothing(t *testing.T) {
 	}
 }
 
-// ClientCRL (issue #90): the mutable, atomically-swapped bundle a background
+// ClientCRL (old #90): the mutable, atomically-swapped bundle a background
 // reload keeps fresh. These are unit tests at the admission-package layer;
 // core/exit_admission_test.go and core/crl_reload_test.go cover it wired into
 // buildExitVerifier and Engine.reloadCRLLoop end to end.

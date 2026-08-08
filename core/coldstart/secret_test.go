@@ -63,7 +63,7 @@ func TestInviteEncodeDecodeRoundTrip(t *testing.T) {
 }
 
 // TestInviteWithAdmissionKeyRoundTrip: a v2 invite carries the admission anchor
-// (issue #60) through encode/decode alongside the snapshot-signing key.
+// (old #60) through encode/decode alongside the snapshot-signing key.
 func TestInviteWithAdmissionKeyRoundTrip(t *testing.T) {
 	id, secret, err := GenerateSecret()
 	if err != nil {
@@ -139,7 +139,7 @@ func TestDecodeInviteRejectsBadInput(t *testing.T) {
 	}
 }
 
-// TestInviteWithCRLRoundTrip: a v3 invite (issue #69) carries the revocation
+// TestInviteWithCRLRoundTrip: a v3 invite (old #69) carries the revocation
 // bundle through encode/decode alongside the admission anchor and snapshot key.
 func TestInviteWithCRLRoundTrip(t *testing.T) {
 	id, secret, err := GenerateSecret()

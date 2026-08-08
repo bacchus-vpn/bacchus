@@ -13,7 +13,7 @@ import (
 
 // gatewayFingerprint returns a stable, non-user-identifying token for the
 // network's default gateway on Windows — the gateway's MAC, resolved via ARP and
-// hex-encoded (issue #77). The gateway MAC identifies the access point / router
+// hex-encoded (old #77). The gateway MAC identifies the access point / router
 // that everyone on the network shares, never the user's own device, and it is
 // only ever mixed into NetworkKey's hash, so it is never persisted raw. It is
 // what lets NetworkKey tell apart two different networks that happen to share the

@@ -39,7 +39,7 @@ func TestNetworkKeyFrom(t *testing.T) {
 
 // TestNetworkKeyFromBackwardCompatible pins the exact digest for the no-gateway
 // path. It must never change silently: it is the on-disk key every device
-// without a gateway lookup (and every pre-#77 build) already learned under, and
+// without a gateway lookup (and every build predating old #77) already learned under, and
 // changing the hashing would invalidate all of those buckets at once.
 func TestNetworkKeyFromBackwardCompatible(t *testing.T) {
 	const wantNoGW = "fa7d497429cba980"
@@ -52,7 +52,7 @@ func TestNetworkKeyFromBackwardCompatible(t *testing.T) {
 	}
 }
 
-// TestNetworkKeyFromGateway pins the #77 hardening: mixing in a gateway
+// TestNetworkKeyFromGateway pins the old #77 hardening: mixing in a gateway
 // fingerprint breaks the same-subnet collision (two networks that share a subnet
 // but sit behind different access points get different keys), stays stable for a
 // given gateway, and — crucially — leaves the no-gateway key untouched so the
@@ -65,7 +65,7 @@ func TestNetworkKeyFromGateway(t *testing.T) {
 	cafeA := networkKeyFrom(subnet, "aabbccddeeff")
 	cafeB := networkKeyFrom(subnet, "112233445566")
 	if cafeA == cafeB {
-		t.Fatal("same subnet behind different gateways must produce different keys (#77)")
+		t.Fatal("same subnet behind different gateways must produce different keys (old #77)")
 	}
 
 	// Stable for a given gateway.

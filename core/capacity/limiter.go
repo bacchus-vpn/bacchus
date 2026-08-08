@@ -38,7 +38,7 @@ const burstBytes = 64 * 1024
 //   - This is the SOUND half. The coordinator learns of a node's state only on its
 //     next 10s register; a pool has several coordinators (ADR-0020) expiring
 //     independently; and a coordinator may be buggy, partitioned, or hostile
-//     (ADR-0020, #60/#69 — the standing assumption is that it is not trusted with
+//     (ADR-0020, old #60/#69 — the standing assumption is that it is not trusted with
 //     anything that matters).
 //
 // The operator, not the coordinator, pays the overage bill. So the guarantee is

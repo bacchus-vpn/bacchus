@@ -6,7 +6,7 @@
 // the protocol can register as a relay/exit (and then see traffic routed
 // through them) or connect as a client (and enumerate the network). That is an
 // authentication problem, not a licensing one: a permissive or a proprietary
-// license does nothing here (issue #42). This package is the piece that
+// license does nothing here (old #42). This package is the piece that
 // actually enforces membership.
 //
 // A Credential is a signed statement by the operator's admission authority —

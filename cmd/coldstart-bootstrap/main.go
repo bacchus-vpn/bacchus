@@ -1,5 +1,5 @@
 // coldstart-bootstrap is the client-side half of the cold-start bootstrap
-// (issue #18): given an invite string minted by cmd/coldstart-issue, it
+// (old #18): given an invite string minted by cmd/coldstart-issue, it
 // performs the authenticated STUN-shaped fetch (core/coldstart.Bootstrap),
 // verifies the coordinator's signature, prints the resulting directory
 // snapshot, and caches it to disk.
@@ -26,7 +26,7 @@ import (
 func main() {
 	invite := flag.String("invite", "", "invite string from cmd/coldstart-issue (required)")
 	cachePath := flag.String("cache", "", "path to cache the signed snapshot at on success (optional)")
-	crlOut := flag.String("crl-out", "", "path to save the invite's revocation bundle at, if it carries one (issue #69); feed the result to bacchus-node -admission-crl (optional)")
+	crlOut := flag.String("crl-out", "", "path to save the invite's revocation bundle at, if it carries one (old #69); feed the result to bacchus-node -admission-crl (optional)")
 	timeout := flag.Duration("timeout", 5*time.Second, "bootstrap timeout")
 	flag.Parse()
 
@@ -38,14 +38,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("decode invite: %v", err)
 	}
-	// Surface the admission anchor (issue #60) the invite carries, if any: a real
+	// Surface the admission anchor (old #60) the invite carries, if any: a real
 	// client wires this into core.Config.AdmissionPubKey to verify exits end to
 	// end. A v1 invite carries none and the client falls open unless it has the
 	// anchor from elsewhere (e.g. the -admission-pubkey override).
 	if inv.AdmissionKey != nil {
 		fmt.Fprintf(os.Stderr, "invite carries admission anchor %s\n", hex.EncodeToString(inv.AdmissionKey))
 	}
-	// Surface the revocation bundle (issue #69) the invite carries, if any: a
+	// Surface the revocation bundle (old #69) the invite carries, if any: a
 	// real client wires this into core.Config.AdmissionCRL alongside the anchor
 	// above. A v1/v2 invite carries none and the client does not check
 	// revocation unless it has a bundle from elsewhere (e.g. -admission-crl).

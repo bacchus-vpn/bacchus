@@ -1,5 +1,5 @@
 // Package selection is the pure, side-effect-free core of the client's
-// connection strategy (issue #15): given the exits a coordinator advertised, the
+// connection strategy (old #15): given the exits a coordinator advertised, the
 // transports this build carries, and what worked here before, it decides the
 // order in which candidate paths are tried and remembers the winner so it is
 // tried first next time.

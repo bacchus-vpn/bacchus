@@ -24,7 +24,7 @@ const DefaultTTL = 14 * 24 * time.Hour
 // [NetworkKey]), and there is no destination, address, or user-traffic timing anywhere
 // in it. The file it lives in never leaves the device.
 //
-// It no longer records WHICH EXIT served the session (issue #146). That is not merely
+// It no longer records WHICH EXIT served the session (old #146). That is not merely
 // a consequence of the client no longer choosing one: an exit id is the most granular
 // thing this file ever held, and with selection unable to act on it there is nothing
 // left to weigh against keeping a per-device history of the exits a user has been
@@ -44,7 +44,7 @@ func (r Record) candidate() Candidate {
 }
 
 // Store remembers which paths worked, per network+geo, so the winner is tried
-// first next time (issue #15, "learn per-network"). It persists to a single JSON
+// first next time (old #15, "learn per-network"). It persists to a single JSON
 // file on the device and is safe for concurrent use. The zero value (no path) is
 // a fully working in-memory store — every method is safe on it — which is what
 // tests and clients that opt out of persistence use.
@@ -79,7 +79,7 @@ func Open(path string) (*Store, error) {
 		if r.Country == "" {
 			// A record with no country cannot be turned into a connect: the
 			// coordinator refuses one that names none. Records written before
-			// country-only assignment (issue #146) keyed on an exit id and decode to
+			// country-only assignment (old #146) keyed on an exit id and decode to
 			// exactly this shape, so they are dropped and re-learned rather than
 			// resurfaced as a candidate that would be refused on every use. Dropped
 			// silently, consistent with how this file already treats a corrupt or

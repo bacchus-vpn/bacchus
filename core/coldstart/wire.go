@@ -32,7 +32,7 @@ const (
 	// request authenticated.
 	attrSnapshot = 0xC001
 	// attrProof carries the requester's proof-of-prior-contact in a mesh-walk
-	// courier request (issue #31): a previously-received coordinator-signed
+	// courier request (old #31): a previously-received coordinator-signed
 	// snapshot. Comprehension-optional, like attrSnapshot; its presence is what
 	// distinguishes a mesh-walk request from an ordinary reflexive-gathering
 	// Binding Request, the same way USERNAME distinguishes a bootstrap request.
@@ -164,7 +164,7 @@ func buildCourierRequest(tx txID, proof []byte) []byte {
 // buildResponse encodes a Binding Success Response carrying the reflexive
 // address, when snapshot is non-nil the signed-snapshot attribute, and always
 // a trailing FINGERPRINT — the same shape pion/turn's own Binding Success
-// response carries, since #30 put both on the same UDP port/process. A
+// response carries, since old #30 put both on the same UDP port/process. A
 // response never depends on whether the peer's request authenticated except
 // through the caller's choice of snapshot — the header/attribute shape is
 // identical either way, so an unauthenticated prober's response is

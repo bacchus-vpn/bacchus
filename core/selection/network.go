@@ -10,7 +10,7 @@ import (
 
 // NetworkKey returns a stable, opaque fingerprint of the network the device is
 // attached to right now — the key under which a winning path is remembered
-// (issue #15, "learn per-network"). Its contract:
+// (old #15, "learn per-network"). Its contract:
 //
 //   - STABLE per network: two connects on the same operator/network return the
 //     SAME key, so the learned winner is reused instead of re-raced.
@@ -36,7 +36,7 @@ import (
 // fingerprint of the DEFAULT GATEWAY — its MAC where a cheap ARP/neighbour lookup
 // is available (Windows; see gatewayFingerprint) — which identifies the access
 // point, not the user, and differs between the two cafés even when their subnets
-// match (issue #77). It is mixed into the same hash, so still no raw MAC is
+// match (old #77). It is mixed into the same hash, so still no raw MAC is
 // stored. Where the lookup isn't available (other platforms, or no resolvable
 // gateway) gatewayFingerprint returns "" and the key is exactly the subnet+iface
 // digest as before — the collision is merely not broken, never a regression, and
@@ -82,7 +82,7 @@ func NetworkKey() string {
 // regardless of gw (offline means there is no meaningful gateway anyway).
 //
 // The gateway segment is appended, domain-separated, ONLY when gw is non-empty:
-// an empty gw reproduces the exact pre-#77 digest, so a device whose platform
+// an empty gw reproduces the exact digest from before old #77, so a device whose platform
 // has no gateway lookup keeps its already-learned buckets rather than having
 // them silently invalidated on upgrade.
 func networkKeyFrom(subnets []string, gw string) string {

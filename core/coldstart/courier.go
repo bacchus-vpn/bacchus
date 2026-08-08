@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Mesh-walk recovery (issue #31, design §4.3) — the "warm re-bootstrap".
+// Mesh-walk recovery (old #31, design §4.3) — the "warm re-bootstrap".
 //
 // Once a client has ever connected it has met peers. If every coordinator it
 // knows goes unreachable, it must not fail cold: it asks any node it knows — even
@@ -24,7 +24,7 @@ import (
 // re-verifies that signature with Verify before trusting a byte of it. So the
 // worst a hostile courier can do is serve a stale (but genuine) snapshot or serve
 // nothing — never a poisoned directory. This is the same signed-snapshot mechanism
-// the coordinator pool (issue #6) hands out; a courier is just another dispenser of
+// the coordinator pool (old #6) hands out; a courier is just another dispenser of
 // it, reached when the coordinators themselves cannot be.
 //
 // Anti-probe (design principle #4). The courier serves the snapshot only to a
@@ -123,8 +123,8 @@ func handleCourierRequest(raw []byte, reflexive netip.AddrPort, pub ed25519.Publ
 
 // servableSnapshot returns the cached snapshot only while it is still fresh, or nil
 // once it has expired. This enforces the courierRefresh (30s) vs coordinator
-// snapshot-TTL (issue #31, ~5 min) coupling in the serve path rather than leaving it
-// to hold merely by cadence (issue #115): while a courier's coordinator is up, its
+// snapshot-TTL (old #31, ~5 min) coupling in the serve path rather than leaving it
+// to hold merely by cadence (old #115): while a courier's coordinator is up, its
 // 30s refresh keeps the cache well inside the TTL; but if that coordinator goes
 // unreachable for longer than the TTL, the last cached snapshot ages out, and a
 // courier must then serve nothing — its entries may already be gone. The client
