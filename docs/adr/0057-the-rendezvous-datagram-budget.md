@@ -272,8 +272,10 @@ record does not pre-empt it.
 > reason: the fixture chain got 40 bytes smaller, not the wire. A real issuer cert is
 > *larger* than any of these — the account service stamps a `note` and does not
 > truncate its clock, and this repository's own frozen chain is 382 bytes — so the 378
-> and the 476 understate what the move bought rather than overstating it, which is the
-> safe direction for a budget.
+> understates what the move removed rather than overstating it. The 476 leans the
+> other way, because the chain still riding the connect is heavier in production than
+> in any fixture; that is the ~34 bytes `minConnectHeadroom` already discounts, and it
+> is why the floor stays at 400 while the fixture now measures 516.
 
 > **§4's `EMSGSIZE` diagnosis survives the shaped hop, measured rather than assumed
 > (ADR-0062 §6).** The datagram the kernel refuses is now a DTLS record, and the
