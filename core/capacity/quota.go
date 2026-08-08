@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 )
 
 // ErrQuotaExhausted ends a transfer that would carry a node past its operator's
@@ -403,9 +405,38 @@ func (qr *quotaReader) Read(p []byte) (int, error) {
 
 // checkpoint writes the current state to disk. Caller holds q.mu.
 //
-// Write-to-temp-then-rename, so a crash mid-write leaves the previous checkpoint
-// intact rather than a truncated file that NewQuota would refuse to parse (which
-// would strand the node until an operator deleted it).
+// Installed through core/atomicfile rather than written in place, so a crash
+// mid-write leaves the previous checkpoint intact rather than a truncated file
+// that NewQuota would refuse to parse (which would strand the node until an
+// operator deleted it).
+//
+// It used to stage under a FIXED name (path + ".tmp") and rename WITHOUT
+// flushing — issue #188's two defects, and both of them bite differently here
+// than anywhere else in the repository:
+//
+//   - The missing flush is the one that mattered, because a crash is not the
+//     exotic case for this file. It is the case the whole type exists for: a
+//     quota an unclean stop resets is not a quota. A rename that became visible
+//     ahead of its bytes left a zero-length checkpoint, and NewQuota treats an
+//     unparseable checkpoint as a hard startup error — deliberately, since
+//     starting from zero would serve a whole fresh month against a cap the
+//     operator has already spent. So the node refuses to start until somebody
+//     deletes the file, and deleting it is what forgets the usage.
+//   - The fixed name is the milder half here: checkpoint's caller holds q.mu,
+//     so one process cannot race itself. Two node processes sharing a state
+//     path can, and nothing in this package can prevent that — but with a
+//     unique staged name they now only lose an update to each other, rather
+//     than installing a file neither of them wrote.
+//
+// The flush costs something and it is worth naming rather than discovering: q.mu
+// is held across it, and the metered reader takes q.mu twice per Read, so a
+// checkpoint now stalls forwarding for the length of an fsync instead of the
+// length of a write(2). That is bounded by the checkpoint CADENCE — once per
+// granularity() bytes or per flushInterval, never per read — so it is a few
+// milliseconds every few seconds on the hardware this targets. Dropping the lock
+// around the write instead would let two checkpoints land out of order and
+// install an older total over a newer one, which is the one failure this
+// counter must not have.
 //
 // A failure is recorded in flushErr and does not stop the node: refusing to serve
 // because a disk is full would turn a bookkeeping problem into an outage, and the
@@ -424,16 +455,18 @@ func (q *Quota) checkpoint(now time.Time) {
 		q.flushErr = err
 		return
 	}
-	tmp := q.path + ".tmp"
 	if err := os.MkdirAll(filepath.Dir(q.path), 0o755); err != nil {
 		q.flushErr = err
 		return
 	}
-	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
-		q.flushErr = err
-		return
-	}
-	if err := os.Rename(tmp, q.path); err != nil {
+	// 0644, and the odd mode out in this repository. Every other atomic writer
+	// here installs 0600 because it is writing a secret; this file is the
+	// opposite — quotaState's own doc says an operator debugging "why is my node
+	// not serving" must be able to cat it, and it holds a byte count and a date.
+	// Narrowing it to match the others would take that away to protect nothing,
+	// so the mode is a parameter of the shared writer rather than a property of
+	// it (ADR-0066 §3).
+	if err := atomicfile.Write(q.path, append(b, '\n'), 0o644); err != nil {
 		q.flushErr = err
 		return
 	}

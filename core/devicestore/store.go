@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 	"github.com/bacchus-vpn/bacchus/core/devicecred"
 )
 
@@ -195,6 +196,29 @@ func (s *Store) Put(c Credential) error {
 	return save(path, rec)
 }
 
+// save installs the record at path through core/atomicfile, which stages a
+// complete file beside the target, flushes it and renames it over the target.
+//
+// This used to stage under a FIXED name (path + ".tmp") and rename WITHOUT
+// flushing, which is both halves of issue #188:
+//
+//   - No flush meant the rename could become visible ahead of the bytes it
+//     points at, so a machine that lost power just after a renewal could come
+//     back holding a zero-length credential file. Open soft-fails an unreadable
+//     file to empty, so that reads as "this device holds no credential" and the
+//     next connect is refused until an enrolment or renewal replaces it —
+//     recoverable, but silently and only after a user-visible failure.
+//   - A fixed staged name meant two savers of this file staged into ONE file
+//     and the rename installed the mixture. The credential strings are opaque
+//     envelopes checked by signature, so a mixture is not a subtly wrong
+//     credential; it is an unparseable one, reached without any crash at all.
+//     Whether two savers can coexist is a question for a different layer
+//     (clients/fyne's singleinstance guard, issue #185), and this no longer
+//     depends on the answer.
+//
+// The parent directory is still created here rather than by the writer: 0700 is
+// this store's choice, and it is the mode a directory holding a device
+// credential should have.
 func save(path string, rec record) error {
 	b, err := json.Marshal(rec)
 	if err != nil {
@@ -203,11 +227,7 @@ func save(path string, rec record) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, b, 0o600)
 }
 
 // expiryBody is the subset of devicecred.DeviceCredential's JSON shape Expiry

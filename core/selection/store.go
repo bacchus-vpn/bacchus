@@ -7,6 +7,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 )
 
 // DefaultTTL is how long a learned record stays trusted. Networks change — an
@@ -173,8 +175,21 @@ func (s *Store) expired(r Record, now time.Time) bool {
 	return s.ttl > 0 && now.Sub(r.At) > s.ttl
 }
 
-// save writes the current records to the file atomically (temp + rename) so a
-// crash mid-write can't corrupt the cache. A no-path store is in-memory only.
+// save installs the current records through core/atomicfile: a complete file is
+// staged beside the target, flushed and renamed over it, so a crash mid-write
+// leaves the previous cache rather than a truncated one. A no-path store is
+// in-memory only.
+//
+// It used to stage under a FIXED name (path + ".tmp") and rename WITHOUT
+// flushing — issue #188's two defects. The consequences are the mildest of the
+// three writers that had them, and worth naming precisely rather than waving
+// at: this file is a latency cache, Open discards it wholesale when it does not
+// parse, and the cost of losing it is one round of discovery. What it is NOT is
+// a file that can afford to be quietly wrong, and a fixed staged name left that
+// to luck: two savers interleaving into one staged file almost always produce
+// JSON that does not parse, and "almost always" is the objection — whether this
+// cache stays trustworthy should not depend on how two writers' bytes happened
+// to land.
 func (s *Store) save() error {
 	s.mu.Lock()
 	if s.path == "" {
@@ -197,12 +212,10 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
+	// The parent directory is created here rather than by the writer: 0700 is
+	// this store's choice, and it is what keeps a per-user cache per-user.
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, b, 0o600)
 }

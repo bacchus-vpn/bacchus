@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -309,5 +312,111 @@ func TestNeedsRenewal(t *testing.T) {
 				t.Fatalf("NeedsRenewal = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// Issue #188: this store used to stage under a FIXED name (path + ".tmp"). A
+// second saver of the same file staged into that same file, and whichever
+// rename ran last installed a mixture of the two.
+//
+// Asserted without a race, because the property is structural rather than
+// statistical: a file sitting at the old staged name is now UNTOUCHED by a
+// save. Under the old writer that file WAS the staging area — it would have
+// been truncated, refilled and renamed away.
+func TestStore_PutDoesNotStageUnderThePredictableName(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credential.json")
+	squatter := path + ".tmp"
+	if err := os.WriteFile(squatter, []byte("not ours"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Put(Credential{Device: "bacchusd1:cred", IssuerCert: "bacchusi1:cert"}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	b, err := os.ReadFile(squatter)
+	if err != nil {
+		t.Fatalf("the save consumed %s, so it is still staging under a name another saver can pick: %v", squatter, err)
+	}
+	if string(b) != "not ours" {
+		t.Errorf("%s now holds %q; a save must stage under a name it created itself", squatter, b)
+	}
+}
+
+// The same defect from the other side: two savers of one file, concurrently,
+// and every state the file is ever observed in has to be one saver's whole
+// record. A mixture parses as garbage and Open soft-fails it to empty, which is
+// this store silently forgetting a credential it was told to persist.
+func TestStore_ConcurrentSaversNeverInstallAMixture(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credential.json")
+
+	// Two stores at one path is what two client processes sharing a state
+	// directory are. Their in-memory halves are independent by construction;
+	// the file is the only thing they share.
+	creds := []Credential{
+		{Device: "bacchusd1:" + strings.Repeat("A", 400), IssuerCert: "bacchusi1:" + strings.Repeat("a", 900), Admission: "bacchusc1:" + strings.Repeat("1", 300)},
+		{Device: "bacchusd1:" + strings.Repeat("B", 700), IssuerCert: "bacchusi1:" + strings.Repeat("b", 200)},
+	}
+
+	var writers, readers sync.WaitGroup
+	stop := make(chan struct{})
+	var reads atomic.Int64
+
+	readers.Add(1)
+	go func() {
+		defer readers.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			b, err := os.ReadFile(path)
+			if err != nil || len(b) == 0 {
+				continue
+			}
+			var rec record
+			if err := json.Unmarshal(b, &rec); err != nil {
+				t.Errorf("a reader observed %d bytes of unparseable JSON: %v — two savers interleaved into one staged file", len(b), err)
+				return
+			}
+			got := Credential{Device: rec.Cred, IssuerCert: rec.IssuerCert, Admission: rec.Admission}
+			if got != creds[0] && got != creds[1] {
+				t.Errorf("a reader observed a credential no saver wrote: %+v", got)
+				return
+			}
+			reads.Add(1)
+		}
+	}()
+
+	for i := range creds {
+		writers.Add(1)
+		go func(i int) {
+			defer writers.Done()
+			s, err := Open(path)
+			if err != nil {
+				t.Errorf("Open: %v", err)
+				return
+			}
+			for n := 0; n < 60; n++ {
+				if err := s.Put(creds[i]); err != nil {
+					t.Errorf("Put: %v", err)
+					return
+				}
+			}
+		}(i)
+	}
+	writers.Wait()
+	close(stop)
+	readers.Wait()
+
+	if reads.Load() == 0 {
+		t.Error("no reader ever observed the file; this test proved nothing")
 	}
 }
