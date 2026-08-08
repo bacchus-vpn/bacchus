@@ -61,6 +61,18 @@ type Config struct {
 	// fetch inside the tunnel is bytes in a session, which is what a session is for.
 	Gate func() error
 
+	// CurrentRelease is the release this build IS, as bare MAJOR.MINOR.PATCH.
+	//
+	// Empty — the production value — means core/version's link-time stamp, and an
+	// UNSTAMPED build then refuses to update at all: a binary that cannot state its
+	// own release cannot tell whether a release is newer than itself, and the answer
+	// it would compute (0.0.0, below everything) would have every development build
+	// replace itself with a shipped one at the first opportunity.
+	//
+	// Set it only when the caller knows its release by some other means. Today that
+	// is tests, which have no linker flag to reach.
+	CurrentRelease string
+
 	// Now and Log are seams for tests and for a caller that owns its logging. Nil
 	// uses time.Now and the standard logger.
 	Now func() time.Time
@@ -151,14 +163,9 @@ type Outcome struct {
 // promise this function keeps by being careful; it is a consequence of Apply being
 // the only thing in this package that touches the target, and Apply running last.
 func (u *Updater) Check(ctx context.Context) (Outcome, error) {
-	if !version.Stamped() {
-		// A build that cannot state its own release cannot tell whether a release is
-		// newer than itself, and the answer it would compute — 0.0.0, below every
-		// release — would have it replace a development binary with a shipped one at
-		// the first opportunity. core/version's own doc records why the unstamped case
-		// must stay representable rather than be given a plausible number; this is the
-		// decision that falls out of it.
-		return Outcome{}, errors.New("update: this build was not stamped with a release version, so it cannot tell whether a release is newer than itself")
+	self, err := u.self()
+	if err != nil {
+		return Outcome{}, err
 	}
 	if u.cfg.Gate != nil {
 		if err := u.cfg.Gate(); err != nil {
@@ -194,7 +201,6 @@ func (u *Updater) Check(ctx context.Context) (Outcome, error) {
 	}
 
 	out := Outcome{Release: m.Release}
-	self := version.Current()
 	theirs, err := version.Parse(m.Release)
 	if err != nil {
 		// Unreachable through Verify — Validate has already checked the string more
@@ -248,6 +254,22 @@ func (u *Updater) Check(ctx context.Context) (Outcome, error) {
 		return out, err
 	}
 	return u.publish(out, staged, a, m.Release)
+}
+
+// self reports the release this build is, refusing an unstamped one. See
+// Config.CurrentRelease.
+func (u *Updater) self() (version.Version, error) {
+	if u.cfg.CurrentRelease != "" {
+		v, err := version.Parse(u.cfg.CurrentRelease)
+		if err != nil {
+			return version.Version{}, fmt.Errorf("update: configured current release: %w", err)
+		}
+		return v, nil
+	}
+	if !version.Stamped() {
+		return version.Version{}, errors.New("update: this build was not stamped with a release version, so it cannot tell whether a release is newer than itself")
+	}
+	return version.Current(), nil
 }
 
 // publish applies a staged artifact and records the result.
