@@ -26,6 +26,15 @@ date, hashes and row counts in [`core/asn/TABLE.md`](../../core/asn/TABLE.md).
 **not** stamp the date into the table itself: writing "today" into the output would
 make it differ on every run and destroy the determinism below.
 
+**Nothing above runs on its own.** `deploy/bacchus-asn-drift-check.sh` runs this same
+transform against a fresh download on a weekly schedule
+(`.github/workflows/asn-table-drift.yml`) and fails loudly when the result differs from
+the table committed here — it detects, it does not refresh: no commit, no pull request,
+no repository-write credential in CI (ADR-0044's fourth amendment §5 priced that against
+the alternatives and the sixth amendment records the ruling). See
+[docs/RUNNING.md](../../docs/RUNNING.md#the-scheduled-drift-check-issue-150) for what the
+check does and does not do.
+
 | flag | |
 |---|---|
 | `-in` | upstream feed, `.tsv` or `.tsv.gz` (required) |

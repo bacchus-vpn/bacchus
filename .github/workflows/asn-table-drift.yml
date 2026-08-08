@@ -1,0 +1,86 @@
+name: asn-table-drift
+
+# A scheduled drift check for core/asn/table.tsv.gz (issue #150, ADR-0044's fourth
+# amendment §5 - ruled option C, "detect and do not commit"). deploy/bacchus-asn-drift-check.sh
+# owns the fetch/stage/compare logic and its failure discipline; this file owns only
+# when it runs and how it is invoked. Read that script's header before this one - most
+# of the reasoning lives there and is not repeated here.
+#
+# WHAT THIS IS NOT. Options A and B - a scheduled job that opens a refresh pull request,
+# with either a stored repository-write credential or the built-in token - are refused,
+# not merely unbuilt. ADR-0052 section 6 already refuses to let CI hold the update
+# signing key on the ground that a build machine able to sign is a build machine able to
+# push code; a token scoped to open pull requests against this repository is a weaker
+# form of the same object, and this job never holds one. The permissions block below is
+# not decoration - it is the one place that promise is a property of the YAML and not
+# only of the prose around it.
+#
+# WHY NO pull_request TRIGGER, unlike release.yml's own dry-run pattern for its
+# release-only paths. That pattern rehearses a property of the TREE - does the packaging
+# still compile - which is exactly what an ordinary pull request should be judged on.
+# What this job asserts is a property of the CALENDAR and of a live third party: whether
+# upstream has moved since the table was last refreshed, which nobody reviewing a pull
+# request can fix by editing code in it. Gating ordinary review on that would import the
+# exact "bystander" problem ADR-0044's fourth amendment spent two amendments removing
+# from the release gates. workflow_dispatch below is the deliberate substitute: a human
+# choosing to run this, expecting an answer that depends on live upstream state, rather
+# than every contributor being judged by it.
+#
+# WHY go-version-file: go.mod RATHER THAN stable, unlike ci.yml's own choice there.
+# ci.yml asks "does this still build on the current Go"; this job asks "are these two
+# files the same bytes", and that comparison is only meaningful if the toolchain that
+# produced both sides is the same one. cmd/asn-stage's determinism
+# (TestRunIsDeterministic) is a promise about ONE toolchain, not about Go generally, so
+# pinning here is what keeps a real drift report from ever being confused with a
+# toolchain-shaped false one.
+
+on:
+  schedule:
+    # Weekly, Monday morning UTC, off the top of the hour - GitHub queues scheduled
+    # runs more slowly right on the hour, when the whole platform's cron jobs land at
+    # once.
+    #
+    # WHY WEEKLY, against the TIGHTER of the two bars this repository already carries
+    # (core/asn/embedded_test.go): tableReleaseMaxAge is 30 days, the bar a RELEASE has
+    # to clear, and it is the one this cadence is priced against - tableMaxAge's 90-day
+    # floor has more room in it than this one does. A weekly run catches the first sign
+    # of drift within at most 7 days of it appearing: about a quarter of the 30-day
+    # budget, leaving roughly 23 days - and, against the 90-day floor, roughly 83 - for
+    # somebody to see the failure, run the refresh, and commit before either bar is
+    # actually crossed. It is also the cadence already chosen for this exact
+    # publisher's sibling feed (deploy/bacchus-geoip-refresh.timer, issue #85), so
+    # there is no second, unexplained polling rhythm for the same upstream.
+    #
+    # WHAT WEEKLY DOES NOT BUY, named rather than left implicit: a byte-for-byte
+    # comparison against a feed upstream rebuilds hourly is a different kind of check
+    # from the two calendar-based tests above, and is expected to keep failing on
+    # every run once the committed table is even a day behind - not only once it
+    # crosses 90 or 30 days. See deploy/bacchus-asn-drift-check.sh's own header for
+    # why that is the intended shape of this signal and not a defect in it.
+    - cron: '17 5 * * 1'
+  # The only way to exercise this for real before trusting the schedule - see "WHY NO
+  # pull_request TRIGGER" above.
+  workflow_dispatch:
+
+# No job in this file ever needs to write to the repository - see "WHAT THIS IS NOT"
+# above. Declared here rather than left to the default so the refusal is something a
+# reviewer can read off this file rather than something they have to take on trust.
+permissions:
+  contents: read
+
+concurrency:
+  group: asn-table-drift
+  # Safe to cancel, unlike release.yml's group: a superseded run's answer is only ever
+  # about to be replaced by a fresher one asking the identical question.
+  cancel-in-progress: true
+
+jobs:
+  detect-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: fetch upstream, stage it, and compare against the committed table
+        run: sh deploy/bacchus-asn-drift-check.sh
