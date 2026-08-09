@@ -519,6 +519,207 @@ func TestLoadConfigNotExist(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// A config file Windows tools produce, and one that does not parse (bacchus#255)
+// ---------------------------------------------------------------------------
+
+// writePerUserConfig puts raw bytes at the per-user candidate, which is where
+// every test below points APPDATA/XDG_CONFIG_HOME. Bytes rather than a Config,
+// because what these tests are about is the exact encoding of the file — a
+// marshalled Config can never carry a byte order mark or a trailing comma.
+func writePerUserConfig(t *testing.T, dir string, b []byte) string {
+	t.Helper()
+	perUserDir := filepath.Join(dir, "Bacchus")
+	if err := os.MkdirAll(perUserDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	path := filepath.Join(perUserDir, "fyne-client.json")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return path
+}
+
+// TestAConfigSavedByAWindowsEditorIsStillRead is bacchus#255's first half, and
+// it is written from the gesture rather than from the bytes: this is what the
+// file looks like after `Set-Content -Encoding UTF8`, which is the documented
+// way to edit this config on Windows and has no option that omits the mark.
+// Notepad wrote the same three bytes by default for years.
+//
+// It was hit for real on the 2026-08-09 hardware pass by following this
+// repository's own runbook, and the client then started three times with the
+// whole file discarded — no coordinators, no account service, no country, and a
+// window that looked like a fresh install.
+//
+// Mutation check: drop the bytes.TrimPrefix in LoadConfig and this fails with
+// the exact message the user saw, `invalid character 'ï»¿' looking for
+// beginning of value` — which names neither the file nor a cause.
+func TestAConfigSavedByAWindowsEditorIsStillRead(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	body, err := json.Marshal(Config{
+		Coordinators: []string{"192.0.2.10:8080"},
+		DNS:          "1.1.1.1:53",
+		Bypass:       []string{"example.com"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	writePerUserConfig(t, dir, append([]byte{0xEF, 0xBB, 0xBF}, body...))
+
+	got, _, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig on a config with a UTF-8 BOM: %v", err)
+	}
+	if len(got.Coordinators) != 1 || got.Coordinators[0] != "192.0.2.10:8080" {
+		t.Fatalf("coordinators = %v, want the one in the file — the settings were discarded", got.Coordinators)
+	}
+	if got.DNS != "1.1.1.1:53" || len(got.Bypass) != 1 {
+		t.Fatalf("config = %+v, want every field the file set", got)
+	}
+}
+
+// TestAMarkInTheMiddleIsStillData guards the narrowness of the fix. U+FEFF is
+// only a byte order mark at the very start of a file; anywhere else it is a
+// zero-width no-break space, which inside a JSON string is a character the user
+// put there. Stripping every occurrence would silently rewrite their data.
+func TestAMarkInTheMiddleIsStillData(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	// Spelled with an escape because a literal U+FEFF is not legal in Go source
+	// — which is itself a small illustration of how invisible these bytes are.
+	const label = "desk\ufefftop"
+	body, err := json.Marshal(Config{DeviceLabel: label})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	writePerUserConfig(t, dir, append([]byte{0xEF, 0xBB, 0xBF}, body...))
+
+	got, _, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got.DeviceLabel != label {
+		t.Fatalf("deviceLabel = %q, want %q — a mark inside a value is data, not an encoding artefact", got.DeviceLabel, label)
+	}
+}
+
+// TestAConfigThatDoesNotParseIsNotTheSameAsNoConfig is bacchus#255's second
+// half, and the half that outlives the BOM: the two states used to be
+// indistinguishable to the caller — both produced a zero Config — and the client
+// started on the terms of the wrong one.
+//
+// This asserts the distinction at the seam that decides it. main.go refuses to
+// start on the first and starts normally on the second, and it can only do that
+// because these two errors are different things here.
+//
+// Mutation check: return the raw json error from LoadConfig instead of wrapping
+// it, and this names the missing path.
+func TestAConfigThatDoesNotParseIsNotTheSameAsNoConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	// A trailing comma: the next reason a hand-edited config does not parse,
+	// once the byte order mark is tolerated.
+	path := writePerUserConfig(t, dir, []byte(`{"dns": "1.1.1.1:53",}`))
+
+	_, gotPath, err := LoadConfig()
+	bad, ok := ConfigUnreadable(err)
+	if !ok {
+		t.Fatalf("LoadConfig err = %v (%T), want a *ConfigUnreadableError", err, err)
+	}
+	if bad.Path != path || gotPath != path {
+		t.Fatalf("error path = %q, returned path = %q, want %q both — the message named no file", bad.Path, gotPath, path)
+	}
+	if os.IsNotExist(err) {
+		t.Fatal("a config file that exists and does not parse reports as os.ErrNotExist, so nothing can tell it apart from a fresh install")
+	}
+	if !strings.Contains(bad.Error(), path) {
+		t.Fatalf("error %q does not name the file the user has to fix", bad.Error())
+	}
+}
+
+// TestNoConfigFileIsNotAnUnreadableOne is the other side of the same
+// distinction, and it is what stops the refusal from firing on a fresh install.
+func TestNoConfigFileIsNotAnUnreadableOne(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	_, _, err := LoadConfig()
+	if _, ok := ConfigUnreadable(err); ok {
+		t.Fatalf("LoadConfig on a machine with no config = %v, want a plain os.ErrNotExist — a fresh install must still start", err)
+	}
+	if !os.IsNotExist(err) {
+		t.Fatalf("LoadConfig err = %v, want os.ErrNotExist", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// What the client made of the config it read (bacchus#258)
+// ---------------------------------------------------------------------------
+
+// TestCheckConfigNamesBypassEntriesThatDoNothing is the startup half of
+// bacchus#258: an entry that is accepted, stored, shown back in the config file
+// and then ignored is worse than one refused out loud, because the user reads
+// their own file and reasonably concludes the hole is punched.
+//
+// Mutation check: make CheckConfig return nil and this names every entry that
+// would have gone quiet.
+func TestCheckConfigNamesBypassEntriesThatDoNothing(t *testing.T) {
+	findings := CheckConfig(Config{Bypass: []string{
+		"example.com",     // fine: a host name
+		"192.0.2.0/24",    // fine: the prefix bacchus#258 could not express
+		"198.51.100.7",    // fine: a bare address
+		"2001:db8::/32",   // not carried
+		"203.0.113.0/33",  // not a prefix at all
+		"203.0.113.0\\24", // a backslash for a slash
+		"192.0.2",         // an address one octet short
+		"not a host name", // spaces
+		"  ",              // blank lines are not findings
+	}})
+	if len(findings) != 5 {
+		t.Fatalf("CheckConfig findings = %#v, want one per unusable entry (5)", findings)
+	}
+	// Matched on the QUOTED entry at the start of each sentence, not anywhere in
+	// it: the sentences name 192.0.2.0/24 as an example of a prefix that works,
+	// so a substring search would find it in a finding about something else.
+	names := func(entry string) bool {
+		for _, f := range findings {
+			if strings.HasPrefix(f, `"`+entry+`"`) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, want := range []string{"2001:db8::/32", "203.0.113.0/33", `203.0.113.0\24`, "192.0.2", "not a host name"} {
+		if !names(want) {
+			t.Errorf("no finding names %q, so that entry is still dropped in silence", want)
+		}
+	}
+	for _, mustNot := range []string{"example.com", "192.0.2.0/24", "198.51.100.7", "  "} {
+		if names(mustNot) {
+			t.Errorf("a finding names %q, which this client CAN honour", mustNot)
+		}
+	}
+}
+
+// TestCheckConfigOnAGoodConfigSaysNothing — the report has to be silent when
+// there is nothing to report, or it becomes a line users learn to ignore.
+func TestCheckConfigOnAGoodConfigSaysNothing(t *testing.T) {
+	if f := CheckConfig(Config{Bypass: []string{"example.com", "192.0.2.0/24", "", "  "}}); len(f) != 0 {
+		t.Fatalf("CheckConfig = %#v, want nothing", f)
+	}
+	if f := CheckConfig(Config{}); len(f) != 0 {
+		t.Fatalf("CheckConfig on an empty config = %#v, want nothing", f)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // The account service (bacchus#163, ADR-0056)
 // ---------------------------------------------------------------------------
 

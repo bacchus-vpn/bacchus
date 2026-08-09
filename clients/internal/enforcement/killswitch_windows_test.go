@@ -244,3 +244,38 @@ func TestRefreshKillSwitchAllowIPIsANoopWhenUnarmed(t *testing.T) {
 		t.Errorf("a live refresh created a firewall rule while the kill-switch was unarmed; scripts: %v", r.scripts)
 	}
 }
+
+// TestABypassPrefixSurvivesIntoTheFirewallRule closes bacchus#258's loop on the
+// side the card actually measured: it added `100.64.0.0/10` to `bypass`, and the
+// resulting `Bacchus-Allow-Remotes` rule came back byte-identical to the one
+// before it — loopback, the coordinator, and the addresses resolved from the ten
+// host names already there.
+//
+// The classifier keeps the prefix (splittunnel_test.go) and this is the other
+// end of the same wire: the value `tunnel.go` hands to enableKillSwitch reaches
+// `-RemoteAddress` in the generated cmdlet, quoted, alongside the resolved hosts
+// rather than instead of them.
+//
+// Mutation check: drop the bypass loop in killSwitchAllowIPs and this names the
+// range that went missing from the rule.
+func TestABypassPrefixSurvivesIntoTheFirewallRule(t *testing.T) {
+	r := newRecordingPS()
+	r.answers["Get-NetFirewallProfile"] = "Domain=Allow;Private=Allow;Public=Allow"
+
+	control := []string{"192.0.2.10"}                   // the coordinator
+	bypass := []string{"100.64.0.0/10", "198.51.100.4"} // one range, one resolved host
+	if err := r.os().enableKillSwitch(control, bypass); err != nil {
+		t.Fatalf("enableKillSwitch: %v", err)
+	}
+
+	i := r.indexOf(fwAllowRemotesName)
+	if i < 0 {
+		t.Fatal("no allow-remotes rule was created")
+	}
+	rule := r.scripts[i]
+	for _, want := range []string{`"100.64.0.0/10"`, `"198.51.100.4"`, `"192.0.2.10"`, `"127.0.0.0/8"`} {
+		if !strings.Contains(rule, want) {
+			t.Errorf("the allow-remotes rule does not carry %s — that destination is blocked while connected:\n%s", want, rule)
+		}
+	}
+}

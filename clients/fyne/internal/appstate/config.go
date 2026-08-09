@@ -6,12 +6,15 @@
 package appstate
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/bacchus-vpn/bacchus/clients/internal/enforcement"
 	"github.com/bacchus-vpn/bacchus/core/atomicfile"
 )
 
@@ -363,6 +366,32 @@ type Config struct {
 	Update UpdateConfig `json:"update"`
 }
 
+// CheckConfig is everything this client made of the configuration it just read
+// and cannot act on: one plain sentence per finding, empty when the whole file
+// is in force.
+//
+// It exists because bacchus#255, #257, #258 and #259 are one defect wearing four
+// faces — the client knows, and does not say. A rejected file, a dropped
+// `bypass` entry, a blocked LAN and a bind failure were each DETECTED and each
+// proceeded as though they were not. Three of the four are answered where they
+// happen; this is the seam for the one class that has no other moment to be
+// said at: a setting that was accepted, stored, shown back in the config file,
+// and then quietly does nothing. There is no error for the user to see, because
+// nothing failed — which is exactly why it needs a place to be reported from.
+//
+// Sentences rather than typed findings, deliberately. main.go puts them on the
+// detail line and in the log; nothing branches on them. A kind would be
+// warranted the moment something does (see DetailKind for that argument made the
+// other way, where the UI DOES have to render per case) and adding one now would
+// be a translation table for messages that name the user's own text back to
+// them, which is not translatable in any case.
+//
+// Called with a config that was successfully READ. A config that was not is a
+// refusal, not a finding (see ConfigUnreadableError).
+func CheckConfig(c Config) []string {
+	return enforcement.CheckBypass(c.Bypass)
+}
+
 // DefaultDeviceLabel is the device label used when Config.DeviceLabel is empty:
 // a word, not a machine's name. Every device on every account sharing it is the
 // intended outcome — a label that distinguishes devices is a label a user chose
@@ -562,10 +591,75 @@ func configPaths() []string {
 	return p
 }
 
+// utf8BOM is the UTF-8 encoding of U+FEFF, the byte order mark. It is stripped
+// from a config file before parsing (bacchus#255) because encoding/json refuses
+// it — "invalid character 'ï»¿' looking for beginning of value" — and because on
+// Windows it is what the ordinary way to edit this file produces.
+//
+// Not a nicety, and not an encoding this client chose to support. PowerShell
+// 5.1's `Set-Content -Encoding UTF8` writes a BOM and has no option that does
+// not; avoiding one means dropping to
+// `[System.IO.File]::WriteAllText($p, $s, [System.Text.UTF8Encoding]::new($false))`,
+// which nobody types by accident. Notepad wrote one by default for years. So the
+// documented gesture — open the config, change the coordinators, save — silently
+// disabled the file, which is how bacchus#255 was found: by following this
+// repository's own runbook on a real machine.
+//
+// A BOM carries no information here. The file is JSON, JSON is UTF-8 by
+// definition (RFC 8259 §8.1, which forbids one), and no field's meaning changes
+// with or without it. Refusing it therefore rejects a file whose CONTENT is
+// entirely valid, over three bytes the user cannot see in any editor that wrote
+// them. Only a LEADING one is stripped: U+FEFF anywhere else is a zero-width
+// no-break space inside a string, which is data.
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// ConfigUnreadableError is a config file that EXISTS and could not be read as
+// this client's config: found, opened, and rejected. It is deliberately a
+// distinct type from "there is no config file", because those two states are
+// what bacchus#255 found the client treating identically — both left Config at
+// its zero value, and the client started on the second one's terms.
+//
+// The distinction is the whole fix. No config file is a fresh install: nothing
+// is configured, nothing was lost, and starting is right. A config file that did
+// not parse is a machine that HAS settings — coordinators, an account service, a
+// country, a bypass list — none of which are in force, on a client that shows a
+// window and looks like it came up. main.go refuses to start on this rather than
+// carrying the zero value forward.
+//
+// Path is carried because the message the user was given named no file. This
+// client reads from two candidates (configPaths) and a user editing the wrong
+// one sees their change ignored with no way to tell which file won.
+type ConfigUnreadableError struct {
+	Path string
+	Err  error
+}
+
+func (e *ConfigUnreadableError) Error() string {
+	return fmt.Sprintf("%s could not be read as Bacchus settings: %v", e.Path, e.Err)
+}
+
+func (e *ConfigUnreadableError) Unwrap() error { return e.Err }
+
+// ConfigUnreadable reports whether err is a config file that exists and could
+// not be read, and returns it. The caller wants the path, so this returns the
+// error rather than a bool alone.
+func ConfigUnreadable(err error) (*ConfigUnreadableError, bool) {
+	var e *ConfigUnreadableError
+	if errors.As(err, &e) {
+		return e, true
+	}
+	return nil, false
+}
+
 // LoadConfig reads the first config file that exists, returning the path it
 // was read from alongside it. Returns os.ErrNotExist (wrapped) and an empty
 // path if none is present - a fresh install with no config yet, not an error
 // the app should alarm about.
+//
+// A file that exists and does not parse comes back as *ConfigUnreadableError,
+// which is a different answer from the one above and is treated as one: see that
+// type, and main.go, which refuses to start rather than running on the zero
+// value it used to be handed here.
 func LoadConfig() (Config, string, error) {
 	var lastErr error = os.ErrNotExist
 	for _, p := range configPaths() {
@@ -575,8 +669,8 @@ func LoadConfig() (Config, string, error) {
 			continue
 		}
 		var c Config
-		if err := json.Unmarshal(b, &c); err != nil {
-			return Config{}, p, err
+		if err := json.Unmarshal(bytes.TrimPrefix(b, utf8BOM), &c); err != nil {
+			return Config{}, p, &ConfigUnreadableError{Path: p, Err: err}
 		}
 		return c, p, nil
 	}

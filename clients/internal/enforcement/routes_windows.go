@@ -167,6 +167,51 @@ func (o *winOS) defaultGateway() (gatewayInfo, error) {
 	}, nil
 }
 
+// routeExistsMarker is what psNewNetRoute prints instead of failing when the
+// route it was asked to add is already there. Nothing acts on it — it is
+// success, and success needs no handling — but it is what makes the outcome
+// visible to a test driving winOS.run, and to anyone reading a transcript of
+// what this client asked PowerShell to do.
+const routeExistsMarker = "bacchus-route-already-present"
+
+// psNewNetRoute wraps a New-NetRoute invocation so that "this route already
+// exists" is SUCCESS rather than a logged failure (bacchus#259).
+//
+// The hardware pass caught this costing something real. A single connect logged
+//
+//	[tun] ps failed: New-NetRoute -DestinationPrefix "<ip>" … | New-NetRoute : Instance MSFT_NetRoute already exists
+//
+// at least fifteen times in nine seconds. Every one of them was the route table
+// already being in the state this call wanted it in, and every one consumed part
+// of a 256 KiB log budget that, in the same session, had no room left to record
+// the SOCKS bind failure the user was actually shown. Noise in a capped log is
+// not free: it evicts the diagnostic.
+//
+// It is a route add, so an existing route is the post-condition, not a
+// collision. Nothing downstream distinguishes "I installed it" from "it was
+// there" — the teardown removes by destination prefix either way (removeRoutes),
+// and it already removes routes it did not install.
+//
+// # Why the test is on the exception and not on the message
+//
+// The obvious version matches PowerShell's text for "already exists". That text
+// is in the operating system's DISPLAY LANGUAGE, so it is English on the machine
+// this was found on and is not on a user's — and a client that behaves one way
+// in en-US and another in ru-RU is worse than one that behaves badly everywhere.
+// NativeErrorCode is a CIM status on the exception object, identical in every
+// locale.
+//
+// It fails to TODAY'S behaviour, deliberately. If the exception is not a
+// CimException, or carries no NativeErrorCode at all, `$_.Exception.NativeErrorCode`
+// is $null, the comparison is false, and the `throw` re-raises exactly the error
+// this function used to let through — a logged failure, no route, and nothing
+// silently swallowed. The one thing this must never do is turn a real
+// route-install failure into a quiet success.
+func psNewNetRoute(args string) string {
+	return `try { New-NetRoute ` + args + ` -ErrorAction Stop | Out-Null }
+		catch { if ($_.Exception.NativeErrorCode -eq 'AlreadyExists') { "` + routeExistsMarker + `" } else { throw } }`
+}
+
 // addExclusionRoutes routes each prefix via the real default gateway
 // (bypassing the tunnel's split-default override) so traffic to it keeps
 // flowing over the physical interface instead of looping into the TUN
@@ -177,9 +222,9 @@ func (o *winOS) defaultGateway() (gatewayInfo, error) {
 // for the bypass/include set specifically in split-tunnel "exclude" mode.
 func (o *winOS) addExclusionRoutes(prefixes []string, gw gatewayInfo) {
 	for _, p := range prefixes {
-		_, _ = o.runPS(fmt.Sprintf(
-			`New-NetRoute -DestinationPrefix "%s" -NextHop "%s" -InterfaceIndex %d -RouteMetric 1 -ErrorAction Stop | Out-Null`,
-			ensureCIDR(p), gw.nextHop, gw.ifIndex))
+		_, _ = o.runPS(psNewNetRoute(fmt.Sprintf(
+			`-DestinationPrefix "%s" -NextHop "%s" -InterfaceIndex %d -RouteMetric 1`,
+			ensureCIDR(p), gw.nextHop, gw.ifIndex)))
 	}
 }
 
@@ -194,9 +239,9 @@ func (o *winOS) addExclusionRoutesV6(prefixes []string, gw gatewayInfo) {
 		return
 	}
 	for _, p := range prefixes {
-		_, _ = o.runPS(fmt.Sprintf(
-			`New-NetRoute -DestinationPrefix "%s" -NextHop "%s" -InterfaceIndex %d -RouteMetric 1 -ErrorAction Stop | Out-Null`,
-			ensureCIDR(p), gw.nextHopV6, gw.ifIndex))
+		_, _ = o.runPS(psNewNetRoute(fmt.Sprintf(
+			`-DestinationPrefix "%s" -NextHop "%s" -InterfaceIndex %d -RouteMetric 1`,
+			ensureCIDR(p), gw.nextHopV6, gw.ifIndex)))
 	}
 }
 
@@ -211,9 +256,9 @@ func (o *winOS) addExclusionRoutesV6(prefixes []string, gw gatewayInfo) {
 // addExclusionRoutes which only needs the physical gateway.
 func (o *winOS) addInclusionRoutes(prefixes []string, tunNextHop string) {
 	for _, p := range prefixes {
-		_, _ = o.runPS(fmt.Sprintf(
-			`New-NetRoute -InterfaceAlias "%s" -DestinationPrefix "%s" -NextHop "%s" -RouteMetric 1 -ErrorAction Stop | Out-Null`,
-			tunAdapterName, ensureCIDR(p), tunNextHop))
+		_, _ = o.runPS(psNewNetRoute(fmt.Sprintf(
+			`-InterfaceAlias "%s" -DestinationPrefix "%s" -NextHop "%s" -RouteMetric 1`,
+			tunAdapterName, ensureCIDR(p), tunNextHop)))
 	}
 }
 
@@ -398,9 +443,14 @@ func (o *winOS) configureTunInterface(addr string, prefixLen int) error {
 // fixed: it would recapture every "direct" dial straight back into the tunnel.
 func (o *winOS) addSplitDefaultRoute(addr string) error {
 	for _, prefix := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-		if _, err := o.runPS(fmt.Sprintf(
-			`New-NetRoute -InterfaceAlias "%s" -DestinationPrefix "%s" -NextHop "%s" -ErrorAction Stop | Out-Null`,
-			tunAdapterName, prefix, addr)); err != nil {
+		// Through psNewNetRoute like every other route add, and here it changes
+		// an outcome rather than only a log line: this call's error FAILS THE
+		// CONNECT, so a half-torn-down previous session leaving one of these two
+		// behind used to make the next connect impossible until the route was
+		// removed by hand. An existing split-default is the state this wants.
+		if _, err := o.runPS(psNewNetRoute(fmt.Sprintf(
+			`-InterfaceAlias "%s" -DestinationPrefix "%s" -NextHop "%s"`,
+			tunAdapterName, prefix, addr))); err != nil {
 			return fmt.Errorf("add split-default route %s: %w", prefix, err)
 		}
 	}

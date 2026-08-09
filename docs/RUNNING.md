@@ -1222,6 +1222,26 @@ refuses the connection outright rather than negotiating down to a subset; a
 client that silently lost its kill-switch to a version skew is the same failure
 wearing different clothes.
 
+**Your local network goes out of reach while connected**, and this is deliberate
+([ADR-0073](adr/0073-the-kill-switch-keeps-the-local-network-out.md), issue
+#257). The kill-switch is an nftables `output` chain with policy `drop` whose
+allowlist is the tunnel interface, loopback and the control plane — no private
+range is in it, so a printer, a NAS, a file share or the router's own
+configuration page all stop answering the moment the client says *Protected*.
+Windows behaves identically through its own mechanism.
+
+It is refused rather than allowed because a hole for "the local network" is a
+hole for anything else on that link, and the networks this product exists for
+are the ones where that is other people. If you want a specific device back, put
+its range in the client's `bypass` list — `192.0.2.0/24` for a subnet,
+`192.0.2.10/32` for one host — and it is carved out of both the routing and the
+lockdown. Turning the kill-switch off also restores the LAN, and is the worse
+answer: the LAN is blocked by the firewall, not by the routing, so switching off
+the lockdown to reach a printer switches off the lockdown for everything.
+
+The client states this itself on the Protected line and beside the kill-switch
+checkbox, so nobody has to reach this page to find out.
+
 ### What happens to DNS
 
 DNS is intercepted inside the tunnel, which is enough on its own for any program
@@ -1281,6 +1301,18 @@ machine.
   logind to answer "does this uid own an active local session". They need
   `-allow-without-logind`, which drops that gate to the socket's group
   permission alone — a real weakening, and opt-in for that reason.
+- **"Bacchus could not read your settings file"** — the config exists and does
+  not parse, so the client stops instead of starting with none of your settings
+  and a window that looks like a fresh install (issue #255). The message names
+  the file and what the parser objected to. A UTF-8 byte order mark is *not* a
+  cause any more: it is tolerated, which is what the Windows half of that card
+  was about.
+- **"Some of your settings are not in force"** — a `bypass` line that is neither
+  a host name, an address nor a range like `192.0.2.0/24` (issue #258). The
+  message names the line. It is reported rather than accepted-and-ignored,
+  because an entry visible in your own config file that does nothing is worse
+  than one refused out loud. The same line lists any bypass name that resolved
+  to no IPv4 address at connect time.
 
 ### What is verified, and what is not
 

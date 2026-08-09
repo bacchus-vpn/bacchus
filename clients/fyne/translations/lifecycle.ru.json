@@ -11,6 +11,9 @@
     "Bacchus could not check whether it is already running on this computer, and will not start a second copy: two of them can leave this machine unprotected while both say otherwise. Close any other Bacchus window and try again.": "Bacchus не смог проверить, запущен ли он уже на этом компьютере, и не станет запускать вторую копию: две копии могут оставить компьютер без защиты, при этом обе будут сообщать об обратном. Закройте другие окна Bacchus и попробуйте снова.",
     "Details are in:": "Подробности здесь:",
 
+    "Bacchus could not read your settings file": "Bacchus не смог прочитать файл настроек",
+    "Bacchus has stopped rather than start without the settings in this file, which would look like a fresh install and connect to nothing. Fix the file and start Bacchus again.": "Bacchus остановился, а не запустился без настроек из этого файла: иначе он выглядел бы как новая установка и не подключился бы никуда. Исправьте файл и запустите Bacchus снова.",
+
     "Bacchus keeps a small log of what it did, so a problem can be explained without asking you to run anything. It never contains your traffic, and network addresses are removed before anything is written down.": "Bacchus ведёт небольшой журнал своих действий, чтобы можно было разобраться в проблеме, не прося вас ничего запускать. В нём никогда нет вашего трафика, а сетевые адреса удаляются до записи.",
     "Keep a log file": "Вести файл журнала",
     "Turning this off deletes the log file that is already there. Turning it back on starts a new one; the old one does not come back.": "При выключении уже существующий файл журнала удаляется. При повторном включении начинается новый файл; прежний не восстанавливается.",

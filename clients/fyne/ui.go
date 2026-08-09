@@ -41,7 +41,7 @@ func newStateIndicator() *stateIndicator {
 		description: description,
 		content:     container.NewStack(bg, container.NewPadded(container.NewPadded(container.NewCenter(text)))),
 	}
-	s.update(appstate.Disconnected, false)
+	s.update(appstate.Disconnected, false, false)
 	return s
 }
 
@@ -54,13 +54,18 @@ func newStateIndicator() *stateIndicator {
 // build routes the whole device or only what is pointed at the proxy. It
 // changes the two words a user reads first, so it is passed in rather than
 // inferred here.
-func (s *stateIndicator) update(state appstate.ConnState, enforced bool) {
+//
+// lanBlocked is whether THIS session's lockdown also cuts the machine off from
+// its own local network (ADR-0073, bacchus#257). Passed in for the same reason
+// as enforced and one more: it depends on a setting, not on the platform, so
+// nothing here could infer it.
+func (s *stateIndicator) update(state appstate.ConnState, enforced, lanBlocked bool) {
 	fg := theme.Color(stateForegroundName(state))
 	s.bg.FillColor = theme.Color(stateColorName(state))
 	s.headline.Color = fg
 	s.description.Color = fg
 	s.headline.Text = stateHeadline(state, enforced)
-	s.description.Text = stateDescription(state, enforced)
+	s.description.Text = stateDescription(state, enforced, lanBlocked)
 	s.bg.Refresh()
 	s.headline.Refresh()
 	s.description.Refresh()
@@ -123,12 +128,38 @@ func stateHeadline(s appstate.ConnState, enforced bool) string {
 // same class of error as the two above. It reports that the path died, which
 // is true either way, and leaves the stronger sentence to whoever is willing
 // to plumb the actual armed state to it.
-func stateDescription(s appstate.ConnState, enforced bool) string {
+//
+// # The local network (bacchus#257, ADR-0073)
+//
+// lanBlocked is that armed state finally plumbed, for the one claim that needed
+// it. An armed kill-switch does not only stop leaks outward: the allowlist holds
+// the tunnel adapter, the control plane, loopback and DHCP, and no RFC1918 range
+// is in it, so every LAN destination falls to the default Block. The router's own
+// page, a printer, a NAS, local SSH — all refused, measured on hardware, from the
+// instant this band turns green.
+//
+// The block itself is kept, on the record (ADR-0073): a hole in the lockdown for
+// "the local network" is a hole for whatever an attacker can reach from an
+// address in that range. What was NOT defensible is that it happened without a
+// word — the only visible change was this app saying Protected, so the
+// conclusion available to the user was that Bacchus broke their network, and the
+// action available to them was to turn off the one setting that must not be
+// turned off for a bad reason.
+//
+// So it is said here, in the same breath as the good news, rather than in a
+// document nobody reads before they need it. Only when it is TRUE: with the
+// kill-switch off the LAN keeps working, because a directly connected subnet is
+// an on-link route that the split-default (0.0.0.0/1 + 128.0.0.0/1) never
+// overrides — it is the firewall that blocks it, not the routing.
+func stateDescription(s appstate.ConnState, enforced, lanBlocked bool) string {
 	switch s {
 	case appstate.Connecting:
 		return lang.L("Finding the safest way to connect…")
 	case appstate.Protected:
 		if enforced {
+			if lanBlocked {
+				return lang.L("All of this device's traffic goes through Bacchus. Other devices on your local network — printers, file shares, your router's own page — are not reachable while it is.")
+			}
 			return lang.L("All of this device's traffic goes through Bacchus.")
 		}
 		return lang.L("Apps set to use the proxy at 127.0.0.1:1080 are protected. Other apps are not.")

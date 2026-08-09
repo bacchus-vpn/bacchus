@@ -1677,7 +1677,39 @@ func (c *Controller) publishLocked(s ConnState) {
 	}
 }
 
+// notifyDetail is the one place a message reaches the user, and therefore the
+// one place that has to write it down (bacchus#259).
+//
+// bacchus#187 gave this client a log file because on a -H=windowsgui binary
+// every line went to an os.Stderr with no destination, and the answer to "can
+// you send me the log" was no. That worked. What it did not cover is this path:
+// a reconnect failed with `core: socks listen: … bind: Only one usage of each
+// socket address …` on the detail line, and a search of the whole log file for
+// socks|bind|error|refus|fail from that window returned nothing. The file jumped
+// from `[tun] torn down` to a bring-up twenty-five minutes later. A user
+// reporting "it said something about a socket" attached a log that did not
+// mention it — the exact position #187 was filed to end.
+//
+// So it is done HERE, by construction, rather than by adding a c.logf beside
+// each of the eleven abort/publish call sites. Those eleven are the reason the
+// per-call-site version does not hold: it is correct only while every one of
+// them remembers, and the twelfth is written by somebody who has not read this
+// comment. One sink, both destinations, and a message cannot be shown without
+// being recorded.
+//
+// Detail.Text is always set on every kind — that is a documented property of
+// the type, and it is what makes this possible for the classified kinds as well
+// as the verbatim ones. What the user sees may be the Russian rendering of it
+// (main.go's detailText); what is logged is the English, which is the right way
+// round for a file somebody sends to whoever is helping them.
+//
+// The log write goes through Controller.logf, so it inherits the sink's
+// redaction like every other line — a bind error naming 127.0.0.1:1080 reaches
+// the file with the address removed, and the sentence still says what happened.
 func (c *Controller) notifyDetail(d Detail) {
+	if d.Text != "" {
+		c.logf("%s", d.Text)
+	}
 	if c.OnDetail != nil {
 		c.OnDetail(d)
 	}

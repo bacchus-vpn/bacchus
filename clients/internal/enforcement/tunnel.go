@@ -119,13 +119,30 @@ func startTunnel(osn osNet, logf func(string, ...any), cfg Policy, policy *bypas
 		}
 	}()
 
+	// What this connect made of the configured bypass list, said out loud
+	// (bacchus#258). Both halves are entries the user can see in their own config
+	// file and which do nothing: one the classifier refused (an IPv6 prefix, a
+	// malformed one, something that is not a name), one that resolved to no IPv4
+	// address at this moment. Neither used to produce a line anywhere.
+	//
+	// Before the resolution below rather than after, so an entry that is
+	// unusable by its own shape is reported even if the resolver hangs on the
+	// ones that follow it.
+	for _, p := range policy.problems {
+		log("[tun] bypass: %s", p)
+	}
+
 	// Seed bypass domains with their current address(es) via the OS's own
 	// resolver — safe here, since bypass destinations are explicitly meant to
 	// be reached with the real IP rather than hidden behind the tunnel — so
 	// they already have a route on the very first connection instead of
 	// waiting on the DNS interceptor to observe a fresh query for them.
-	for _, ip := range resolveDomains(policy.domains) {
+	seeded, unresolved := resolveDomains(policy.domains)
+	for _, ip := range seeded {
 		policy.seed(ip)
+	}
+	for _, d := range unresolved {
+		log("[tun] bypass: %q has no address right now, so nothing is carved out for it this session", d)
 	}
 	bypassEntries := append(policy.staticEntries(), policy.dynamicSnapshot()...)
 

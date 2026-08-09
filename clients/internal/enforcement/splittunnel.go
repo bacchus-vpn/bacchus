@@ -86,6 +86,13 @@ type bypassPolicy struct {
 	nets    []*net.IPNet // parsed IP/CIDR entries
 	domains []string     // lowercase, no trailing dot
 
+	// problems is one sentence per configured entry this policy could not make
+	// use of (bacchus#258). startTunnel logs them at every connect, which is the
+	// point: an entry the user can see in their own config file, and which does
+	// nothing, is worse than one refused out loud — they read the file and
+	// reasonably conclude the hole is punched.
+	problems []string
+
 	mu      sync.RWMutex
 	dynamic map[string]bool // IPs learned by resolving a bypass domain
 	armed   bool            // kill-switch armed yet? guarded by mu; set only via arm()
@@ -101,26 +108,180 @@ type bypassPolicy struct {
 
 // newBypassPolicy classifies each Bypass config entry as a CIDR, a literal
 // IP (treated as a /32), or — if neither parses — a domain name.
+//
+// Every entry it cannot honour is recorded in problems, and NONE is dropped in
+// silence (bacchus#258). See classifyBypassEntry for what "cannot honour" means
+// and why the alternative — accept, store, display and ignore — is the one
+// option this package will not take.
 func newBypassPolicy(mode string, entries []string) *bypassPolicy {
 	p := &bypassPolicy{mode: parseSplitTunnelMode(mode), dynamic: map[string]bool{}}
 	for _, e := range entries {
-		e = strings.TrimSpace(e)
-		if e == "" {
-			continue
+		switch c := classifyBypassEntry(e); c.kind {
+		case bypassPrefix:
+			p.nets = append(p.nets, c.prefix)
+		case bypassDomain:
+			p.domains = append(p.domains, c.name)
+		case bypassUnusable:
+			p.problems = append(p.problems, c.problem)
 		}
-		if _, ipnet, err := net.ParseCIDR(e); err == nil {
-			p.nets = append(p.nets, ipnet)
-			continue
-		}
-		if ip := net.ParseIP(e); ip != nil {
-			if v4 := ip.To4(); v4 != nil {
-				p.nets = append(p.nets, &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)})
-			}
-			continue
-		}
-		p.domains = append(p.domains, strings.ToLower(strings.TrimSuffix(e, ".")))
 	}
 	return p
+}
+
+// bypassKind is what one Bypass entry turned out to be.
+type bypassKind int
+
+const (
+	// bypassBlank: an empty or whitespace-only line. Not a problem — the
+	// settings window's multi-line entry produces them freely.
+	bypassBlank bypassKind = iota
+	// bypassPrefix: an IPv4 network prefix, or a bare IPv4 address normalised
+	// to a /32 host prefix. These get a route at connect and an entry in the
+	// kill-switch allowlist.
+	bypassPrefix
+	// bypassDomain: a host name, matched against the DNS the interceptor sees
+	// and resolved once at connect.
+	bypassDomain
+	// bypassUnusable: none of the above. The entry is reported and ignored,
+	// rather than only ignored.
+	bypassUnusable
+)
+
+// classifiedBypass is one entry's verdict: exactly one of prefix, name and
+// problem is set, chosen by kind.
+type classifiedBypass struct {
+	kind    bypassKind
+	prefix  *net.IPNet // bypassPrefix
+	name    string     // bypassDomain: lowercase, no trailing dot
+	problem string     // bypassUnusable: one sentence naming the entry
+}
+
+// classifyBypassEntry decides what one Bypass entry is, and — when it is
+// nothing this client can act on — says so in a sentence naming the entry.
+//
+// It is the single definition of what a bypass entry may be, shared by
+// newBypassPolicy (which builds the live policy from it) and CheckBypass (which
+// reports on a config before anything connects). Two copies of these rules would
+// be two answers to "is this entry in force", and the one that reaches the user
+// would be the one that is wrong.
+//
+// # What is refused, and why refusing beats ignoring
+//
+// bacchus#258 measured a CIDR added to `bypass` producing a firewall rule
+// byte-identical to the one before it. Prefixes are in fact honoured here and
+// have been since the enforcement fold — but three shapes were not, and each was
+// dropped without a word:
+//
+//   - An IPv6 address or prefix. It parsed, and then fell off the end of a
+//     v4-only path: the netstack has no IPv6 route, disablePhysicalIPv6 turns the
+//     physical adapter's IPv6 off for the tunnel's duration, and inSet answers
+//     false for every v6 address regardless. Refused with that reason rather
+//     than accepted into a set nothing consults.
+//   - A MALFORMED prefix — `192.0.2.0/33`, `192.0.2.0/255.255.255.0`, a
+//     backslash for a slash. ParseCIDR refuses it, ParseIP refuses it, and it
+//     then became a "domain": a name that resolves to nothing, forever, in
+//     silence. An entry containing a slash is unambiguously meant as a prefix,
+//     so it is reported as a broken one instead of quietly reinterpreted as
+//     something else.
+//   - An entry that is not a usable host name — a space in it, an empty label,
+//     a label of only digits (`192.0.2`, an address one octet short). The
+//     last is the sharpest: it looks like an address to the person who typed it
+//     and like a name to the resolver, so it can only ever fail.
+//
+// A host name that is well-formed but does not resolve is NOT refused here. That
+// is not a property of the config — a name can be unresolvable at this moment and
+// fine at the next connect — so it is reported at connect instead, by the
+// resolution that actually failed (resolveDomains).
+func classifyBypassEntry(entry string) classifiedBypass {
+	unusable := func(why string) classifiedBypass {
+		return classifiedBypass{kind: bypassUnusable, problem: quoteEntry(strings.TrimSpace(entry)) + " " + why}
+	}
+	const noIPv6 = "and Bacchus carries IPv4 only and turns IPv6 off while connected, so it is ignored"
+
+	e := strings.TrimSpace(entry)
+	if e == "" {
+		return classifiedBypass{kind: bypassBlank}
+	}
+	if _, ipnet, err := net.ParseCIDR(e); err == nil {
+		if ipnet.IP.To4() == nil {
+			return unusable("is an IPv6 network, " + noIPv6)
+		}
+		return classifiedBypass{kind: bypassPrefix, prefix: ipnet}
+	}
+	if ip := net.ParseIP(e); ip != nil {
+		v4 := ip.To4()
+		if v4 == nil {
+			return unusable("is an IPv6 address, " + noIPv6)
+		}
+		return classifiedBypass{kind: bypassPrefix, prefix: &net.IPNet{IP: v4, Mask: net.CIDRMask(32, 32)}}
+	}
+	if strings.ContainsAny(e, `/\`) {
+		return unusable("is not a network prefix Bacchus can read — write one like 192.0.2.0/24 — so it is ignored")
+	}
+	name := strings.ToLower(strings.TrimSuffix(e, "."))
+	if !isHostName(name) {
+		return unusable("is not a host name, an address or a network prefix like 192.0.2.0/24, so it is ignored")
+	}
+	return classifiedBypass{kind: bypassDomain, name: name}
+}
+
+// isHostName reports whether name can be looked up as a host name at all:
+// dot-separated labels of letters, digits and hyphens, none empty, none longer
+// than 63 bytes, none starting or ending in a hyphen, 253 bytes in total.
+//
+// A name whose every label is digits is refused, and that case is the reason
+// this is stricter than "the resolver would accept it". `192.0.2` is an
+// address a user typed one octet short: it cannot parse as an address and it
+// cannot resolve as a name, so the only two outcomes are "reported" and
+// "silently does nothing".
+func isHostName(name string) bool {
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	allNumeric := true
+	for _, label := range strings.Split(name, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			switch {
+			case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+				allNumeric = false
+			case c >= '0' && c <= '9':
+			case c == '-':
+				allNumeric = false
+			default:
+				return false
+			}
+		}
+	}
+	return !allNumeric
+}
+
+// quoteEntry renders one config entry inside a sentence. Quoted so a value with
+// a space, or an empty-looking one, is visible as itself.
+func quoteEntry(e string) string { return `"` + e + `"` }
+
+// CheckBypass reports every `bypass` entry this client cannot act on, one
+// sentence each, in the order they appear. An empty result means every entry is
+// in force.
+//
+// Exported for the client's own startup check (appstate.CheckConfig): the point
+// of bacchus#258 is that the user is told BEFORE they rely on an entry, not that
+// the log records it afterwards. It runs the same classifier the live policy is
+// built from, so what it reports and what is installed cannot drift apart.
+func CheckBypass(entries []string) []string {
+	var problems []string
+	for _, e := range entries {
+		if c := classifyBypassEntry(e); c.kind == bypassUnusable {
+			problems = append(problems, c.problem)
+		}
+	}
+	return problems
 }
 
 // direct reports whether traffic to ip should egress the physical interface
@@ -269,25 +430,41 @@ func (p *bypassPolicy) seed(ip net.IP) {
 }
 
 // resolveDomains resolves each domain via the OS's own resolver and returns
-// every IPv4 address found across all of them. Unresolvable domains are
-// skipped — best effort, same posture as routes.go's resolveExclusions.
+// every IPv4 address found across all of them, plus the names that yielded
+// none. Unresolvable domains are still skipped — best effort, same posture as
+// routes.go's resolveExclusions — but they are no longer skipped in SILENCE:
+// startTunnel names them in the log (bacchus#258), because a bypass entry that
+// resolves to nothing is a hole the user believes they punched and did not.
+//
 // Safe to call for bypass domains specifically: they're explicitly meant to
 // be reached with the real IP, not hidden behind the tunnel, so resolving
 // them outside it leaks nothing that bypass wasn't already going to expose.
-func resolveDomains(domains []string) []net.IP {
-	var ips []net.IP
+//
+// A name is reported when it produced no IPv4 address, which is not the same as
+// "the lookup returned an error": a name with only AAAA records resolves fine
+// and is still unusable here, for the reason classifyBypassEntry refuses an IPv6
+// literal outright.
+// lookupHost is net.LookupHost behind a variable so a test can drive the
+// reporting path above without a resolver, a network, or a name whose failure
+// mode depends on the machine's DNS configuration. Production never replaces it.
+var lookupHost = net.LookupHost
+
+func resolveDomains(domains []string) (ips []net.IP, unresolved []string) {
 	for _, d := range domains {
-		addrs, err := net.LookupHost(d)
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
-				ips = append(ips, ip)
+		before := len(ips)
+		addrs, err := lookupHost(d)
+		if err == nil {
+			for _, a := range addrs {
+				if ip := net.ParseIP(a); ip != nil && ip.To4() != nil {
+					ips = append(ips, ip)
+				}
 			}
 		}
+		if len(ips) == before {
+			unresolved = append(unresolved, d)
+		}
 	}
-	return ips
+	return ips, unresolved
 }
 
 // staticEntries returns the CIDR/IP prefixes that must get a route (exclusion

@@ -170,3 +170,99 @@ func TestRunningExeNameIsAFileName(t *testing.T) {
 		t.Fatalf("runningExeName() = %q, want a bare file name", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// A route that is already there is not a failure (bacchus#259)
+// ---------------------------------------------------------------------------
+
+// TestEveryRouteAddToleratesAnExistingRoute is bacchus#259's second finding. One
+// connect on real hardware logged
+//
+//	[tun] ps failed: New-NetRoute -DestinationPrefix "<ip>" … | New-NetRoute : Instance MSFT_NetRoute already exists
+//
+// at least fifteen times in nine seconds. Every one was the route table already
+// holding what the call wanted, and every one spent part of a 256 KiB log budget
+// that in the same session had no room left for the SOCKS bind failure the user
+// was actually shown.
+//
+// All four route adds are covered rather than only the one in the report,
+// because they are the same call with different arguments and a fix that reached
+// three of them would be a fix somebody has to remember next time.
+//
+// Mutation check: put a bare `New-NetRoute … -ErrorAction Stop` back in any one
+// of them and this names that one.
+func TestEveryRouteAddToleratesAnExistingRoute(t *testing.T) {
+	gw := gatewayInfo{nextHop: "192.0.2.1", nextHopV6: "2001:db8::1", ifIndex: 7, ifAlias: "Ethernet"}
+	for _, tc := range []struct {
+		name string
+		call func(o *winOS)
+	}{
+		{"addExclusionRoutes", func(o *winOS) { o.addExclusionRoutes([]string{"198.51.100.4"}, gw) }},
+		{"addExclusionRoutesV6", func(o *winOS) { o.addExclusionRoutesV6([]string{"2001:db8::2"}, gw) }},
+		{"addInclusionRoutes", func(o *winOS) { o.addInclusionRoutes([]string{"203.0.113.0/24"}, tunIP) }},
+		{"addSplitDefaultRoute", func(o *winOS) { _ = o.addSplitDefaultRoute(tunIP) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRecordingPS()
+			tc.call(r.os())
+			if len(r.scripts) == 0 {
+				t.Fatal("no script ran")
+			}
+			for _, s := range r.scripts {
+				if !strings.Contains(s, "New-NetRoute") {
+					continue
+				}
+				if !strings.Contains(s, "NativeErrorCode") || !strings.Contains(s, "AlreadyExists") {
+					t.Errorf("this route add still treats an existing route as a failure:\n%s", s)
+				}
+				if !strings.Contains(s, "throw") {
+					t.Errorf("this route add swallows every error, not only an existing route:\n%s", s)
+				}
+			}
+		})
+	}
+}
+
+// TestAnAlreadyPresentSplitDefaultDoesNotFailTheConnect is the one place where
+// this changes an OUTCOME rather than a log line. addSplitDefaultRoute's error
+// aborts the whole connect, so a half-torn-down previous session leaving one of
+// the two halves behind used to make every subsequent connect impossible until
+// the route was removed by hand.
+func TestAnAlreadyPresentSplitDefaultDoesNotFailTheConnect(t *testing.T) {
+	r := newRecordingPS()
+	r.answers["0.0.0.0/1"] = routeExistsMarker
+	if err := r.os().addSplitDefaultRoute(tunIP); err != nil {
+		t.Fatalf("addSplitDefaultRoute with the route already present = %v, want nil", err)
+	}
+}
+
+// TestARealRouteFailureIsStillAFailure is the guard on the guard. The one thing
+// this must never do is turn a genuine route-install failure into a quiet
+// success — a missing exclusion route loops the session's own underlay back into
+// the tunnel it is carrying.
+func TestARealRouteFailureIsStillAFailure(t *testing.T) {
+	r := newRecordingPS()
+	r.fail["0.0.0.0/1"] = fmt.Errorf("exit status 1")
+	if err := r.os().addSplitDefaultRoute(tunIP); err == nil {
+		t.Fatal("addSplitDefaultRoute reported success over a failing New-NetRoute")
+	}
+}
+
+// TestPSNewNetRouteKeepsTheCallersArguments guards the mechanical part of the
+// wrapping: the arguments and -ErrorAction Stop have to survive being moved
+// inside a try block, or the route installed is not the route asked for.
+func TestPSNewNetRouteKeepsTheCallersArguments(t *testing.T) {
+	s := psNewNetRoute(`-DestinationPrefix "198.51.100.0/24" -NextHop "192.0.2.1" -InterfaceIndex 7 -RouteMetric 1`)
+	for _, want := range []string{
+		`New-NetRoute -DestinationPrefix "198.51.100.0/24"`,
+		`-NextHop "192.0.2.1"`,
+		"-InterfaceIndex 7",
+		"-RouteMetric 1",
+		"-ErrorAction Stop",
+		"Out-Null",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the wrapped script lost %q:\n%s", want, s)
+		}
+	}
+}

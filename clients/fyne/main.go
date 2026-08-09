@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -115,24 +116,39 @@ func main() {
 	}
 	defer release()
 
-	// A config file that exists but doesn't parse must be SEEN, not merely logged.
+	// A config file that exists and does not parse STOPS THIS CLIENT (bacchus#255).
 	//
-	// The log now reaches a file on every platform, so this is no longer the one
-	// message that would otherwise vanish — but the reason it is carried to the
-	// UI was never only that. cfg stays zero, so Connect then reports "no
-	// coordinators configured" and sends the user to edit a file that is already
-	// there and already says what it should, pointing them away from the one
-	// thing wrong, which is the typo. A line in a support log does not reach the
-	// person looking at the window. So it goes to both: the detail line for the
-	// user, the file for whoever they ask for help.
+	// It used to be carried to the detail line and started around: cfg stayed at
+	// its zero value, the window came up, and the user got a client with no
+	// coordinators, no account service, no country and no bypass list, looking
+	// exactly like a fresh install. The sentence on the detail line was true and
+	// nobody read it, because there was a working-looking app in front of it.
 	//
-	// (The trap this used to be the sole workaround for — no console under
-	// -H=windowsgui, old #50 in the retired Windows tray client's numbering —
-	// is what bacchus#187 fixed generally.)
+	// That is fail-open on the one input that carries every setting this client
+	// has, and the hardware pass reached it by following this repository's own
+	// runbook: a config saved by `Set-Content -Encoding UTF8` acquired a byte
+	// order mark, and the client ran three times with the whole file discarded.
+	// The BOM itself is now tolerated (appstate.utf8BOM); this is the other half,
+	// the one that holds for the next reason a file does not parse — a trailing
+	// comma, a smart quote, half a paste.
+	//
+	// Refusing is not the harsh option here, it is the recoverable one. The user
+	// keeps the file they wrote, is told which file and what is wrong with it, and
+	// fixes it. Starting instead offers a Settings window whose Save would write
+	// the zero value over their coordinators — losing the configuration to a typo
+	// rather than merely suspending it.
+	//
+	// A file that cannot be READ (permissions, a busy handle) is deliberately not
+	// this case: configPaths ranks two candidates and falling through to the next
+	// one is the documented precedence rule (see configPaths, and issue #118 for
+	// why the exe-adjacent candidate is so often not the user's file).
 	cfg, cfgPath, err := appstate.LoadConfig()
-	var cfgErr error
+	if bad, ok := appstate.ConfigUnreadable(err); ok {
+		log.Println("config:", bad)
+		showConfigRefusal(bad, logSink.Path())
+		return
+	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		cfgErr = err
 		log.Println("config:", err)
 	}
 
@@ -162,13 +178,6 @@ func main() {
 	// file it came from, which is the same split settings.go already uses.
 	picker := newCountryPicker(cfg.Country, ctrl.RefreshCountries, func(code string) error {
 		ctrl.SetCountry(code)
-		if cfgErr != nil {
-			// The config file exists and did not parse, so cfg is its zero
-			// value. Writing that back would replace every setting the user has
-			// with an empty file, over a typo they have already been told about
-			// on the detail line. The choice still applies to this session.
-			return errCountryConfigUnreadable
-		}
 		cfg.Country = code
 		path := cfgPath
 		if path == "" {
@@ -189,9 +198,17 @@ func main() {
 	trayOK := tray.Available()
 	var trayUI *trayMenu
 
+	// Whether a Protected session on this machine also cuts it off from its own
+	// local network (bacchus#257, ADR-0073). Derived from cfg here rather than
+	// asked of the Controller, because cfg is this file's copy and every writer
+	// of it — the picker, the settings save — runs on the UI goroutine, which is
+	// also the only goroutine that reads this. No lock, and no read of Controller
+	// state from inside an OnState callback.
+	lanBlocked := func() bool { return ctrl.DeviceEnforced() && !cfg.DisableKillSwitch }
+
 	ctrl.OnState = func(s appstate.ConnState) {
 		fyne.Do(func() {
-			indicator.update(s, ctrl.DeviceEnforced())
+			indicator.update(s, ctrl.DeviceEnforced(), lanBlocked())
 			applyButtonState(action, ctrl, s)
 			picker.setConnState(s)
 			if trayUI != nil {
@@ -210,39 +227,58 @@ func main() {
 		})
 	}
 
-	// Startup side effects driven by the loaded config, gated on cfgErr: a
-	// config file that exists but fails to parse leaves cfg at its zero
-	// value, and treating that as "AutoConnect/LaunchOnBoot are both off" -
-	// rather than just skipping these entirely - would mean an unrelated
-	// JSON typo silently unregisters autostart or dials nothing. Both wait
-	// for a config we actually, successfully read.
-	var bootErr error
-	if cfgErr == nil {
-		// Populate the picker before the user looks at it. Off the UI goroutine
-		// (RefreshCountries spawns its own), so a coordinator that never answers
-		// costs a status line rather than a window that will not paint.
-		//
-		// Ordered before AutoConnect deliberately: both run, and a client that
-		// dials on launch should still be able to show what else was on offer.
-		ctrl.RefreshCountries()
-		if cfg.AutoConnect {
-			ctrl.Connect()
-		}
-		// Reconciled at every startup, not just from the Settings window:
-		// the OS-side registration can drift from what the config says (the
-		// user moved the binary, or deleted the autostart entry by hand),
-		// and this is the one place guaranteed to run before anything else.
-		if err := appstate.SetLaunchOnBoot(cfg.LaunchOnBoot); err != nil {
-			bootErr = err
-			log.Println("launch-on-boot:", err)
-		}
+	// Startup side effects driven by the loaded config. They no longer need a
+	// "did the config parse" gate: a config file that exists and does not parse
+	// has already stopped this function above (bacchus#255), so cfg here is
+	// either a file this client read or the zero value of a machine that has no
+	// file at all — and on that machine "AutoConnect and LaunchOnBoot are both
+	// off" is the truth rather than an artefact of a typo.
+	//
+	// Populate the picker before the user looks at it. Off the UI goroutine
+	// (RefreshCountries spawns its own), so a coordinator that never answers
+	// costs a status line rather than a window that will not paint.
+	//
+	// Ordered before AutoConnect deliberately: both run, and a client that
+	// dials on launch should still be able to show what else was on offer.
+	ctrl.RefreshCountries()
+	if cfg.AutoConnect {
+		ctrl.Connect()
 	}
 
-	switch {
-	case cfgErr != nil:
-		detail.SetText(lang.L("Your settings file could not be read:") + " " + cfgErr.Error())
-	case bootErr != nil:
-		detail.SetText(lang.L("Launch-on-boot could not be set:") + " " + bootErr.Error())
+	// One detail line, built from every startup finding rather than assigned by
+	// whichever branch ran last. There used to be a switch here choosing ONE of
+	// two, which was correct while the two could not both happen and is not a
+	// shape to extend: a third finding added later would silently hide a second.
+	var startup []string
+
+	// Reconciled at every startup, not just from the Settings window:
+	// the OS-side registration can drift from what the config says (the
+	// user moved the binary, or deleted the autostart entry by hand),
+	// and this is the one place guaranteed to run before anything else.
+	if err := appstate.SetLaunchOnBoot(cfg.LaunchOnBoot); err != nil {
+		log.Println("launch-on-boot:", err)
+		startup = append(startup, lang.L("Launch-on-boot could not be set:")+" "+err.Error())
+	}
+
+	// Everything this client made of the configuration it just read, said once,
+	// at the moment it is decided (bacchus#258). See appstate.CheckConfig: an
+	// entry the client accepted, stored and then could not act on is the shape
+	// all four of this wave's client cards share, and the answer is to say so
+	// rather than to guess better.
+	//
+	// To the log as well as the line, one finding per line there: the line is
+	// read now by whoever is looking at the window, and the log is read later by
+	// whoever they ask for help — which for a bypass entry that does nothing is
+	// the more likely of the two, since nothing about it looks broken.
+	if findings := appstate.CheckConfig(cfg); len(findings) > 0 {
+		for _, f := range findings {
+			log.Println("config:", f)
+		}
+		startup = append(startup, lang.L("Some of your settings are not in force:")+" "+strings.Join(findings, " "))
+	}
+
+	if len(startup) > 0 {
+		detail.SetText(strings.Join(startup, " "))
 	}
 
 	onConfigSaved := func(newCfg appstate.Config, path string) {
@@ -410,14 +446,6 @@ func releaseLine() string {
 // file because "already running" is the first thing somebody will ask about, and
 // the log is where the answer is.
 func showRefusal(cause error, logPath string) {
-	a := app.NewWithID(appID)
-	a.Settings().SetTheme(newCalmTheme())
-	a.SetIcon(appIcon())
-	w := a.NewWindow(appName)
-
-	headline := widget.NewLabel(lang.L("Bacchus is already running"))
-	headline.TextStyle = fyne.TextStyle{Bold: true}
-
 	body := lang.L("Another copy of Bacchus is already running on this computer, so this one has stopped. Use the Bacchus icon in the notification area to open it.")
 	if !errors.Is(cause, singleinstance.ErrAlreadyRunning) {
 		// The other outcome: the guard could not be established at all, so
@@ -426,29 +454,69 @@ func showRefusal(cause error, logPath string) {
 		// one who can check.
 		body = lang.L("Bacchus could not check whether it is already running on this computer, and will not start a second copy: two of them can leave this machine unprotected while both say otherwise. Close any other Bacchus window and try again.")
 	}
-	message := widget.NewLabel(body)
+	showStopped(lang.L("Bacchus is already running"), body, "", logPath)
+}
+
+// showConfigRefusal is what this client does instead of starting with a config
+// file it could not read (bacchus#255).
+//
+// Same window and same reasoning as showRefusal above, for a different refusal:
+// on a -H=windowsgui binary there is no console, so a program that declines to
+// start and says so anywhere but on screen has, from the user's side, done
+// nothing at all.
+//
+// It names the FILE, which is the part the old detail line got wrong. This
+// client reads from two candidates (appstate's configPaths) and the message a
+// user saw — `invalid character 'ï»¿' looking for beginning of value` — named
+// neither the file nor a cause anybody could act on. The parser's own text is
+// still shown underneath, because for a trailing comma or a stray quote it is
+// exactly the diagnostic, but it is no longer the whole message.
+func showConfigRefusal(bad *appstate.ConfigUnreadableError, logPath string) {
+	showStopped(
+		lang.L("Bacchus could not read your settings file"),
+		lang.L("Bacchus has stopped rather than start without the settings in this file, which would look like a fresh install and connect to nothing. Fix the file and start Bacchus again."),
+		bad.Path+"\n"+bad.Err.Error(),
+		logPath,
+	)
+}
+
+// showStopped is the one window this client puts up when it will not start: a
+// bold headline, one calm paragraph, an optional block of detail, and the log
+// path. It runs its own Fyne app because it is used before — or instead of — the
+// real one existing, and it shares no state with a running client.
+func showStopped(headlineText, bodyText, detailText, logPath string) {
+	a := app.NewWithID(appID)
+	a.Settings().SetTheme(newCalmTheme())
+	a.SetIcon(appIcon())
+	w := a.NewWindow(appName)
+
+	headline := widget.NewLabel(headlineText)
+	headline.TextStyle = fyne.TextStyle{Bold: true}
+
+	message := widget.NewLabel(bodyText)
 	message.Wrapping = fyne.TextWrapWord
 
-	where := widget.NewLabel("")
-	where.Wrapping = fyne.TextWrapWord
+	rows := []fyne.CanvasObject{headline, message}
+	if detailText != "" {
+		detail := widget.NewLabel(detailText)
+		detail.Wrapping = fyne.TextWrapWord
+		detail.TextStyle = fyne.TextStyle{Monospace: true}
+		rows = append(rows, detail)
+	}
 	if logPath != "" {
-		where.SetText(lang.L("Details are in:") + " " + logPath)
+		where := widget.NewLabel(lang.L("Details are in:") + " " + logPath)
+		where.Wrapping = fyne.TextWrapWord
+		rows = append(rows, where)
 	}
 
 	w.SetContent(container.NewBorder(
-		container.NewVBox(headline, message, where),
+		container.NewVBox(rows...),
 		widget.NewButton(lang.L("Close"), a.Quit),
 		nil, nil, nil,
 	))
-	w.Resize(fyne.NewSize(420, 220))
+	w.Resize(fyne.NewSize(420, 260))
 	w.ShowAndRun()
 }
-
-// errCountryConfigUnreadable is why a country choice was not written to disk:
-// the config file on disk did not parse, so there is nothing safe to write back
-// over it. The picker recognises it (errors.Is) and says so in its own words -
-// this text is never shown, which is why it is not a translation key.
-var errCountryConfigUnreadable = errors.New("the settings file could not be read, so the choice was not saved")
 
 // detailText renders one detail-line message in the user's language.
 //
