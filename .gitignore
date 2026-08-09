@@ -43,7 +43,9 @@ bacchus-fyne
 /coldstart-bootstrap
 /coldstart-issue
 /coldstart-probe
+/coordinator-probe
 /relaychain-probe
+/rendezvous-tap
 
 # --- third-party runtime binaries (fetched, NOT vendored) ---
 # wintun.dll is proprietary ((c) WireGuard LLC, "licensed, not sold" — see its
