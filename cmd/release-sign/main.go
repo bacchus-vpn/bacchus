@@ -294,6 +294,24 @@ func sign(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Loud, NOT fatal, and the asymmetry is the point (issue #252).
+	//
+	// It is tempting to refuse here, since this is where signing authority is
+	// exercised. That would be the wrong gate twice over. It would block the only way
+	// to exercise the release channel end to end before a real ceremony has run — the
+	// rehearsal this warning exists to accompany. And it would guard the artifact that
+	// is not actually dangerous: a manifest signed under the development root is INERT
+	// against a real build, because that build anchors to the ceremony root and the
+	// signature simply does not verify.
+	//
+	// The thing that cannot be allowed out is a dev-ANCHORED BINARY, because for that
+	// binary anyone who can run sha256 over a published sentence is the update
+	// authority, and ADR-0052 makes the anchor irrevocable at first ship. That is
+	// where the fatal check lives; see the release workflow's anchor gate and
+	// TestAReleaseBuildRefusesTheDevelopmentAnchor.
+	if update.IsDevRoot(rootPub) {
+		fmt.Fprintln(os.Stderr, "release-sign: signing under the DEVELOPMENT root. This release can only ever be applied by a build anchored to the same development root, and both are for exercising the channel. Neither may reach a user (issue #252)")
+	}
 	priv, err := readKey(*keyPath)
 	if err != nil {
 		return err

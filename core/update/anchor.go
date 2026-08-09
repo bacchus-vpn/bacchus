@@ -42,6 +42,58 @@ var rootPubHex = ""
 // verify a release and will not apply one.
 var ErrNoAnchor = errors.New("update: this build carries no release trust anchor")
 
+// DevRootPubHex is the PUBLIC half of the development root — the throwaway key
+// bacchus-payment's internal/devroot derives from a phrase published in a source
+// file, and which every -dev flow and every test in this package signs under.
+//
+// # Why a production constant, and not only a test one
+//
+// The published phrase is already in this repository (core/update's test keys) and
+// that is deliberate: bacchus-payment's own reasoning is that "a key whose secret is
+// a published string in a source file cannot be mistaken for a real one". It cannot
+// be mistaken by a READER. It is entirely indistinguishable to a BUILD, which is the
+// gap this constant closes — ParseAnchor accepts it, Anchor returns it, and the
+// resulting binary verifies releases signed by anyone who can run sha256 over a
+// sentence.
+//
+// bacchus-payment guards its own side with internal/devroot.IsDevRoot, whose comment
+// says it "exists to make that swap verifiable rather than assumed". That check lived
+// on the side that cannot ship. This is the same check on the side that can.
+//
+// ADR-0052 §6 is what makes the asymmetry expensive: the compiled-in anchor is
+// IRREVOCABLE at first ship, and losing a root costs a manual reinstall by every
+// user. One shipped binary carrying this value hands permanent update authority over
+// those installs to any reader of this repository, and the mechanism that would
+// deliver a revocation is the mechanism being subverted.
+//
+// The value is the public key only. Production code never needs to derive the
+// private half, and a test pins this constant against the published phrase so the
+// two cannot drift apart (issue #252).
+const DevRootPubHex = "1b7a9efd101a59248e53e34c9795148fdfc4da712bd8f7e0146cdb2fd6878ac6"
+
+// IsDevRoot reports whether pub is the published development root.
+//
+// It is the one anchor comparison in this package that DOES make a decision —
+// AnchorFingerprint deliberately does not — and the decision it drives is stated in
+// two places with different severities, per the ruling on issue #252: loud at
+// runtime, fatal at the release gate. Loud rather than fatal at runtime because a
+// dev anchor is exactly what a rehearsal needs in order to exercise the channel at
+// all; fatal at the gate because nothing carrying it may ever be published.
+func IsDevRoot(pub ed25519.PublicKey) bool {
+	want, err := ParseAnchor(DevRootPubHex)
+	if err != nil {
+		// Unreachable: the constant is pinned by a test against the published phrase.
+		return false
+	}
+	return want.Equal(pub)
+}
+
+// DevRootWarning is what a process anchored to the development root says about
+// itself. One sentence, written for an operator reading a log rather than for the
+// person who stamped the build, because the person who stamped it is not the one who
+// will be surprised.
+const DevRootWarning = "update: THIS BUILD TRUSTS THE DEVELOPMENT ROOT. Its private key is derived from a phrase published in this repository, so anyone at all can sign a release this binary will accept and apply. It is for exercising the release channel and must never reach a user; a real build carries the anchor from the offline ceremony. See issue #252"
+
 // Anchor returns the compiled-in root public key, or ErrNoAnchor.
 func Anchor() (ed25519.PublicKey, error) { return ParseAnchor(rootPubHex) }
 
