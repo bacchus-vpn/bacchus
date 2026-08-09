@@ -979,6 +979,150 @@ func TestPin_SaysNothingWhenTheLiveUnitMatches(t *testing.T) {
 	}
 }
 
+// A box with NO unit coverage read like a box with nothing wrong, because the skip was
+// printed at the volume of a pass and counted nowhere (issue #248). On the first real
+// run the box the check could not compare was also the only box that misbehaved.
+func TestPin_CountsTheBoxesItCouldNotCompare(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"), journalFor(head[:12], head[:12], head[:12]), 0o644)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — an uncompared unit reports, it does not fail the run\n%s", code, out)
+	}
+	if !strings.Contains(out, "units: 2 of 3 compared clean, 0 with a gap, 1 NOT COMPARED") {
+		t.Errorf("the summary line does not separate compared from uncompared:\n%s", out)
+	}
+	if !strings.Contains(out, "1 box(es) were NOT COMPARED at all (issue #248)") {
+		t.Errorf("an uncompared box is not reported as its own finding:\n%s", out)
+	}
+	if !strings.Contains(out, "NOT COMPARED: nothing ships as deploy/bacchus-relay.service") {
+		t.Errorf("the skip is not labelled as a non-comparison:\n%s", out)
+	}
+}
+
+// The mapping that closes it, and the reason no bacchus-node.service is invented: the
+// role a node runs is a flag, so a box whose unit is named differently is running what
+// deploy/bacchus-exit.service already describes. Saying so belongs in the operator's own
+// host list, beside the unit names it already carries.
+func TestPin_ComparesAUnitMappedToATemplateByAnotherName(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"), journalFor(head[:12], head[:12], head[:12]), 0o644)
+	// The relay box now runs the exit template's directives under its own name, which
+	// is what a real relay box looks like: same unit shape, different -role.
+	root := repoRoot(t)
+	write(t, filepath.Join(f.dir, "unit-cat-"+relayTarget),
+		"# /etc/systemd/system/bacchus-relay.service\n"+string(readFile(t, filepath.Join(root, exitUnitRelPath))), 0o644)
+	appendTo(t, f.cfg, "UNIT_TEMPLATES=\"bacchus-relay=bacchus-exit.service\"\n")
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	if strings.Contains(out, "NOT COMPARED:") {
+		t.Errorf("the mapped unit was still skipped:\n%s", out)
+	}
+	if !strings.Contains(out, "units: 3 of 3 compared clean, 0 with a gap, 0 NOT COMPARED") {
+		t.Errorf("the mapping did not bring the box into the count:\n%s", out)
+	}
+}
+
+// A mapped box is compared for real, not merely counted: a missing directive on it is
+// the finding issue #234 exists for, and it was invisible on this box until now.
+func TestPin_AMappedUnitStillReportsAMissingDirective(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"), journalFor(head[:12], head[:12], head[:12]), 0o644)
+	root := repoRoot(t)
+	shipped := string(readFile(t, filepath.Join(root, exitUnitRelPath)))
+	write(t, filepath.Join(f.dir, "unit-cat-"+relayTarget),
+		"# /etc/systemd/system/bacchus-relay.service\n"+strings.ReplaceAll(shipped, rollbackOnFailure, ""), 0o644)
+	appendTo(t, f.cfg, "UNIT_TEMPLATES=\"bacchus-relay=bacchus-exit.service\"\n")
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — a unit gap reports and does not fail the run\n%s", code, out)
+	}
+	if !strings.Contains(out, "MISSING from the live unit") || !strings.Contains(out, rollbackOnFailure) {
+		t.Errorf("the mapped box's missing directive was not found:\n%s", out)
+	}
+	if !strings.Contains(out, "units: 2 of 3 compared clean, 1 with a gap, 0 NOT COMPARED") {
+		t.Errorf("a gap and a non-comparison are not counted apart:\n%s", out)
+	}
+}
+
+// -------------------------------------------------------------------------
+// the gates (issue #249)
+// -------------------------------------------------------------------------
+
+// The posture is reported on every run, from the journal the fleet check already read,
+// and reporting alone judges nothing: a deployment that declares no gates is not failed
+// for running none.
+func TestPin_ReportsTheGatePostureWithoutJudgingIt(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"),
+		journalFor(head[:12], head[:12], head[:12])+gatesOffJournalTail(), 0o644)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — an undeclared gate posture is reported, not judged\n%s", code, out)
+	}
+	if !strings.Contains(out, "admission           OFF") || !strings.Contains(out, "device              OFF") {
+		t.Errorf("the gate posture is not in the run's output:\n%s", out)
+	}
+}
+
+// And the half that stops a false pass: an operator who has declared which gates this
+// deployment enforces gets a FAILED pin when one of them is off, with the three cards it
+// would otherwise close named.
+func TestPin_FailsWhenADeclaredGateIsOff(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"),
+		journalFor(head[:12], head[:12], head[:12])+gatesOffJournalTail(), 0o644)
+	appendTo(t, f.cfg, "COORDINATOR_GATES=\"admission device\"\n")
+
+	out, code := f.pin()
+	if code != 3 {
+		t.Fatalf("exit %d, want 3\n%s", code, out)
+	}
+	if !strings.Contains(out, "admission is DECLARED ON and is OFF") {
+		t.Errorf("the failing gate is not named:\n%s", out)
+	}
+	if !strings.Contains(out, "without refusing anything") {
+		t.Errorf("the consequence — a test that passes without refusing — is not stated:\n%s", out)
+	}
+}
+
+// gatesOffJournalTail is the gate half of a coordinator's startup, appended to a
+// rendered fleet journal. Shared with gate_check_test.go's fixture through that file's
+// gatesOffJournal, which holds the same lines against the real binary.
+func gatesOffJournalTail() string {
+	p := "Aug 08 12:00:01 box bacchus-coordinator[9]: "
+	return p + "paths: working directory /\n" +
+		p + "paths: -admission-revocations         /secrets/admission-revocations.json [relative \"secrets/admission-revocations.json\"; ABSENT — NOTHING IS REVOKED in the admission namespace]\n" +
+		p + "paths: -device-revocations            /secrets/device-revocations.json [relative \"secrets/device-revocations.json\"; ABSENT — NOTHING IS REVOKED in the device namespace]\n" +
+		p + "WARNING: admission DISABLED (neither -admission-pubkey nor -admission-authority set) — any client or node can join this network (issue #42)\n" +
+		p + "device-credential gate DISABLED (-device-root-pubkey not set) — connects are gated by admission alone; no entitlement is checked (issue #50)\n"
+}
+
+// appendTo adds a line to a file the fake fleet already wrote — the host list, in
+// practice, which several tests extend with one setting rather than restating.
+func appendTo(t *testing.T, path, line string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatalf("opening %s: %v", path, err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(line); err != nil {
+		t.Fatalf("appending to %s: %v", path, err)
+	}
+}
+
 // registration is one `<role> registered:` line in a rendered journal.
 type registration struct{ role, id, rev string }
 
@@ -1519,7 +1663,15 @@ func TestUnitCheck_RefusesAnEmptyLiveUnit(t *testing.T) {
 // third-party STUN servers.
 func TestDeployArtifactsNameNoRealHost(t *testing.T) {
 	root := repoRoot(t)
-	for _, rel := range []string{pinRelPath, fleetCheckRelPath, nodeIDRelPath, unitCheckRelPath, "deploy/testbed.env.example", adrRelPath} {
+	for _, rel := range []string{
+		pinRelPath, fleetCheckRelPath, nodeIDRelPath, unitCheckRelPath, gateCheckRelPath,
+		"deploy/testbed.env.example", gatesEnvRelPath,
+		// The two server units and the gates configuration are here for the same
+		// reason the scripts are: they are pasted from a session where the real
+		// values were right in front of whoever wrote them.
+		coordUnitRelPath, exitUnitRelPath,
+		adrRelPath, gatesADRRelPath,
+	} {
 		body := string(readFile(t, filepath.Join(root, rel)))
 
 		for _, ip := range ipv4Literal.FindAllString(body, -1) {

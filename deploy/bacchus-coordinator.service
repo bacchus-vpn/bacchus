@@ -13,15 +13,48 @@ After=network.target
 OnFailure=bacchus-update-rollback@%n.service
 
 [Service]
+# Nine of this binary's flags default to a RELATIVE `secrets/…` path, and for a
+# system service an unset WorkingDirectory= is `/` — so every one of them
+# resolves under the root directory, where nothing is staged (issue #247,
+# ADR-0064 §7). Two of those flags are the revocation lists, where a missing file
+# is not an error: it means NOTHING IS REVOKED, quietly.
+#
+# /etc/bacchus is where every other file this coordinator is handed already lives
+# and is created mode 0700 by deploy/install.sh, so the relative defaults land in
+# /etc/bacchus/secrets/ rather than off the root.
+#
+# ADDING THIS TO A LIVE UNIT MOVES EVERY RELATIVE PATH THAT IS CURRENTLY IN
+# EFFECT. Read the `paths:` block in the journal before and after: a flag that
+# was resolving to a file under / and finding nothing loses nothing, and one that
+# had a file behind it now reads a different place.
+WorkingDirectory=/etc/bacchus
+
 # Public advertise address + TURN credentials come from the env file
 # (gitignored). See deploy/coordinator.env.example. Bootstrap signing key +
 # per-user secrets persist under /etc/bacchus/ (created on first run if
 # missing).
 EnvironmentFile=/etc/bacchus/coordinator.env
+
+# The credential gates, in one file the operator applies deliberately (issue
+# #249, ADR-0072). See deploy/coordinator-gates.env.example for what goes in it
+# and what each step waits on. The leading `-` makes a missing file fine: a box
+# that has not been given one runs exactly as it did before, which is what keeps
+# this addable to a live unit in either order.
+EnvironmentFile=-/etc/bacchus/coordinator-gates.env
+
+# $BACCHUS_COORDINATOR_GATES is `$VAR` and NOT `${VAR}`, deliberately: systemd
+# splits `$VAR` at whitespace into ZERO or more arguments, so an unset or empty
+# value adds nothing at all, while `${VAR}` always produces exactly one argument
+# and an empty one would be a flag value of "". That is what lets one token carry
+# a whole gate set and still mean "no gates" when the file is absent — and it is
+# why the next gate flag is an edit to the env file rather than to this unit,
+# which deploy/bacchus-pin.sh will never copy over a box's hand-edited one
+# (ADR-0064 §7).
 ExecStart=/usr/local/bin/bacchus-coordinator -advertise ${ADVERTISE} \
   -turn-public-ip ${TURN_PUBLIC_IP} -turn-user ${TURN_USER} -turn-pass ${TURN_PASS} \
   -bootstrap-key /etc/bacchus/bacchus-bootstrap.key \
-  -bootstrap-secrets /etc/bacchus/bacchus-bootstrap-secrets.json
+  -bootstrap-secrets /etc/bacchus/bacchus-bootstrap-secrets.json \
+  $BACCHUS_COORDINATOR_GATES
 Restart=always
 RestartSec=2
 User=root

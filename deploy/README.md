@@ -48,9 +48,16 @@ with no systemd.
    mkdir -p /etc/bacchus
    cp deploy/node.env.example /etc/bacchus/node.env
    cp deploy/coordinator.env.example /etc/bacchus/coordinator.env
-   # edit both: set PUBLIC_IP / ADVERTISE / COORDINATORS / TURN_PUBLIC_IP / TURN_PASS ...
+   cp deploy/coordinator-gates.env.example /etc/bacchus/coordinator-gates.env
+   # edit the first two: set PUBLIC_IP / ADVERTISE / COORDINATORS / TURN_PUBLIC_IP / TURN_PASS ...
    chmod 600 /etc/bacchus/*.env
    ```
+   The gates file turns nothing on and needs no edit to start a coordinator. It is
+   the credential gates — admission, device entitlement, revocations, the account
+   service's address — which are off by default and applied deliberately, in the
+   steps that file documents. See
+   [Node admission](../docs/RUNNING.md#node-admission-who-may-join) and
+   [Device entitlement at connect](../docs/RUNNING.md#device-entitlement-at-connect-issue-50-adr-0045).
 4. Open the firewall (`3478/udp` now carries STUN/TURN **and** the cold-start
    bootstrap listener, issue #30 — see
    [docs/design/bootstrap-protocol.md](../docs/design/bootstrap-protocol.md)):
@@ -152,6 +159,44 @@ reached no machine:
 ssh <box> "systemctl cat bacchus-exit" |
   sh bacchus-unit-check.sh bacchus-exit.service
 ```
+
+A box whose unit name this repository ships no template for is **NOT COMPARED**,
+counted as such, and reported apart from a box that compared clean (issue #248).
+That distinction is the same one the fleet check learned in #224: a check that
+silently covers two of three boxes reports on a fleet it did not look at, and on
+the first real run the box it could not compare was the only box that misbehaved.
+No second near-identical `.service` file is shipped to fix it — the role a node
+runs is a flag, so a box whose unit is called `bacchus-node` or `bacchus-relay` is
+running what `bacchus-exit.service` already describes. Say so in `testbed.env`:
+
+```sh
+UNIT_TEMPLATES="bacchus-relay=bacchus-exit.service"
+```
+
+**The credential gates are read, never configured** (issue #249, ADR-0072). Every
+one of them — `-admission-pubkey`, `-admission-authority`, `-device-root-pubkey`,
+`-account-service`, `-revocations-root-pubkey`, both `-*-revocations-source` —
+fails **open** when unset, so a deployment with all of them off passes every check
+above and refuses nothing anywhere. `bacchus-gate-check.sh` reads the posture out
+of the coordinator's own journal and says which are on:
+
+```bash
+ssh <coordinator-host> "journalctl -u bacchus-coordinator --since -10min --no-pager" |
+  sh bacchus-gate-check.sh
+```
+
+It reads what the binary **concluded**, not what its flags say, because those
+differ where it matters: a revocation flag naming a path that does not exist is in
+`ExecStart` and enforces nothing. Declare the gates this deployment enforces in
+`testbed.env` and a pin that finds one off **fails**:
+
+```sh
+COORDINATOR_GATES="admission revocation-lists"
+```
+
+Leave it empty and the posture is reported and nothing is judged. What to put in
+the unit to turn each gate on, and what each one waits on first, is
+[coordinator-gates.env.example](coordinator-gates.env.example).
 
 The full procedure, the negative control the probe rests on, and what the exit
 codes mean: [docs/RUNNING.md](../docs/RUNNING.md#pinning-the-whole-deployment-to-a-commit-issue-205-adr-0064).

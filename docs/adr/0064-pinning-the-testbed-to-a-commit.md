@@ -523,3 +523,64 @@ always, which is the no-copy rule being right rather than a fault).
 `#234`'s owner action — installing the handler and adding the line on each live
 box — is unchanged and is still an owner action. What changes is that from now on
 the pin says which boxes are still waiting for it.
+
+## Amendment (2026-08-09): the pin reads the gates, and a box it did not compare is counted (#249, #247, #248)
+
+- Implementation: `deploy/bacchus-gate-check.sh` (new),
+  `deploy/coordinator-gates.env.example` (new), `deploy/bacchus-coordinator.service`,
+  `deploy/bacchus-pin.sh`, `deploy/testbed.env.example`, `deploy/install.sh`,
+  `deploy/gate_check_test.go` (new), `deploy/pin_test.go`, `docs/RUNNING.md`
+- Decided in full in **ADR-0072**; recorded here because two of the three
+  findings are corrections to sections above.
+
+### G. §7's no-copy rule shapes where configuration lives, and the corollary was not drawn (#249, #247)
+
+§7 says unit files are never copied because the live ones carry hand-added flags,
+and amendment B added the resolved-paths report so an operator can see what those
+flags actually became. Neither section asked the next question: **if a flag can
+only ever be added by hand, per box, where should the flag's value live so the
+next person to edit that unit does not drop it?**
+
+The live coordinator answers it by omission. It carries the bootstrap pair, the
+policy set and `-geoip`, and not one credential gate — no `-admission-pubkey`, no
+`-admission-authority`, no `-device-root-pubkey`, no `-account-service`, no
+`-revocations-root-pubkey`, neither `-*-revocations-source`. All of them fail
+open, so every check this record built reports a healthy fleet, correctly, while
+nothing is refused anywhere.
+
+The mechanism is one `EnvironmentFile=-` line and one word-split
+`$BACCHUS_COORDINATOR_GATES` token in `ExecStart`, so that after a single hand
+edit per box the gates move out of the unit entirely. ADR-0072 §2 records why
+`$VAR` and not `${VAR}` is forced rather than preferred. Two consequences for
+this record specifically:
+
+- **`WorkingDirectory=/etc/bacchus` now ships in the template**, which makes
+  §7's own example — `secrets/device-revocations.json` resolving to
+  `/secrets/device-revocations.json` — a MISSING directive the unit check reports
+  at full volume on every run, rather than a warning the pin repeats and nobody
+  acts on. That is amendment F's mechanism applied to the condition §7 described.
+- **`EnvironmentFile=` is a directive and `ExecStart`'s contents are not.** A box
+  that never received the gates file is a finding the unit comparison can make; a
+  box that received it and never got the `ExecStart` token is not, because
+  `ExecStart` essentially always differs and that difference is this rule being
+  right. The second case is caught by the gate check instead — by behaviour, not
+  by text, which is where §3 already put this kind of question.
+
+### H. A box with no shipped template read like a box with nothing wrong (#248)
+
+Amendment F ends: *"A unit with no shipped template is stated, not skipped.
+`bacchus-relay` is that case today."* Stated, and **not counted** — the line was
+printed at the volume of a pass, no summary distinguished it, and the run's
+verdict was unaffected. On the first real run the box the check could not compare
+was also the only box that failed to re-register and needed a restart.
+
+That is amendment A's finding in a different file. A count that treats "checked
+and clean" and "not checked" as the same thing reports on a fleet it did not look
+at, which is what `--expect` was added to stop the fleet check doing. The pin now
+prints `units: N of M compared clean, X with a gap, Y NOT COMPARED` and warns
+separately when `Y > 0`, and `UNIT_TEMPLATES` in `testbed.env` maps a unit name
+to the template it should be compared against — no second near-identical
+`.service` file is shipped, because the role a node runs is a flag and the box is
+running the exit template under another name. ADR-0072 §5.
+
+It still does not fail the run, for F's unchanged reason.
