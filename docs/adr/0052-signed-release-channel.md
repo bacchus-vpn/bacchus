@@ -679,3 +679,69 @@ before relying on it:
   fleet binary twice from two different source paths and refuses the release if any
   pair differs. It also found that `cmd/bacchus-netd` does not link `core/version`,
   so the `-ldflags -X` release stamp is silently ignored for that one binary.
+
+## Amendment (2026-08-09, #252) — Gate 2's custody call is CONFIRMED, and the development anchor is guarded
+
+### Custody: no longer provisional
+
+The 2026-08-02 amendment above ruled update-key custody and then said of it: *"This is
+provisional. The owner asked to be re-asked before it is committed to"*, naming **the
+minting of the `update` delegation** as the commitment point rather than the shipping of
+a release.
+
+Re-asked and confirmed on **2026-08-09**, unchanged in all three parts: a **single key**
+rather than a threshold; **its own offline medium**, separate from the root shares; and
+the **five-step release procedure**, with signing never triggered by CI. The reasoning
+recorded above stands as written and is not repeated here.
+
+So Gate 2 is closed. The word *provisional* no longer applies to it, and a future reader
+should not treat the placeholder language above as an open question.
+
+### What the rehearsal exposed
+
+The commitment point arrived by an unplanned route. `bacchus-payment#81` — the ceremony
+that mints the `update` delegation — was to be run as a **rehearsal against a throwaway
+root on an ordinary machine**, deliberately, because nothing has shipped and the plan of
+record is to re-run every ceremony before release. Preparing that rehearsal is what
+surfaced `#252`.
+
+`core/update/anchor.go` had no way to tell one root from another. `AnchorFingerprint`'s
+own doc says it *"is never compared to make a decision"*, and `Stamped()` reports only
+that the slot is non-empty. So a build anchored to the **published development root** —
+whose private key derives from a phrase carried in this repository, deliberately, so that
+*"a key whose secret is a published string in a source file cannot be mistaken for a real
+one"* — verified and applied releases signed under it and said nothing.
+
+That reasoning is sound for a **reader** and inert for a **build**. `bacchus-payment`
+already guards its own side with `internal/devroot.IsDevRoot`, described there as existing
+*"to make that swap verifiable rather than assumed"*. The check lived on the side that
+cannot ship and was missing from the side that can.
+
+§6's *"the compiled-in anchor is irrevocable at first ship"* is what makes the gap
+expensive rather than untidy: one shipped binary carrying that anchor hands permanent
+update authority over those installs to any reader of this repository, and the mechanism
+that would deliver a revocation is the mechanism being subverted.
+
+### The ruling: loud at runtime, fatal at the release gate
+
+- **Runtime is loud, not fatal.** A development anchor is exactly what a rehearsal needs
+  in order to exercise the channel at all. `NewUpdater` says so through the caller's own
+  log sink — which is the seam `clients/fyne` supplies, so the warning reaches a GUI's
+  user-visible log rather than only the standard logger.
+- **The release gate is fatal.** A test reads the anchor out of the linked binary and
+  refuses a development one. A test rather than a workflow step, for the reason this
+  repository has already been bitten by twice: a `-ldflags -X` naming a symbol that does
+  not resolve is **ignored silently**, so a step that inspects the value it *passed*
+  proves nothing. `strings | grep` cannot stand in either, now that the constant is
+  production code and appears in every binary that links the package.
+- **`cmd/release-sign sign` warns rather than refuses**, and the asymmetry is deliberate.
+  A manifest signed under the development root is **inert against a real build** — that
+  build anchors elsewhere and the signature does not verify. The dangerous artifact is
+  the dev-anchored *binary*, not the dev-signed *manifest*, so refusing to sign would
+  block the rehearsal while protecting nothing.
+
+Today **no build path stamps an anchor at all** — not `release.yml`, not `ci.yml`, not
+`deploy/install.sh` — so the gate skips everywhere and guards nothing. That is why a
+second test asserts the *implication*: whichever build path first learns to stamp an
+anchor must also turn the gate on. Without it the guard would skip forever the moment the
+capability arrived, and a skip reads as a pass.
