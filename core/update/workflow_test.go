@@ -42,11 +42,44 @@ func TestReleaseWorkflowBuildsTheFleetReproducibly(t *testing.T) {
 		{"go-version-file: go.mod", "ADR-0052 §5 wants a PINNED toolchain: the toolchain is an input to the output"},
 		{"/tmp/bacchus-rebuild", "the second source path — a rebuild at the SAME path would agree with itself and prove nothing"},
 		{"must be byte-identical", "the step that refuses a release whose binaries do not reproduce"},
-		{"go list -deps", "which binaries carry a version stamp is DERIVED, because cmd/bacchus-netd does not link core/version and the -X for it is silently ignored"},
+		{"go list -deps", "which binaries carry a version stamp is DERIVED, because a command that does not link core/version has the -X for it silently ignored"},
+		{stampEnv, "the release stamp is read back out of the built artifacts by TestReleaseArtifactsCarryTheStamp, and that test SKIPS unless this names the release"},
+		{artifactsEnv, "the artifacts the read-back is pointed at; without it the gate has nothing to read"},
 		{"artifacts.json", "the rows the offline signer turns into a manifest"},
 	} {
 		if !strings.Contains(w, want.needle) {
 			t.Errorf("%s no longer contains %q — %s", releaseWorkflow, want.needle, want.why)
+		}
+	}
+}
+
+// The release stamp must never again be read by searching the artifact's bytes
+// for the number (bacchus-vpn/bacchus#254).
+//
+// `strings -a … | grep -qx "$SEMVER"` asks whether the value occupies a whole
+// LINE of `strings` output, and Go packs its strings contiguously, so the answer
+// is a property of what sits beside the value rather than of the stamp. It went
+// red on a correctly stamped binary, and — the half that matters more — it goes
+// green on one built with no -X at all, because core/version's own source
+// carries the "0.0.0" an unstamped build reports and a dry run asserts exactly
+// that. TestAnUnstampedBinaryStillContainsTheNumber pins the premise; this pins
+// that the workflow does not act on it.
+//
+// COMMENTS ARE EXEMPT ON PURPOSE. release.yml explains at length why it does not
+// do this, and a check that fired on the explanation would push the reasoning
+// out of the file it is about — an earlier test in this file learned that by
+// failing on its own documentation.
+func TestTheReleaseStampIsNotReadByHuntingForTheNumber(t *testing.T) {
+	for i, line := range strings.Split(readWorkflow(t), "\n") {
+		code := strings.TrimSpace(line)
+		if code == "" || strings.HasPrefix(code, "#") {
+			continue
+		}
+		if strings.Contains(code, "strings -a") {
+			t.Errorf("%s line %d runs %q. The release stamp is read by decoding the string header "+
+				"at core/version.current out of the artifact (TestReleaseArtifactsCarryTheStamp), "+
+				"not by hunting the byte blob for the number: an unstamped binary contains it too.",
+				releaseWorkflow, i+1, code)
 		}
 	}
 }
