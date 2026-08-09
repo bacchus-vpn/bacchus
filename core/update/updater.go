@@ -128,6 +128,25 @@ func NewUpdater(cfg Config) (*Updater, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Loud at runtime (issue #252). Here rather than in each embedder for the reason
+	// cmd/node and clients/fyne already demonstrate: an embedder that forgets is
+	// silent, and the failure being guarded against is a build nobody noticed was
+	// anchored wrong. Anything that can apply a release constructs an Updater, so this
+	// is the one chokepoint that cannot be skipped.
+	//
+	// Through cfg.Log rather than the log package directly, so a GUI embedder's own
+	// sink receives it too — clients/fyne routes this to its user-visible log, which
+	// is exactly where an operator running a rehearsal build should see it.
+	//
+	// Once per Updater, NOT once per process. core/version's warnUnstamped is a
+	// sync.Once because Current() is called on every code path that reports a version;
+	// this fires when an update path is CONSTRUCTED, which happens once or twice in a
+	// process's life. And if a process really does build several updaters on a
+	// development root, several warnings is the accurate answer rather than a noisy
+	// one — each of them can apply a release anybody can sign.
+	if IsDevRoot(cfg.Root) {
+		cfg.Log("%s", DevRootWarning)
+	}
 	return &Updater{cfg: cfg, v: v, state: NewState(cfg.StatePath)}, nil
 }
 
