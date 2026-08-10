@@ -28,7 +28,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 
 	"fyne.io/fyne/v2"
@@ -226,15 +225,13 @@ func (p *countryPicker) applySelection() {
 // then what is true of their own current choice.
 func (p *countryPicker) statusText() string {
 	if p.saveErr != nil {
-		// Two sentences rather than one, because the two causes have different
-		// fixes and only one of them is worth showing an OS error for. An
-		// unreadable settings file is already named on the detail line and the
-		// user's next step is to fix that file; a write that failed needs its
-		// own errno, appended after a translated prefix exactly as settings.go's
-		// own save failure does.
-		if errors.Is(p.saveErr, errCountryConfigUnreadable) {
-			return lang.L("Your choice applies now, but it could not be saved: the settings file could not be read.")
-		}
+		// One sentence now, where there used to be two. The second covered a
+		// config file that existed and did not parse, where writing the zero
+		// value back would have replaced every setting the user had — and
+		// bacchus#255 moved that case out of this window entirely: a client whose
+		// config did not parse no longer starts, so no picker exists to choose in.
+		// What is left is a write that failed, which needs its own errno appended
+		// after a translated prefix, exactly as settings.go's save failure does.
 		return lang.L("Your choice applies now, but it could not be saved:") + " " + p.saveErr.Error()
 	}
 	switch {

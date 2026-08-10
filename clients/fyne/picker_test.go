@@ -166,7 +166,7 @@ func TestPickerVocabulary(t *testing.T) {
 		{state: offered()},
 		{state: offered(core.CountryInfo{Country: "NL", Exits: 1, Available: 0, Busy: true}), chosen: "NL"},
 		{state: offered(core.CountryInfo{Country: "DE", Exits: 1, Available: 1}), chosen: "NL"},
-		{saveErr: errCountryConfigUnreadable},
+		{saveErr: errors.New("permission denied")},
 	} {
 		texts = append(texts, p.statusText())
 	}

@@ -3,6 +3,7 @@ package enforcement
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
@@ -27,6 +28,152 @@ func TestNewBypassPolicyClassifiesEntries(t *testing.T) {
 	}
 	if p.inSet(net.ParseIP("11.1.2.3")) {
 		t.Error("11.1.2.3 should not match any entry")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A bypass entry is honoured or it is reported — never neither (bacchus#258)
+// ---------------------------------------------------------------------------
+
+// TestABypassPrefixIsCarriedToTheRoutesAndTheAllowlist is bacchus#258's own
+// scenario, in the shape it was measured in: the ten host names the shipped
+// example config carries, plus one range added by hand. The card reports the
+// resulting firewall rule as byte-identical to the one before — no prefix in it
+// anywhere — so this asserts the prefix reaches the two places that consume it.
+//
+// staticEntries is what tunnel.go hands to addExclusionRoutes AND, appended to
+// the resolved dynamic set, to enableKillSwitch. There is no third path, so a
+// prefix present here is a prefix in force.
+//
+// Mutation check: delete the ParseCIDR branch in classifyBypassEntry and this
+// fails, reporting exactly what the card measured — the ten names and nothing
+// else.
+func TestABypassPrefixIsCarriedToTheRoutesAndTheAllowlist(t *testing.T) {
+	entries := []string{
+		"sberbank.ru", "gosuslugi.ru", "nalog.gov.ru", "gov.ru", "vk.com",
+		"ok.ru", "yandex.ru", "kinopoisk.ru", "ivi.ru", "rutube.ru",
+		"100.64.0.0/10",
+	}
+	p := newBypassPolicy("exclude", entries)
+
+	if got, want := len(p.domains), 10; got != want {
+		t.Fatalf("domains = %d, want %d", got, want)
+	}
+	if got, want := p.staticEntries(), []string{"100.64.0.0/10"}; !equalStrings(got, want) {
+		t.Fatalf("staticEntries = %v, want %v — the range is not in force", got, want)
+	}
+	if len(p.problems) != 0 {
+		t.Fatalf("problems = %v, want none: every entry here is usable", p.problems)
+	}
+	// And it decides traffic, which is the point of the route: an address inside
+	// the range goes direct rather than into the tunnel.
+	if !p.direct(net.ParseIP("100.100.1.1")) {
+		t.Error("an address inside the configured range is not treated as direct")
+	}
+}
+
+// TestEveryUnusableBypassEntryIsNamed covers the three shapes that used to be
+// dropped in silence. Accept-and-ignore is the one option bacchus#258 calls
+// indefensible, and each of these was it.
+//
+// Mutation check: return bypassDomain instead of bypassUnusable for any row and
+// this names that row.
+func TestEveryUnusableBypassEntryIsNamed(t *testing.T) {
+	cases := []struct {
+		entry string
+		why   string
+	}{
+		{"2001:db8::/32", "an IPv6 prefix: parsed fine, then fell off a v4-only path"},
+		{"2001:db8::1", "an IPv6 literal: ParseIP succeeded and To4() did not, so it was skipped entirely"},
+		{"203.0.113.0/33", "a prefix length that does not exist"},
+		{"203.0.113.0/255.255.255.0", "a netmask where a prefix length goes"},
+		{`203.0.113.0\24`, "a backslash for a slash"},
+		{"192.0.2", "an address one octet short — a name to the resolver, an address to the person who typed it"},
+		{"not a host name", "spaces"},
+		{"-example.com", "a label starting with a hyphen"},
+		{"example..com", "an empty label"},
+	}
+	for _, c := range cases {
+		t.Run(c.entry, func(t *testing.T) {
+			p := newBypassPolicy("exclude", []string{c.entry})
+			if len(p.nets) != 0 || len(p.domains) != 0 {
+				t.Fatalf("%q was accepted as nets=%v domains=%v; this test is about entries that are NOT honoured", c.entry, p.nets, p.domains)
+			}
+			if len(p.problems) != 1 {
+				t.Fatalf("%q (%s) produced %d problems, want 1 — it is dropped in silence", c.entry, c.why, len(p.problems))
+			}
+			if !strings.Contains(p.problems[0], c.entry) {
+				t.Errorf("problem %q does not name the entry it is about", p.problems[0])
+			}
+		})
+	}
+}
+
+// TestCheckBypassCannotDisagreeWithTheLivePolicy is the anti-drift check, and it
+// is the reason CheckBypass and newBypassPolicy share one classifier rather than
+// each having its own rules.
+//
+// Two copies of "what may a bypass entry be" would be two answers to "is this
+// entry in force", and the one the user reads would be the one that is wrong —
+// which is bacchus#258 again, one level up. So: for every entry, the reporter
+// says there is a problem if and only if the live policy dropped it.
+//
+// Mutation check: add a case to classifyBypassEntry that CheckBypass filters
+// differently from newBypassPolicy and this fails, naming the entry.
+func TestCheckBypassCannotDisagreeWithTheLivePolicy(t *testing.T) {
+	entries := []string{
+		"example.com", "192.0.2.0/24", "198.51.100.7", "  ", "",
+		"2001:db8::/32", "2001:db8::1", "203.0.113.0/33", `203.0.113.0\24`,
+		"192.0.2", "not a host name", "localhost", "WWW.Example.COM.",
+	}
+	reported := map[string]bool{}
+	for _, e := range entries {
+		if len(CheckBypass([]string{e})) > 0 {
+			reported[e] = true
+		}
+	}
+	for _, e := range entries {
+		p := newBypassPolicy("exclude", []string{e})
+		dropped := len(p.nets) == 0 && len(p.domains) == 0 && strings.TrimSpace(e) != ""
+		if dropped != reported[e] {
+			t.Errorf("%q: the live policy dropped it = %v, CheckBypass reports a problem = %v — the report and the behaviour disagree",
+				e, dropped, reported[e])
+		}
+	}
+	// And the whole list at once reports each unusable entry exactly once, in
+	// order, which is what main.go puts on the detail line.
+	if got, want := len(CheckBypass(entries)), 6; got != want {
+		t.Fatalf("CheckBypass over the whole list = %d findings, want %d", got, want)
+	}
+}
+
+// TestResolveDomainsNamesWhatResolvedToNothing is the other half of the same
+// silence: an entry whose SHAPE is fine and which produces no address is still a
+// hole the user believes they punched. It was skipped by a bare `continue`.
+//
+// A name with only AAAA records counts as unresolved here, deliberately: this
+// client carries IPv4 only, so such a name is exactly as unusable as one that
+// does not resolve at all, and reporting it is the honest answer.
+func TestResolveDomainsNamesWhatResolvedToNothing(t *testing.T) {
+	answers := map[string][]string{
+		"good.example":   {"192.0.2.7"},
+		"v6only.example": {"2001:db8::1"},
+	}
+	prev := lookupHost
+	lookupHost = func(host string) ([]string, error) {
+		if a, ok := answers[host]; ok {
+			return a, nil
+		}
+		return nil, fmt.Errorf("no such host %q", host)
+	}
+	t.Cleanup(func() { lookupHost = prev })
+
+	ips, unresolved := resolveDomains([]string{"good.example", "v6only.example", "gone.example"})
+	if len(ips) != 1 || ips[0].String() != "192.0.2.7" {
+		t.Fatalf("ips = %v, want the one IPv4 answer", ips)
+	}
+	if got, want := unresolved, []string{"v6only.example", "gone.example"}; !equalStrings(got, want) {
+		t.Fatalf("unresolved = %v, want %v", got, want)
 	}
 }
 

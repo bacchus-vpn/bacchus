@@ -103,6 +103,14 @@ func showSettings(a fyne.App, current func() appstate.Config, cfgPath string, en
 
 	killSwitchCheck := widget.NewCheck(lang.L("Kill-switch (block traffic if the tunnel drops)"), nil)
 	killSwitchCheck.SetChecked(!cfg.DisableKillSwitch)
+	// What this checkbox actually costs, next to the checkbox (bacchus#257,
+	// ADR-0073). The kill-switch's allowlist has no RFC1918 range in it, so
+	// while it is armed the whole local network is unreachable — and a user who
+	// meets that without warning turns this off, which is the one setting that
+	// must not be turned off for a bad reason. It is stated where the decision is
+	// made rather than only where the consequence lands (ui.go's Protected line).
+	killSwitchNotice := widget.NewLabel(lang.L("While the kill-switch is on, your local network is out of reach too: printers, file shares and your router's own page all stop answering until you disconnect. To keep one of them, add its address range to the bypass list above — for example 192.0.2.0/24."))
+	killSwitchNotice.Wrapping = fyne.TextWrapWord
 
 	dnsEntry := widget.NewEntry()
 	dnsEntry.SetText(cfg.DNS)
@@ -351,10 +359,19 @@ func showSettings(a fyne.App, current func() appstate.Config, cfgPath string, en
 		dnsItem.HintText = lang.L("This applies to programs that ask for DNS directly. If this system uses systemd-resolved (the default on Ubuntu, Fedora and Debian), its own lookups go to 127.0.0.53, which no route can capture — with the kill-switch on they are blocked, and with it off they leave in the clear.")
 	}
 
+	// The bypass field's own hint names the three shapes it accepts and the one
+	// thing that happens to anything else (bacchus#258). An entry that is neither
+	// a name, an address nor a prefix is reported at startup by
+	// appstate.CheckConfig and at connect by the tunnel, and this is where
+	// somebody is typing one.
+	bypassItem := widget.NewFormItem(lang.L("Split-tunnel bypass list (one per line: IP, CIDR, or domain)"), bypassEntry)
+	bypassItem.HintText = lang.L("One per line: a host name, an address, or a range like 192.0.2.0/24. IPv6 is not carried and anything else is ignored — Bacchus says which lines it could not use when it starts.")
+
 	form := widget.NewForm(
-		widget.NewFormItem(lang.L("Split-tunnel bypass list (one per line: IP, CIDR, or domain)"), bypassEntry),
+		bypassItem,
 		widget.NewFormItem(lang.L("Split-tunnel mode"), modeSelect),
 		widget.NewFormItem("", killSwitchCheck),
+		widget.NewFormItem("", killSwitchNotice),
 		dnsItem,
 		widget.NewFormItem("", autoConnectCheck),
 		widget.NewFormItem("", launchOnBootCheck),

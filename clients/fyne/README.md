@@ -247,6 +247,24 @@ exe and the installer in the per-user directory (bacchus#136) — and the file t
 no coordinator and gets the same message, rather than reaching the dialer as an
 address.
 
+**A config file that does not parse stops the client** (bacchus#255). It used to be
+carried to the detail line and started around — the window came up with no
+coordinators, no account service, no country and no bypass list, looking exactly like a
+fresh install, and the one true sentence explaining why was competing with a
+working-looking app. So a file that is found and cannot be read is now a refusal that
+names the file and what the parser objected to, and Bacchus does not start. **No config
+file at all is still not an error**: that is a fresh install, nothing is lost, and
+pressing Connect explains what to fill in.
+
+**A UTF-8 byte order mark is tolerated**, which is the other half of the same card and
+the reason it was found. PowerShell 5.1's `Set-Content -Encoding UTF8` writes one and
+has no option that does not — avoiding it means
+`[System.IO.File]::WriteAllText($p, $s, [System.Text.UTF8Encoding]::new($false))` — and
+Notepad wrote one by default for years. `encoding/json` refuses it, so the documented
+gesture of opening the file, changing the coordinators and saving used to disable the
+whole file. Only a *leading* mark is stripped; U+FEFF inside a value is a character you
+put there.
+
 **Which of the two the client reads, and which it writes, are different questions**
 (issue #118). It **reads** the exe-adjacent file first and the per-user one second, so
 a portable install — binary and config together on a USB stick — wins over anything
@@ -449,6 +467,32 @@ class of failure as claiming less.
 On macOS, turning the kill-switch checkbox off remains safe for the same
 reason turning it on does nothing: neither changes what leaves the machine. On
 Windows and Linux, turning it off genuinely disables the lockdown.
+
+**An armed kill-switch also puts your own local network out of reach** — printers,
+file shares, a NAS, your router's own configuration page (bacchus#257, ADR-0073).
+That is deliberate and is now on the record: the lockdown's allowlist is the tunnel
+adapter, the control plane, loopback and DHCP, with no private range in it, so a LAN
+destination falls to the default block on both platforms. A hole for "the local
+network" is a hole for whatever else can put a packet on that link — which on the
+networks this product exists for is other people — so 1.0 ships no
+*allow local network* toggle.
+
+The escape, if you want one, is the bypass list: put the range in it
+(`192.0.2.0/24`), or a single address for a single device (`192.0.2.10/32`), and
+that much is carved out of both the routing and the lockdown. The client says all
+of this where it happens — the Protected line names it while it is true, and it is
+true only while the kill-switch is armed, because the block is the firewall's and
+not the route table's.
+
+**The bypass list takes a host name, an address, or a range — and says so about
+anything else** (bacchus#258). An IPv6 address or prefix is not carried (this client
+tunnels IPv4 and turns IPv6 off on the physical adapter while connected), a
+malformed prefix is not silently reinterpreted as a name, and an entry like
+`192.0.2` — an address one octet short, which can neither parse nor resolve — is
+named rather than left to fail forever. Every rejected line is reported at startup,
+on the detail line and in the log; a name whose lookup returns no IPv4 address is
+reported at each connect, since that is a fact about the moment rather than about
+the file.
 
 Auto-connect and launch-on-boot are fully functional everywhere: the
 former calls `Controller.Connect` once at startup instead of waiting for the button;
@@ -721,8 +765,16 @@ cgo compiling `go-gl/glfw`. See `.github/workflows/ci.yml`.
   direct rather than toward a leak. Separately, the kill-switch has no notion of
   include-mode's direct traffic being something that was never meant to be protected, so
   arming it blocks that traffic rather than leaving it alone.
+- **The local network is unreachable while the kill-switch is armed** (bacchus#257,
+  ADR-0073) — kept deliberately, disclosed on the Protected line and beside the
+  checkbox, and escapable per-range through `bypass`.
+- **A hand-edited config takes effect at the next launch, not at the next connect.**
+  The file is read once, at startup; editing it while Bacchus is running and pressing
+  Connect again uses what was loaded. Settings saves are live (the Controller is told),
+  hand edits are not.
 - **IPv6 is blocked while the tunnel is up, not tunnelled** — the physical adapter's
-  IPv6 binding is disabled for the session's lifetime.
+  IPv6 binding is disabled for the session's lifetime. An IPv6 address or prefix in
+  `bypass` is refused with that reason rather than accepted into a set nothing reads.
 - **A hard crash leaves the tunnel adapter, its routes and the IPv6 binding behind.**
   They are cleaned up on the next launch, alongside kill-switch recovery — verified on
   hardware in bacchus#115. To clear them by hand on Windows without relaunching:

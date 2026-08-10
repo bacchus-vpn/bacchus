@@ -7,11 +7,12 @@
     "Apps set to use the proxy at 127.0.0.1:1080 are protected. Other apps are not.": "Защищены только приложения, которым указан прокси 127.0.0.1:1080. Остальные — нет.",
     "Protected": "Защищено",
     "All of this device's traffic goes through Bacchus.": "Весь трафик этого устройства идёт через Bacchus.",
+    "All of this device's traffic goes through Bacchus. Other devices on your local network — printers, file shares, your router's own page — are not reachable while it is.": "Весь трафик этого устройства идёт через Bacchus. Пока это так, другие устройства в вашей локальной сети — принтеры, общие папки, страница настроек роутера — недоступны.",
     "Blocked": "Заблокировано",
     "The connection dropped — trying to reconnect…": "Соединение прервано — пробуем переподключиться…",
     "Connect": "Подключиться",
     "Disconnect": "Отключиться",
-    "Your settings file could not be read:": "Не удалось прочитать файл настроек:",
+    "Some of your settings are not in force:": "Часть ваших настроек не действует:",
 
     "Bacchus could not refresh this device's access and will keep trying. Your connection is unaffected for now.": "Bacchus не смог обновить доступ этого устройства и продолжает попытки. На текущее подключение это пока не влияет.",
     "Your subscription needs attention: Bacchus could not refresh this device's access, which runs out in about %s.": "Требуется внимание к подписке: Bacchus не смог обновить доступ этого устройства, он закончится примерно через %s.",

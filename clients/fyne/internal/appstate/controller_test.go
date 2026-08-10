@@ -2029,3 +2029,104 @@ func signAppstateBody(t *testing.T, priv ed25519.PrivateKey, tag string, body []
 	msg = append(msg, body...)
 	return append(append([]byte{}, body...), ed25519.Sign(priv, msg)...)
 }
+
+// ---------------------------------------------------------------------------
+// Whatever is shown is also written down (bacchus#259)
+// ---------------------------------------------------------------------------
+
+// TestAFailureTheUserSeesReachesTheLog is bacchus#259's first half, driven
+// through a real Connect rather than by calling notifyDetail directly — the
+// point of the card is the PATH, and a test that pokes the sink proves nothing
+// about whether the failure travels down it.
+//
+// The reported case was a reconnect that failed with
+// `core: socks listen: … bind: Only one usage of each socket address …` on the
+// detail line, and a search of the whole log file for socks|bind|error|refus|fail
+// from that window returning nothing. bacchus#187 shipped that log file
+// precisely so a user could hand one over; this is the class of message it was
+// for, and none of them were in it.
+//
+// Mutation check: delete the c.logf call in notifyDetail and this fails,
+// reporting a detail line that reached the window and nothing that reached the
+// file.
+func TestAFailureTheUserSeesReachesTheLog(t *testing.T) {
+	ctrl := NewController(Config{})
+
+	var mu sync.Mutex
+	var logged []string
+	ctrl.Logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}
+	rec := newStateRecorder()
+	ctrl.OnState, ctrl.OnDetail = rec.onState, rec.onDetail
+
+	ctrl.Connect()
+	if s := rec.next(t, 2*time.Second); s != Connecting {
+		t.Fatalf("first state = %v, want Connecting", s)
+	}
+	if s := rec.next(t, 2*time.Second); s != Disconnected {
+		t.Fatalf("state = %v, want Disconnected", s)
+	}
+
+	shown := rec.detailsSnapshot()
+	if len(shown) == 0 {
+		t.Fatal("nothing was shown to the user, so this test cannot check that it was logged")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, want := range shown {
+		found := false
+		for _, line := range logged {
+			if strings.Contains(line, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("the user was shown %q and the log says %v — a support log that does not mention the failure the user is reporting is bacchus#187's position again", want, logged)
+		}
+	}
+}
+
+// TestNotifyDetailLogsEveryKindNotJustTheVerbatimOnes is the by-construction
+// half. Detail.Text is documented as always set, on every kind, and that is what
+// lets one call cover the classified sentences as well as the relayed ones —
+// which matters because the classified ones are the calm, user-facing warnings
+// (a lapsed subscription, a device whose access was withdrawn) that a support
+// log most needs to carry.
+//
+// A per-call-site c.logf could not make this claim: it would hold for the call
+// sites somebody remembered and silently not for the next one added.
+func TestNotifyDetailLogsEveryKindNotJustTheVerbatimOnes(t *testing.T) {
+	c := &Controller{}
+	var logged []string
+	c.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	details := []Detail{
+		{Text: "core: socks listen: bind: address already in use"},
+		{Kind: DetailCountryBusy, Country: "NL", Text: "NL is busy right now — everything there is full."},
+		{Kind: DetailSubscriptionExpired, Text: "Your subscription has expired."},
+		{Kind: DetailDeviceRevoked, Text: "This device's access was withdrawn."},
+	}
+	for _, d := range details {
+		c.notifyDetail(d)
+	}
+	if len(logged) != len(details) {
+		t.Fatalf("logged %d lines for %d details: %v", len(logged), len(details), logged)
+	}
+	for i, d := range details {
+		if !strings.Contains(logged[i], d.Text) {
+			t.Errorf("line %d = %q, want it to carry %q", i, logged[i], d.Text)
+		}
+	}
+
+	// An empty Detail is the one that must NOT produce a line: a blank entry in a
+	// capped log is the same waste bacchus#259's other half is about.
+	logged = nil
+	c.notifyDetail(Detail{})
+	if len(logged) != 0 {
+		t.Fatalf("an empty detail logged %v", logged)
+	}
+}
