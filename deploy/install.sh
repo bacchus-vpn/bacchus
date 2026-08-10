@@ -804,6 +804,13 @@ install_coordinator() {
 	install_file "$deploy_dir/bacchus-coordinator.service" "$unit_dir/bacchus-coordinator.service" 0644
 	install_update_rollback
 	install_env_file "$deploy_dir/coordinator.env.example" "$etc_dir/coordinator.env"
+	# The credential gates (issue #249, ADR-0072). Placed on every coordinator even
+	# though the template turns nothing on, because the unit references it and the
+	# file existing is what makes the gates a thing an operator EDITS rather than a
+	# flag set rediscovered from -h. It ships gates-off, so this changes no
+	# behaviour and — unlike coordinator.env — carries no placeholder that would
+	# hold the unit back from starting: an empty value is zero arguments.
+	install_env_file "$deploy_dir/coordinator-gates.env.example" "$etc_dir/coordinator-gates.env"
 
 	# The country-database refresh belongs to the coordinator host and nowhere
 	# else (deploy/README step 6): it is what makes each node's country DERIVED

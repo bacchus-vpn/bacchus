@@ -23,7 +23,17 @@
 #   directive a template gained and a live unit lacks was invisible in both directions,
 #   which is how issue #222's OnFailure= rollback shipped to a repository and reached no
 #   box while every pin run reported a pinned fleet. See deploy/bacchus-unit-check.sh.
-#   The comparison copies nothing and does not fail the run — it reports.
+#   The comparison copies nothing and does not fail the run — it reports. A box it could
+#   not compare is COUNTED and named as NOT COMPARED, because a skip reported at the
+#   volume of a pass is a box with no coverage reading like a box with nothing wrong
+#   (issue #248).
+# * It never configures a gate. It READS them, from what the coordinator said at
+#   startup, and says which are off (deploy/bacchus-gate-check.sh, issue #249). Every
+#   credential gate this binary has fails OPEN when unset, so a fleet with all of them
+#   off passes every other check here and refuses nothing anywhere — which is what would
+#   make issues #167, #173 and #209 each return a false pass. Set COORDINATOR_GATES in
+#   testbed.env to the gates this deployment enforces and a pin that finds one off
+#   FAILS; leave it empty and the posture is reported and nothing is judged.
 # * It never checks anything out. It reads the commit the repository is ALREADY on and
 #   refuses if `--commit` disagrees, so moving HEAD stays the operator's deliberate act
 #   and a half-finished rebase cannot become a deployment.
@@ -631,9 +641,19 @@ roll_call() {
 	fi
 }
 
+# The coordinator's journal, read ONCE per check and kept, because two different
+# questions are asked of the same window: which build each node registered on
+# (bacchus-fleet-check.sh) and which credential gates this coordinator actually came up
+# with (bacchus-gate-check.sh, issue #249). Reading it twice would let the two answers
+# describe two different windows — and after the containment restart below it is read
+# again, so the last read is the one both checks see.
+coord_journal="$stage/coord-journal"
+
 fleet_check() {
-	"$SSH" "$COORDINATOR_TARGET" "journalctl -u $COORDINATOR_UNIT --since '-5 min' --no-pager" |
-		sh "$script_dir/bacchus-fleet-check.sh" --expect "$expected_nodes" --ids-to "$registered_ids" "$head"
+	"$SSH" "$COORDINATOR_TARGET" "journalctl -u $COORDINATOR_UNIT --since '-5 min' --no-pager" \
+		>"$coord_journal" 2>/dev/null || true
+	sh "$script_dir/bacchus-fleet-check.sh" --expect "$expected_nodes" --ids-to "$registered_ids" "$head" \
+		<"$coord_journal"
 }
 
 log "asking every node box what it registers as (issue #232)"
@@ -727,19 +747,52 @@ fi
 # somebody hand-edited three units would either be switched off or answered by adding
 # the copy flag that must not exist. It is loud, it says exactly what to type, and it
 # says it on every run until the box carries the line.
+#
+# A box this could not compare is COUNTED, and counted separately from a box that
+# compared clean (issue #248). It used to return quietly, at the same volume as a pass,
+# so a box with no coverage at all read like a box with nothing wrong — and on the first
+# real run the box the check could not compare was also the only box that misbehaved.
+# That is issue #224's finding in a different file: a check that silently covers two of
+# three boxes reports a fleet it did not look at.
 unit_gap=0
+unit_unchecked=0
+
+# unit_template maps a live unit NAME to the template it should be compared against.
+# By default that is the file of the same name, which is the right guess and not always
+# the right answer: the role a node runs is a flag (-role exit, -role exit,relay,
+# relay-only), so a box whose unit is called bacchus-node or bacchus-relay is running
+# what deploy/bacchus-exit.service describes under another name. UNIT_TEMPLATES in
+# testbed.env says so — `UNIT_TEMPLATES="bacchus-node=bacchus-exit.service"` — which
+# keeps the pairing in the operator's own configuration, beside the host list that
+# already names those units, rather than inventing a second template here for every name
+# a box might use.
+unit_template() {
+	for _m in ${UNIT_TEMPLATES:-}; do
+		case "$_m" in
+		"${1%.service}="*)
+			printf '%s' "$script_dir/${_m#*=}"
+			return 0
+			;;
+		esac
+	done
+	printf '%s' "$script_dir/${1%.service}.service"
+}
 
 compare_unit() {
 	_target="$1"
 	_unit="$2"
-	_tmpl="$script_dir/${_unit%.service}.service"
+	_tmpl=$(unit_template "$_unit")
 	log "unit $_unit on $_target"
 	if [ ! -r "$_tmpl" ]; then
-		log "  nothing ships as deploy/${_unit%.service}.service — no template to compare against"
+		unit_unchecked=$((unit_unchecked + 1))
+		log "  NOT COMPARED: nothing ships as deploy/${_tmpl##*/} — this box has no unit coverage at all"
+		log "  Either rename the unit on the box to one this repository ships, or map it in"
+		log "  testbed.env: UNIT_TEMPLATES=\"${_unit%.service}=bacchus-exit.service\""
 		return 0
 	fi
 	if ! _live=$("$SSH" "$_target" "systemctl cat $_unit" 2>/dev/null); then
-		log "  could not read it (not fatal) — compare it by hand before trusting this box"
+		unit_unchecked=$((unit_unchecked + 1))
+		log "  NOT COMPARED: could not read it — compare it by hand before trusting this box"
 		return 0
 	fi
 	# Any non-zero counts, not only the missing-directive 5: an EMPTY answer from
@@ -754,10 +807,15 @@ compare_unit() {
 }
 
 log "comparing every live unit with the one this commit ships (copying nothing)"
+unit_total=0
 for entry in $NODE_TARGETS; do
+	unit_total=$((unit_total + 1))
 	compare_unit "$(node_target "$entry")" "$(node_unit "$entry")"
 done
+unit_total=$((unit_total + 1))
 compare_unit "$COORDINATOR_TARGET" "$COORDINATOR_UNIT"
+
+log "units: $((unit_total - unit_gap - unit_unchecked)) of $unit_total compared clean, $unit_gap with a gap, $unit_unchecked NOT COMPARED"
 
 if [ "$unit_gap" -gt 0 ]; then
 	printf '%s: WARNING: %d live unit(s) do not carry what this commit ships — a missing directive,\n' "$self" "$unit_gap" >&2
@@ -765,6 +823,41 @@ if [ "$unit_gap" -gt 0 ]; then
 	printf '%s: does not fail the run. But a mechanism that is present here and absent there is\n' "$self" >&2
 	printf '%s: exactly issue #205, and it stays that way until somebody edits those units by hand.\n' "$self" >&2
 	printf '%s: Nothing was copied; see the lines above for what to add and where.\n' "$self" >&2
+fi
+if [ "$unit_unchecked" -gt 0 ]; then
+	printf '%s: WARNING: %d box(es) were NOT COMPARED at all (issue #248). That is not a pass and it\n' "$self" "$unit_unchecked" >&2
+	printf '%s: is not a small gap: on the first real run of this script the box with no template was\n' "$self" >&2
+	printf '%s: also the only box that failed to re-register. A unit nothing compares can be missing\n' "$self" >&2
+	printf '%s: every directive this commit ships and read exactly like a healthy one.\n' "$self" >&2
+	printf '%s: Fix it in testbed.env (UNIT_TEMPLATES) or by renaming the unit on the box.\n' "$self" >&2
+fi
+
+# ---------------------------------------------------------------------------
+# The credential gates — read from what the coordinator SAID, not from its flags
+# ---------------------------------------------------------------------------
+# Every gate fails open when unset, so an unconfigured deployment passes every check
+# above and refuses nothing anywhere (issue #249). Three owner tests are written as if
+# the gates were on and would each return a false pass against a fleet in that state, so
+# this reports the posture on every run — and, when the operator has DECLARED which
+# gates this deployment enforces (COORDINATOR_GATES in testbed.env), fails the run when
+# one of them is off.
+#
+# Declared-or-nothing, deliberately. A check that failed every pin until the gates were
+# configured would be switched off long before they were, exactly as the unit comparison
+# would have been; a check that reports until an operator says otherwise, and then holds
+# them to it, survives.
+log "reading the coordinator's credential gates from the journal above"
+gate_rc=0
+if [ -n "${COORDINATOR_GATES:-}" ]; then
+	sh "$script_dir/bacchus-gate-check.sh" --require "$COORDINATOR_GATES" "$coord_journal" || gate_rc=$?
+else
+	sh "$script_dir/bacchus-gate-check.sh" "$coord_journal" || gate_rc=$?
+fi
+if [ "$gate_rc" -ne 0 ] && [ -n "${COORDINATOR_GATES:-}" ]; then
+	printf '%s: ERROR: this deployment declares COORDINATOR_GATES="%s" and is not enforcing all of\n' "$self" "${COORDINATOR_GATES:-}" >&2
+	printf '%s: them. Do not run a test that expects a refusal against this fleet: it would pass\n' "$self" >&2
+	printf '%s: without refusing anything, which closes a card on evidence that does not exist.\n' "$self" >&2
+	rc=3
 fi
 
 log "probing the deployed coordinator's capability"

@@ -60,7 +60,7 @@ set -eu
 # calls skip(), which counts. The only such case today is the user+mount
 # namespace one at the bottom.
 expected_cases=29
-expected_checks=144
+expected_checks=146
 
 failures=0
 checks=0
@@ -552,6 +552,13 @@ expect_ok node --role coordinator --binaries "$bins"
 assert_file "$stage/usr/local/bin/bacchus-coordinator" 755
 assert_file "$stage/etc/systemd/system/bacchus-coordinator.service" 644
 assert_file "$stage/etc/bacchus/coordinator.env" 600
+# The gates file is placed on every coordinator and turns nothing on (issue #249,
+# ADR-0072). It exists so the gates are a file an operator edits rather than a flag set
+# rediscovered from -h, and it must ship with an EMPTY value: the unit expands it as an
+# unquoted $VAR, so empty is zero arguments and gates-off is unchanged behaviour.
+assert_file "$stage/etc/bacchus/coordinator-gates.env" 600
+assert_grep "$stage/etc/bacchus/coordinator-gates.env" '^BACCHUS_COORDINATOR_GATES=$' \
+	'the installed gates file ships with every gate off'
 assert_file "$stage/usr/local/lib/bacchus/bacchus-update-rollback" 755
 assert_file "$stage/etc/systemd/system/bacchus-update-rollback@.service" 644
 assert_file "$stage/usr/local/bin/bacchus-geoip-refresh.sh" 755
