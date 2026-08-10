@@ -948,6 +948,18 @@ another id); client credentials are bearer, so their safety is the out-of-band
 channel they're delivered over. See
 [node-admission.md](design/node-admission.md).
 
+**On a deployed coordinator the flag does not go on the command line.** The unit
+sources [`deploy/coordinator-gates.env.example`](../deploy/coordinator-gates.env.example)
+and expands it into `ExecStart`, so this and every other credential gate is one
+file an operator edits — `deploy/bacchus-pin.sh` will never copy a `.service` over
+one carrying hand-added flags (ADR-0064 §7), which makes the unit the worst place
+to keep configuration that changes. Two things that file will not let you forget:
+create both revocation lists even empty (an absent file is not a refusal, it is an
+empty list), and **issue node credentials before restarting the coordinator** —
+admission applies to nodes as well as clients, so an anchor without credentials is
+a fleet that cannot register. Read the result back with
+[`bacchus-gate-check.sh`](#which-credential-gates-are-actually-on-issue-249-adr-0072).
+
 ### More than one authority (issue #64, ADR-0047)
 
 `-admission-pubkey` anchors **one** authority trusted for **every** role. That is
@@ -1508,6 +1520,33 @@ hand-edited would end up switched off. Fixing it is a hand edit that keeps
 everything the unit already has, plus `systemctl daemon-reload` — and for the
 rollback handler, the two files it needs, which `deploy/install.sh` places.
 
+**A box it could not compare is NOT COMPARED, and that is counted** (issue #248).
+The pin's summary reads
+
+```
+units: 2 of 3 compared clean, 0 with a gap, 1 NOT COMPARED
+```
+
+and warns separately when the last number is not zero. It used to print the skip
+at the volume of a pass, so a box with **no coverage at all** read like a box with
+nothing wrong — and on the first real run the box the check could not compare was
+also the only box that failed to re-register. That is the #224 distinction one
+file over: "checked and clean" and "not checked" are different findings.
+
+No `bacchus-node.service` is shipped to close it, and that is deliberate. The role
+a node runs is a **flag** (`-role exit`, `-role exit,relay`, relay-only), so a box
+whose unit is called `bacchus-node` or `bacchus-relay` is running what
+`deploy/bacchus-exit.service` already describes under another name; a second
+near-identical template would make the divergence permanent and give a third name
+nothing. Say which template the box's unit is, in `deploy/testbed.env`, beside the
+host list that already names those units:
+
+```sh
+UNIT_TEMPLATES="bacchus-relay=bacchus-exit.service"
+```
+
+Expect the first comparison of a box that has never had one to find something.
+
 **Is the coordinator serving what that commit carries?** — by behaviour:
 
 ```sh
@@ -1604,12 +1643,95 @@ The fix on the box is either a `WorkingDirectory=` in the unit or absolute paths
 on the flags; the point of the two reports is that you can tell which flags are
 affected without guessing.
 
+Since ADR-0072 the template ships **both**. `deploy/bacchus-coordinator.service`
+carries `WorkingDirectory=/etc/bacchus` — where every other file this coordinator
+is handed already lives, and which `install.sh` creates mode 0700 — so the unit
+comparison reports it MISSING from every live unit until somebody adds it by hand,
+which is a louder thing than a warning the pin repeats. And every path in the
+shipped gates configuration is absolute anyway, because a gate that depends on the
+working directory being right is a gate that will be wrong on the next box.
+
+**Adding `WorkingDirectory=` to a live unit moves every relative path currently in
+effect.** On this coordinator every path written into `ExecStart` is absolute and
+the relative defaults resolve to files that do not exist, so nothing in use should
+move — read the `paths:` block before and after and confirm that rather than
+taking this sentence for it.
+
+### Which credential gates are actually on? (issue #249, ADR-0072)
+
+Every credential gate this coordinator has fails **open** when its flag is unset:
+`-admission-pubkey`, `-admission-authority`, `-device-root-pubkey`,
+`-revocations-root-pubkey` and both `-*-revocations-source`. Each direction is
+deliberate (ADR-0045 §2 is the sharpest reason) and the consequence is that **an
+unconfigured deployment is indistinguishable from a working one** — every check
+above passes and nothing is refused anywhere, because nothing was asked to refuse.
+
+That is not a footnote about a testbed with no users. Three of the cards that need
+these boxes are written as though the gates were on, and each would return a
+**false pass**: a connect that succeeds proves the client reached an exit rather
+than that an entitlement was checked; an empty revocation list cannot produce the
+refusal `#173` is looking for; and an address that was never published cannot be
+followed. A test that cannot fail is worse than an unrun one, because it closes a
+card.
+
+```sh
+ssh <coordinator-host> "journalctl -u bacchus-coordinator --since -10min --no-pager" |
+  sh deploy/bacchus-gate-check.sh
+```
+
+One row per gate, and it reads what the coordinator **concluded** rather than what
+its flags say — after parsing the key, after resolving the path, after finding out
+whether the file is there. Those differ exactly where it matters: a revocation
+flag naming a path that does not exist is present in `ExecStart` and enforces
+nothing, and a signed-revocations root whose namespace gate is off is configured,
+started and inert. Same choice as the capability probe above: ask what happened,
+never read a configuration string.
+
+| finding | exit | what it means |
+|---|---|---|
+| every gate named in `--require` is on | 0 | enforcing what this deployment declares |
+| a declared gate is off | 1 | do not run a test that expects a refusal against this fleet |
+| no `coordinator release` line in the window | 3 | the window cannot answer; widen it |
+| a declared gate cannot be read from a journal | 4 | **not a pass** — see `account-service` below |
+
+`--require` is what turns the report into a verdict, and `bacchus-pin.sh` passes
+`COORDINATOR_GATES` from `deploy/testbed.env`:
+
+```sh
+COORDINATOR_GATES="admission revocation-lists"
+```
+
+Leave it empty and the posture is printed and nothing is judged. Naming a gate
+means a pin that finds it off **fails the run**. Declared-or-nothing is the same
+judgement the unit comparison takes: a check that failed every pin until the gates
+were configured would be switched off long before they were.
+
+Two things to know before relying on it. Like `bacchus-fleet-check.sh` it prints
+**no hostname**, including not echoing the device gate's audience, so its output is
+the half of a run that is safe to paste into an issue. And **`account-service` is
+always UNKNOWN**: it is the one configured thing `cmd/coordinator` announces
+nothing about at startup (issue #260), so declaring it exits 4 rather than 0. An
+unreadable gate is not a gate that is on.
+
+Turning them on is a separate, deliberate act, documented as three cumulative steps
+in [`deploy/coordinator-gates.env.example`](../deploy/coordinator-gates.env.example)
+— admission and the two revocation lists, which can be staged today; the device
+gate and the account service's address, which need one to exist; and signed
+revocation bundles, which need the signing ceremony. The unit sources that file and
+expands it as one word-split `$BACCHUS_COORDINATOR_GATES`, so after a single hand
+edit per box a gate change is an edit to a file rather than to a unit this
+procedure will never copy.
+
 ### Cards that need the boxes
 
 **The pin is a precondition, not a first step to improvise.** Anything that
 needs the testbed — the credential chain end to end, the revocation loop, a
 rendezvous change — runs `bacchus-pin.sh` first and confirms both checks pass
 before its own result means anything.
+
+**And for anything that expects a refusal, the pin is not enough.** Confirm the
+gate report above shows the gate that would do the refusing actually on. A pinned
+fleet with its gates off will run your test and pass it.
 
 ## What the coordinator says about node builds (issue #114)
 
@@ -1723,3 +1845,76 @@ exit's journal (`journalctl -u bacchus-exit`) shows the forwarded connections.
   start. That is fine for development and wrong for anything deployed — stamp
   them from `VERSION`, or install with `deploy/install.sh`, which does it for
   you.
+
+## Watching the rendezvous hop on the wire (issue #212 step 2)
+
+Everything else in this file tells you whether something **worked**. This tells
+you what the **bytes were**, which is a different question and the one issue #183
+was found by asking. A 1453-byte `connect` passed every test in this repository —
+both PR CI runs and a combination build — and failed on a real home link, because
+loopback's MTU is 65536 and no test has a path that a datagram can be too big
+for.
+
+`cmd/rendezvous-tap` is a logging UDP proxy. Put it between the client and the
+coordinator, run the connect through it, and read what crossed.
+
+### Running it
+
+On the **client box**, with the coordinator on the build under test (pin first —
+[the procedure](#pinning-the-whole-deployment-to-a-commit-issue-205-adr-0064)):
+
+```sh
+# Terminal 1. -upstream is where the client would otherwise have pointed.
+go run ./cmd/rendezvous-tap -listen 127.0.0.1:18080 -upstream <COORD_HOST>:8080
+
+# Terminal 2. The client points at the tap instead of at the coordinator.
+go run ./cmd/node -role client -coordinators 127.0.0.1:18080 -geo NL
+```
+
+Ctrl-C the tap once the client has connected (or given up). It prints every
+datagram it forwarded, the measurements, and the four assertions the card asks
+for. Exit `0` if all four held, `1` if any did not or the tap faulted.
+
+The full flag list and a worked example of the output are in
+[cmd/rendezvous-tap/README.md](../cmd/rendezvous-tap/README.md).
+
+### What the card asks, and where each answer appears
+
+| step 2 asks | in the report |
+|---|---|
+| the first datagram is a STUN Binding Request | per-flow assertion, with the size and the decoded message type |
+| the second is a DTLS record (first byte `0x16`) | per-flow assertion, with the leading byte it actually saw |
+| no datagram contains `{"type"` | one assertion over both directions, with the offset when it fires |
+| no datagram exceeds **1232 bytes**, flights included | one assertion, with the largest each way and the headroom |
+
+**Check against the budget, not against 756.** That figure is what one client
+measured in a test; the number that decides whether a real path carries the
+datagram is the 1232-byte budget (ADR-0057: a 1280-byte path floor, less 40 for
+an IPv6 header and 8 for UDP). The tap never compares against 756, and neither
+should the reading of it — a regression that lands at 1100 bytes is still a
+regression, and it is still under budget.
+
+The report also renders the largest payload back into the **IP datagram** it
+needs, because that is the number the link refuses: 756 bytes of payload is an
+804-byte IPv6 datagram against a 1280-byte floor.
+
+### Things to know before trusting a run
+
+- **The coordinator sees the tap, not the client.** A UDP proxy is what this is,
+  so the coordinator's association table and the `XOR-MAPPED-ADDRESS` it answers
+  with name the tap's address. The client discards that attribute, so the flight
+  is unchanged — but a coordinator log read alongside a tap run will show the
+  tap's source port.
+- **Run the connect direct as well** (step 1 of the card). The tap is passive by
+  construction and tested to be, but "it worked through the tap" and "it works"
+  are two claims and the card asks for both.
+- **One tap forwards to one upstream.** Step 5 wants a pool of two members: run a
+  tap per member and give the client both `-coordinators` entries.
+- **A tap nothing reached does not read as a pass.** If no datagram arrives, the
+  report says so and exits non-zero, because an operator who mistyped `-listen`
+  and read a green tap would be concluding the wire was fine on the strength of
+  never having seen it.
+- The tap keeps **no payload bytes** — each datagram is classified as it is
+  forwarded and then dropped, because these carry admission credentials, device
+  credentials and issuer certs. `-bytes N` prints a leading hex prefix when a run
+  needs one; it is off by default.

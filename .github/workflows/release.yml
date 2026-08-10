@@ -521,33 +521,114 @@ jobs:
       # binary reports 0.0.0 into the version fence, which is below any floor.
       #
       # WHICH BINARIES THIS APPLIES TO IS DERIVED, NOT LISTED, and the reason is
-      # a live example rather than a hypothetical: cmd/bacchus-netd does not
-      # link core/version at all - `go list -deps ./cmd/bacchus-netd` does not
-      # contain it - so the -X above is silently ignored for that binary and no
-      # amount of checking the build log would say so. Asserting a stamp it
-      # cannot carry would refuse every release; not asserting the others would
-      # be the trap this step exists for. So the dependency decides, and if
-      # bacchus-netd ever gains it, this starts applying on its own.
+      # a live example rather than a hypothetical: until bacchus-vpn/bacchus#223,
+      # cmd/bacchus-netd did not link core/version at all - `go list -deps
+      # ./cmd/bacchus-netd` did not contain it - so the -X above was silently
+      # ignored for that binary and no amount of checking the build log would
+      # have said so. Asserting a stamp a binary cannot carry would refuse every
+      # release; not asserting the others would be the trap this step exists for.
+      # So the dependency decides. All three link it today, and a binary that
+      # gains or loses the package starts or stops being asserted on its own.
+      #
+      # HOW THE VALUE IS READ, and why not the three obvious ways
+      # (bacchus-vpn/bacchus#254):
+      #
+      #   - NOT `strings -a | grep -qx`, which is what this step used to do. That
+      #     asks whether the value occupies a WHOLE LINE of `strings` output, and
+      #     Go packs its strings contiguously into one blob with no separators,
+      #     so whether any given value lands on a line of its own is an accident
+      #     of what happens to sit beside it. It went red on a correctly stamped
+      #     bacchus-netd, whose blob reads "...48828125infinityClassANY..."
+      #     through that region. Worse, and measured rather than feared: it goes
+      #     GREEN on a bacchus-node and a bacchus-coordinator built with no -X at
+      #     all, because core/version's own source carries the literal 0.0.0 it
+      #     reports when nothing stamped it - and a dry run asserts exactly
+      #     0.0.0. A false pass on the precise defect the step exists to catch.
+      #   - NOT `go version -m`. Under -trimpath, which ADR-0052 section 5
+      #     requires for the fleet build, it records no -ldflags at all. WITHOUT
+      #     -trimpath it records the flag STRING that was passed - byte for byte
+      #     the same whether or not the linker resolved the symbol - which is the
+      #     value this step must never take on trust.
+      #   - NOT running the binary. Only bacchus-netd has a -version flag, and
+      #     even it cannot settle a dry run: 0.0.0 is what an UNSTAMPED build
+      #     reports too, so an execution read-back agrees with itself on a
+      #     release whose stamp never landed.
+      #
+      # core/update.TestReleaseArtifactsCarryTheStamp decodes the Go string
+      # header at core/version.current out of the artifact's own bytes - the same
+      # indirection the runtime follows to answer version.Current(). A stamped
+      # 0.0.0 and an unstamped build report the same NUMBER but are not the same
+      # BYTES: the second has an empty string there, and that is the difference
+      # no value comparison can see. The reader is covered by tests that run on
+      # every pull request, which is more than the shell one-liner it replaces
+      # ever had - nothing on a branch exercises this file's tag path.
       - name: the binaries that can state their release must state it
         shell: bash
         env:
           SEMVER: ${{ steps.semver.outputs.semver }}
         run: |
           set -euo pipefail
+          artifacts=""
           for pair in node:bacchus-node coordinator:bacchus-coordinator bacchus-netd:bacchus-netd; do
             cmd="${pair%%:*}"; name="${pair##*:}"
             if ! go list -deps "./cmd/$cmd" | grep -qx 'github.com/bacchus-vpn/bacchus/core/version'; then
               echo "$name does not link core/version, so it carries no release stamp and none is asserted"
               continue
             fi
-            if ! strings -a "dist-fleet/a/$name" | grep -qx "$SEMVER"; then
-              echo "::error::$name does not contain the string '$SEMVER', so the release stamp did"
-              echo "::error::not take. -ldflags -X on a symbol the linker cannot resolve is ignored"
-              echo "::error::with a zero exit, which is why this is read back rather than assumed."
-              exit 1
-            fi
-            echo "$name carries $SEMVER"
+            # ABSOLUTE. `go test` runs the test binary with the package
+            # directory as its working directory, so a path relative to the
+            # workspace would resolve under core/update and read nothing.
+            artifacts="$artifacts $GITHUB_WORKSPACE/dist-fleet/a/$name"
           done
+          if [ -z "$artifacts" ]; then
+            echo "::error::no fleet binary links core/version, so this step would assert nothing at"
+            echo "::error::all and report success over it. Either every one of them lost the package,"
+            echo "::error::or the derivation above stopped matching what the build step produced."
+            exit 1
+          fi
+
+          # `go test -run` matching NOTHING exits 0, so a renamed or deleted test
+          # disables this gate without failing it - the same shape as the ignored
+          # -X the gate is about. verify-table checks the existence of its
+          # assertion for exactly this reason; so does this.
+          listed=$(go test -list 'TestReleaseArtifactsCarryTheStamp' ./core/update/ | grep -c '^TestReleaseArtifactsCarryTheStamp$' || true)
+          if [ "$listed" != "1" ]; then
+            echo "::error::core/update has no TestReleaseArtifactsCarryTheStamp. That test is what reads"
+            echo "::error::the release stamp back out of the built artifacts; without it this step would"
+            echo "::error::be green over nothing, which is the failure it exists to make impossible."
+            exit 1
+          fi
+
+          # BACCHUS_RELEASE_STAMP is what makes the assertion load-bearing: the
+          # test SKIPS without it, because on an ordinary run there are no
+          # artifacts to read. Same shape, and the same reason, as
+          # BACCHUS_ASN_RELEASE_TABLE above and BACCHUS_REQUIRE_STAMP in ci.yml.
+          BACCHUS_RELEASE_STAMP="$SEMVER" BACCHUS_RELEASE_ARTIFACTS="$artifacts" \
+            go test -count=1 -v -run 'TestReleaseArtifactsCarryTheStamp' ./core/update/
+
+          # CALIBRATION, not the gate, and the distinction is the point. The gate
+          # above reads bytes; this asks the one fleet binary that can answer for
+          # itself (bacchus-netd -version, bacchus-vpn/bacchus#223) and requires
+          # the two to agree. That is what makes the reader answerable for the
+          # other two, which have no such flag and are trusted to it.
+          #
+          # It can be asked at all only because this job builds for the runner's
+          # own platform - no GOOS/GOARCH above, and artifacts.json below says
+          # linux/amd64. A cross-compiled fleet would keep the gate and lose this.
+          if ! spoken="$(./dist-fleet/a/bacchus-netd -version)"; then
+            echo "::error::bacchus-netd -version did not run on the machine that built it. The gate"
+            echo "::error::above already read the stamp out of its bytes; this step asks the binary"
+            echo "::error::itself, which is what makes that reader trustworthy for the binaries that"
+            echo "::error::cannot be asked."
+            exit 1
+          fi
+          if [ "$spoken" != "$SEMVER" ]; then
+            echo "::error::bacchus-netd reports release '$spoken' and this release is '$SEMVER', so the"
+            echo "::error::value read out of the artifact's bytes and the value the artifact states are"
+            echo "::error::not the same value. One of the two is wrong and neither can be preferred."
+            exit 1
+          fi
+          echo "bacchus-netd states $spoken, which is what its bytes carry"
 
       # The rows the OFFLINE signer reads (cmd/release-sign plan -from). This is
       # the whole handover between CI and the signing ceremony: hashes and
