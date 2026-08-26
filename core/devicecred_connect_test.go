@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -1362,9 +1363,80 @@ func TestDeviceCredPathIsEmptyForAnEmptyDir(t *testing.T) {
 	if got := DeviceCredPath(""); got != "" {
 		t.Fatalf("DeviceCredPath(\"\") = %q, want empty (devicestore's in-memory mode)", got)
 	}
+	// The literal, not devicestore.CredFileName, on purpose. Composing the
+	// constant here would pass however the constant changed, and this filename is
+	// on disk on every enrolled device: changing it silently orphans every
+	// credential already written.
 	if got := DeviceCredPath("/x"); got != filepath.Join("/x", "credential.json") {
 		t.Fatalf("DeviceCredPath = %q", got)
 	}
+}
+
+// TestDeviceCredentialSetupRefusesAKeyLostBesideItsCredential is issue #244
+// through the two functions that actually open a DeviceCredDir.
+//
+// The devicestore unit test proves LoadOrGenerateKey refuses. This proves the
+// refusal is REACHABLE from here, which is a separate fact and the one that
+// would break silently: the check reads devicestore.CredFileName and the
+// credential is written at DeviceCredPath, so if those two names ever disagreed
+// the check would look for a file nothing writes, find nothing, mint a key and
+// leave every test in the devicestore package green. The credential below is
+// therefore written through DeviceCredPath — core's answer to where it goes —
+// and never through a literal.
+func TestDeviceCredentialSetupRefusesAKeyLostBesideItsCredential(t *testing.T) {
+	seed := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(DeviceCredPath(dir), []byte(`{"cred":"bacchusd1:x","issuerCert":"bacchusi1:x"}`), 0o600); err != nil {
+			t.Fatalf("seed credential: %v", err)
+		}
+		return dir
+	}
+
+	t.Run("setupDeviceCredential", func(t *testing.T) {
+		dir := seed(t)
+		key, store, err := setupDeviceCredential(Config{DeviceCredDir: dir}, map[string]bool{RoleClient: true})
+		if err == nil {
+			t.Fatal("a client whose device key was lost beside its credential constructed anyway: " +
+				"it will now sign every connect with a key the credential it presents does not bind, " +
+				"and be refused by the coordinator with a reason that names none of that")
+		}
+		if key != nil || store != nil {
+			t.Errorf("a refusal must hand back neither key nor store, got key=%v store=%v", key != nil, store != nil)
+		}
+		if !errors.Is(err, devicestore.ErrOrphanedCredential) {
+			t.Errorf("error = %v, want one wrapping devicestore.ErrOrphanedCredential", err)
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, "device.key")); !errors.Is(statErr, os.ErrNotExist) {
+			t.Errorf("a device key was written despite the refusal (%v)", statErr)
+		}
+	})
+
+	t.Run("OpenDeviceEnrollment", func(t *testing.T) {
+		// The enrollment side is where this is worst: Enrolled() would report true
+		// off the surviving credential, so a provisioning run correctly declines to
+		// spend a second claim code and leaves the device stranded politely.
+		dir := seed(t)
+		dev, err := OpenDeviceEnrollment(dir)
+		if err == nil {
+			t.Fatal("OpenDeviceEnrollment minted a second device key beside a credential bound to the first")
+		}
+		if dev != nil {
+			t.Error("a refusal must hand back no enrollment")
+		}
+		if !errors.Is(err, devicestore.ErrOrphanedCredential) {
+			t.Errorf("error = %v, want one wrapping devicestore.ErrOrphanedCredential", err)
+		}
+	})
+
+	// A forwarder has no device identity at all, so it must not be refused by a
+	// directory it never reads — the role check runs first and stays first.
+	t.Run("a forwarder is unaffected", func(t *testing.T) {
+		dir := seed(t)
+		if _, _, err := setupDeviceCredential(Config{DeviceCredDir: dir}, map[string]bool{RoleRelay: true}); err != nil {
+			t.Fatalf("a relay was refused over a client's credential directory: %v", err)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -76,6 +77,94 @@ func TestLoadOrGenerateKey_WrongLengthSeedIsHardError(t *testing.T) {
 	}
 	if _, err := LoadOrGenerateKey(dir); err == nil {
 		t.Fatal("a wrong-length seed must be a hard error")
+	}
+}
+
+// TestLoadOrGenerateKey_MissingKeyBesideACredentialNamesBothFiles is issue #244:
+// the fail-closed rule the two tests above apply to a present-but-broken key
+// file, applied to the case the missing-file branch used to wave through.
+//
+// The assertion that matters is not merely "it errored". It is that no key was
+// written — a refusal that generated anyway would have replaced the identity it
+// was refusing to replace — and that the message tells a person what to do,
+// because deleting device.key on purpose is a legitimate reset and this now
+// refuses it. A refusal that only reported the missing file would trade a silent
+// failure for a confusing one.
+func TestLoadOrGenerateKey_MissingKeyBesideACredentialNamesBothFiles(t *testing.T) {
+	dir := t.TempDir()
+	credPath := filepath.Join(dir, CredFileName)
+	if err := os.WriteFile(credPath, []byte(`{"cred":"bacchusd1:whatever","issuerCert":"bacchusi1:whatever"}`), 0o600); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+
+	key, err := LoadOrGenerateKey(dir)
+	if err == nil {
+		t.Fatal("a missing device key beside a surviving credential was treated as a cold start: " +
+			"a second key was minted, and this device now signs with a key its stored credential does not bind")
+	}
+	if key != nil {
+		t.Fatalf("a refusal must return no key, got %d bytes", len(key))
+	}
+	if !errors.Is(err, ErrOrphanedCredential) {
+		t.Errorf("error = %v, want one wrapping ErrOrphanedCredential — a caller cannot offer a reset it cannot recognize", err)
+	}
+	keyPath := filepath.Join(dir, keyFileName)
+	if _, statErr := os.Stat(keyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("a key file exists at %s after the refusal (%v); the refusal generated anyway", keyPath, statErr)
+	}
+	for _, want := range []string{keyPath, credPath, "BOTH"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not contain %q, so it does not say what to remove to get a cold start: %v", want, err)
+		}
+	}
+}
+
+// TestLoadOrGenerateKey_ColdStartIsStillAColdStart is the other half of #244 and
+// the half that keeps the check from becoming "refuse whenever the directory is
+// not empty".
+//
+// The device credential is the ONLY file that proves this device already enrolled.
+// A directory holding the legacy admission file, or a selection cache, or an
+// operator's own notes, is still a first run — refusing those would make a fresh
+// install fail on a stale directory nobody can be told to identify.
+func TestLoadOrGenerateKey_ColdStartIsStillAColdStart(t *testing.T) {
+	for _, name := range []string{"", legacyAdmissionFileName, "selection.json", "credential.json.bak"} {
+		t.Run("beside "+name, func(t *testing.T) {
+			dir := t.TempDir()
+			if name != "" {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+					t.Fatalf("seed %s: %v", name, err)
+				}
+			}
+			if _, err := LoadOrGenerateKey(dir); err != nil {
+				t.Fatalf("a first run in a directory holding no credential was refused: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, keyFileName)); err != nil {
+				t.Fatalf("no key was generated on a genuine cold start: %v", err)
+			}
+		})
+	}
+}
+
+// TestLoadOrGenerateKey_KeyAndCredentialTogetherLoadNormally pins the steady
+// state #244's check runs beside on every single start of every enrolled device:
+// both files present, key loaded, nothing refused. A check that fired here would
+// lock out the entire fleet rather than the damaged part of it.
+func TestLoadOrGenerateKey_KeyAndCredentialTogetherLoadNormally(t *testing.T) {
+	dir := t.TempDir()
+	first, err := LoadOrGenerateKey(dir)
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, CredFileName), []byte(`{"cred":"bacchusd1:x"}`), 0o600); err != nil {
+		t.Fatalf("seed credential: %v", err)
+	}
+	second, err := LoadOrGenerateKey(dir)
+	if err != nil {
+		t.Fatalf("an enrolled device was refused its own key: %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("the second load returned a different key")
 	}
 }
 
