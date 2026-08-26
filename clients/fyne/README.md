@@ -247,6 +247,19 @@ exe and the installer in the per-user directory (bacchus#136) — and the file t
 no coordinator and gets the same message, rather than reaching the dialer as an
 address.
 
+**Bacchus says which file it read** (bacchus#267). There are two candidates and the
+one next to the executable wins, so a user editing the per-user file on a machine
+that also has an exe-adjacent one saw their change ignored with nothing anywhere to
+explain it. The first line in the log after startup now names the file that was read,
+names the other one when it exists and is therefore inert, and says that the file is
+read **once**, at startup — so an edit made by hand takes effect at the next launch
+and not at the next connect. It also reports the one error the load throws away: an
+exe-adjacent file that exists and could not be *read* is passed over silently, and
+the day it becomes readable it takes over. The Settings window states the same file
+and the same rule, for anyone who never opens a log. Paths are safe to keep there
+because the log sink replaces your home directory with `~` on every line before it is
+written.
+
 **A config file that does not parse stops the client** (bacchus#255). It used to be
 carried to the detail line and started around — the window came up with no
 coordinators, no account service, no country and no bypass list, looking exactly like a
@@ -348,6 +361,17 @@ comfortable credential life left says so calmly, and the sentence escalates on t
 clock as the remaining life shrinks, so the warning arrives while it is still only
 a warning. Both the device credential and the admission credential are refreshed
 together and stored together (bacchus#166).
+
+**Running out of addresses is its own line in the log** (bacchus#174). The rotation
+announces each hop it makes, and when the last address has failed it says that the
+list is spent and how many addresses that was — naming them, so what this client
+believes can be compared against where the service actually is. That includes the
+one-address case, which is every install with no second address and no `invite`, and
+which said nothing at all before. The distinction it buys is the one with a deadline
+on it: a transport error is a bad minute, an exhausted list on a client whose
+addresses cannot update is the start of the ~6 h countdown to this device no longer
+connecting. The detail line still carries the deadline itself; this is the log's
+account of *why*.
 
 ### The signed directory (bacchus#193, ADR-0061)
 
@@ -771,7 +795,9 @@ cgo compiling `go-gl/glfw`. See `.github/workflows/ci.yml`.
 - **A hand-edited config takes effect at the next launch, not at the next connect.**
   The file is read once, at startup; editing it while Bacchus is running and pressing
   Connect again uses what was loaded. Settings saves are live (the Controller is told),
-  hand edits are not.
+  hand edits are not. Bacchus now says so in three places rather than only here
+  (bacchus#267): the startup log names the file it read and states the rule, the
+  Settings window names the file it saves to and states it again, and this line.
 - **IPv6 is blocked while the tunnel is up, not tunnelled** — the physical adapter's
   IPv6 binding is disabled for the session's lifetime. An IPv6 address or prefix in
   `bypass` is refused with that reason rather than accepted into a set nothing reads.

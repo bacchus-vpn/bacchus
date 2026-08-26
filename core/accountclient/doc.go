@@ -62,4 +62,12 @@
 // connect with its own reason. That is the designed degradation, not a gap: the
 // tolerable outage is the credential's lifetime less the renewal margin, and it
 // is an availability budget rather than an accident.
+//
+// Because it IS a budget, spending the whole address list is an event and not
+// just an error (bacchus#174). overExchanges says so on every exhausted exchange,
+// naming what it tried, including when there is only one address to try — which
+// is the configuration most installed clients are in and the one that used to
+// produce no output at all. The caller owns the deadline, because only the caller
+// can read the stored credential's expiry; this package owns the fact that
+// nowhere it knows of answered.
 package accountclient

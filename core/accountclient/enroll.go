@@ -105,7 +105,8 @@ func (c *Client) Enroll(ctx context.Context, dev *core.DeviceEnrollment, claim, 
 		err       error
 		base      string
 	)
-	for _, candidate := range c.baseOrder() {
+	order := c.baseOrder()
+	for _, candidate := range order {
 		challenge, _, err = c.challengeFrom(ctx, candidate)
 		if err == nil {
 			base = candidate
@@ -117,6 +118,11 @@ func (c *Client) Enroll(ctx context.Context, dev *core.DeviceEnrollment, claim, 
 		c.markUnreachable(candidate)
 	}
 	if base == "" {
+		// Nothing minted a challenge, so every address is spent — and this is the
+		// path a device reaches BEFORE it has any credential at all, where the
+		// alternative to saying so is a claim code that appears not to work
+		// (bacchus#174).
+		c.sayListSpent(order)
 		return devicestore.Credential{}, err
 	}
 	sig, err := s.sign(c.audience, challenge)

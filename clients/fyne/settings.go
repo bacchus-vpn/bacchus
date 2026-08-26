@@ -309,6 +309,31 @@ func showSettings(a fyne.App, current func() appstate.Config, cfgPath string, en
 		}
 	}
 
+	// WHICH file this window is editing (bacchus#267). The one fact a user
+	// comparing their own hand-edited JSON against what Bacchus is doing needs,
+	// and the window that exists to change settings was the last place in the
+	// client that did not state it.
+	//
+	// The same path resolution OnSubmit uses below, deliberately duplicated
+	// rather than computed once and shared: this is the path a save WILL write
+	// to, and a label that could drift from the save target would be worse than
+	// no label. There is one path in this window and it is stated the same way in
+	// both places.
+	//
+	// The second sentence is the hand-edit rule. It is in the README under Known
+	// limits and in the startup log (appstate.ConfigSource), and this is the only
+	// one of the three a user who never opens either will read.
+	configTarget := cfgPath
+	if configTarget == "" {
+		configTarget = appstate.DefaultConfigPath()
+	}
+	configStatus := widget.NewLabel(lang.L("This system has nowhere to keep a settings file, so nothing here can be saved."))
+	if configTarget != "" {
+		configStatus.SetText(lang.L("These settings are saved to:") + " " + configTarget + " " +
+			lang.L("Bacchus reads that file once, when it starts, so editing it by hand takes effect at the next launch rather than at the next connect."))
+	}
+	configStatus.Wrapping = fyne.TextWrapWord
+
 	logCheckItem := widget.NewFormItem("", logCheck)
 	// The consequence is on the control, not in the paragraph above it. Turning
 	// this off destroys the file, and a user reaching for it is usually somebody
@@ -398,6 +423,8 @@ func showSettings(a fyne.App, current func() appstate.Config, cfgPath string, en
 		widget.NewFormItem("", logNotice),
 		logCheckItem,
 		widget.NewFormItem("", logStatus),
+		widget.NewFormItem("", widget.NewSeparator()),
+		widget.NewFormItem("", configStatus),
 	)
 	form.SubmitText = lang.L("Save")
 	form.CancelText = lang.L("Cancel")

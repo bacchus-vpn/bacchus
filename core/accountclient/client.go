@@ -171,20 +171,75 @@ func (c *Client) markUnreachable(base string) {
 // on would turn one refusal into as many refusals as there are addresses, each
 // spending a challenge, and for the verbs that spend more than a challenge it
 // would be far worse (see Enroll, which does not use this).
+//
+// # Running out of addresses is itself an event (bacchus#174)
+//
+// The rotation used to narrate itself and then go quiet at exactly the moment
+// worth narrating. Measured on main before this change:
+//
+//   - With ONE address — which is every client that has neither a second address
+//     configured nor a signed directory, and so the fleet-wide case bacchus#174
+//     is about — an exchange that reached nothing at all logged NOTHING at all.
+//     The caller's own "renewal failed: <error>" was the whole record, and it
+//     names a transport failure rather than an exhausted list.
+//   - With two or more, the LAST address logged "did not answer, trying the next
+//     configured address" and then the loop ended. The final word on a total
+//     outage was a promise to try an address that does not exist.
+//
+// Both are the shape this project keeps finding: the component knows and does
+// not say. What a reader needs here is not the transport error — that is the
+// caller's line — but the fact that the LIST is spent, and how many addresses
+// that was, because those two together are what distinguishes "the network is
+// having a moment" from "this service moved and nothing has told this client
+// where". The second is the one with a deadline on it: a device renews as soon
+// as it enters its margin, so an account service that cannot be reached takes
+// the first devices offline about six hours later, and the clock is already
+// running by the time anyone reads this.
+//
+// It is logged on every exhausted exchange rather than once, matching the
+// caller's own unconditional failure line: ten minutes apart, these are the only
+// record that the retries are happening at all.
 func (c *Client) overExchanges(exchange func(base string) error) error {
 	order := c.baseOrder()
 	var err error
-	for _, base := range order {
+	for i, base := range order {
 		err = exchange(base)
 		if !errors.Is(err, ErrUnreachable) {
 			return err
 		}
 		c.markUnreachable(base)
-		if len(order) > 1 {
-			c.logf("account service: %s did not answer, trying the next configured address", base)
+		// Only when there IS a next one. The index test replaces a length test
+		// that was true for the whole loop and so kept announcing a successor
+		// after the last address had already failed.
+		if i+1 < len(order) {
+			c.logf("account service: %s did not answer, trying the next of %d addresses", base, len(order))
 		}
 	}
+	c.sayListSpent(order)
 	return err
+}
+
+// sayListSpent announces that every address in order was tried and none of them
+// answered. Called from the two places a rotation can run out — overExchanges,
+// and Enroll's hand-written challenge loop, which cannot use overExchanges for a
+// reason of its own (see Enroll).
+//
+// It is one function rather than a line at each site because the two are the same
+// event to whoever reads the log, and because the enrollment half is the free
+// tier's onboarding path — the one that reaches this service BEFORE any tunnel
+// exists, and so the one where a moved address is not merely a renewal problem.
+func (c *Client) sayListSpent(order []string) {
+	switch len(order) {
+	case 0:
+		// Unreachable through New, which refuses a client with no addresses. Kept
+		// as a branch rather than an assumption so that "none of the 0 addresses
+		// answered" can never be printed.
+	case 1:
+		c.logf("account service: the only address this client has (%s) did not answer; this device cannot enroll or renew until it does, or until this client is given another address", order[0])
+	default:
+		c.logf("account service: all %d addresses this client has were tried and none answered (%s); this device cannot enroll or renew until one of them does, or until this client is given a new address",
+			len(order), strings.Join(order, ", "))
+	}
 }
 
 func (c *Client) logf(format string, args ...any) {
