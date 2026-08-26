@@ -225,7 +225,12 @@ func LoadOrGenerateKey(dir string) (ed25519.PrivateKey, error) {
 // provisioning script deciding between "retry" and "stop" — has to be able to
 // recognize it without matching on prose. Nothing in this repository branches on
 // it yet; the message below is written to be read by a person either way.
-var ErrOrphanedCredential = errors.New("devicestore: the device key is missing and the credential it binds is not")
+//
+// Kept short because it is a PREFIX, not the message: callers stack their own
+// ("device credential: …"), and the wrapped text below already states the whole
+// situation. A sentinel that restated it would read as the same sentence twice
+// before the operator reaches the part that says what to do.
+var ErrOrphanedCredential = errors.New("devicestore: device key missing beside its credential")
 
 // refuseIfCredentialSurvives answers the one question that separates a first run
 // from a damaged device: does this directory already hold a credential?
