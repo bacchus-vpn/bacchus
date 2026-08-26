@@ -310,6 +310,15 @@ type DeviceEnrollment struct {
 // that persists nowhere. It is useful in a test and useless in a client, because
 // the credential an enrollment buys is bound to a key the next start will not
 // have. Callers that mean to enroll a real device pass a real directory.
+//
+// A real directory holding a credential and NO key is refused here rather than
+// opened (issue #244, devicestore.ErrOrphanedCredential), and this is the call
+// site where that matters most. An enroller asks Enrolled() before it spends a
+// claim code; Enrolled() reads the store, the store still has the credential, so
+// the answer is yes and the enroller correctly declines to spend a second code —
+// leaving a device holding a key that credential does not bind and no path back.
+// Refusing at the open is the only place that sequence can be stopped while
+// there is still something legible to say.
 func OpenDeviceEnrollment(deviceCredDir string) (*DeviceEnrollment, error) {
 	key, err := devicestore.LoadOrGenerateKey(deviceCredDir)
 	if err != nil {
@@ -545,11 +554,19 @@ func (e *Engine) maybeRenewDeviceCred(ctx context.Context, now time.Time) {
 //
 // An empty dir returns an empty path, which devicestore.Open reads as its
 // documented in-memory mode rather than as an error.
+//
+// The filename itself moved into devicestore for issue #244, and this function
+// composes it rather than repeating it. LoadOrGenerateKey now reads the same
+// name to tell a first run from a device whose key was lost beside a surviving
+// credential, and that check is only as good as the two sides agreeing — a
+// second copy of the string here would let them disagree with nothing failing:
+// the check would look for a file no enroller writes, find nothing, and mint the
+// key it exists to refuse.
 func DeviceCredPath(dir string) string {
 	if dir == "" {
 		return ""
 	}
-	return filepath.Join(dir, "credential.json")
+	return filepath.Join(dir, devicestore.CredFileName)
 }
 
 // setupDeviceCredential builds this client's on-device keypair and credential
@@ -561,6 +578,14 @@ func DeviceCredPath(dir string) string {
 // never presents this chain. Config.DeviceCredDir may legitimately be empty even
 // for a client — that is in-memory-only mode (see the Config field doc), not a
 // construction error.
+//
+// The two calls below read the two files DeviceCredDir holds, and issue #244 is
+// what happens when only one of them is there. LoadOrGenerateKey answers it —
+// see devicestore.ErrOrphanedCredential — which puts the refusal on the first of
+// these two lines rather than here: a device whose key was lost beside a
+// surviving credential now fails to construct, with a message naming both files,
+// instead of constructing happily and being refused by every coordinator it ever
+// reaches for a reason that names none of it.
 func setupDeviceCredential(cfg Config, roles map[string]bool) (ed25519.PrivateKey, *devicestore.Store, error) {
 	if !roles[RoleClient] {
 		return nil, nil, nil

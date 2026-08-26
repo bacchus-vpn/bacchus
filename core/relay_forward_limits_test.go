@@ -354,6 +354,12 @@ func TestRefusalSnifferReadsWhatAHopWrote(t *testing.T) {
 // per-previous-hop cap over a real socket, and asserts three separate things that
 // can each break alone: the second circuit is refused, the next hop is never
 // dialed for it, and the client is TOLD rather than left with a dead socket.
+//
+// It takes TWO barriers, on opposite sides of the hop, and issue #269 is what
+// having only the first one costs. Both are kept rather than collapsed into
+// whichever one currently implies the other: they are different facts, and which
+// of them implies which is a property of relayForward's internal order (count,
+// then dial) that this test has no business depending on.
 func TestForwardingHopRefusesOverPerPeerCap(t *testing.T) {
 	sink, sinkAddr := startSink(t)
 	hop, hopAddr, hopKey := startCappedHop(t, sinkAddr, 1, 100, 0)
@@ -361,7 +367,8 @@ func TestForwardingHopRefusesOverPerPeerCap(t *testing.T) {
 	// Circuit one: admitted, held open, and the hop is now at its per-peer cap.
 	held := dialForward(t, hopAddr, hopKey, sinkAddr)
 	defer held.Close()
-	waitForwardCount(t, hop, "127.0.0.1", 1)
+	waitForwardCount(t, hop, "127.0.0.1", 1) // the HOP has taken the slot
+	sink.waitFirstAccept(t, hopTestDeadline) // the SINK has seen the circuit
 	if got := sink.accepted(); got != 1 {
 		t.Fatalf("the admitted circuit reached the next hop %d times, want 1", got)
 	}
@@ -380,6 +387,14 @@ func TestForwardingHopRefusesOverPerPeerCap(t *testing.T) {
 	// A refused forward must cost this node no outbound connection: the whole point
 	// is to stop spending resources on it, and a dial is the most expensive thing
 	// here after the splice itself.
+	//
+	// No barrier here, and none is possible: this asserts that something did NOT
+	// happen, and nothing can be waited for. Unlike the assertion above it, that
+	// makes it unsafe only in the direction that under-reports — a stray dial
+	// still in flight reads as absent — so a loaded runner can let this pass
+	// without ever failing it wrongly, which is the acceptable half of #269's
+	// problem. readRefusal has already returned, so a hop that dialed before
+	// refusing has issued the dial by now even if the accept has not landed.
 	if got := sink.accepted(); got != 1 {
 		t.Errorf("the next hop was dialed %d times, want 1 — the refusal happens after the dial, so a full node still pays for every circuit it turns away", got)
 	}
@@ -452,7 +467,7 @@ func TestForwardingHopPacesOnePreviousHop(t *testing.T) {
 	defer nc.Close()
 	// The sink drains everything it is handed, so the only thing between this write
 	// and loopback speed is the pace under test.
-	<-sink.first
+	sink.waitFirstAccept(t, hopTestDeadline)
 
 	start := time.Now()
 	if _, err := nc.Write(make([]byte, payload)); err != nil {
@@ -492,7 +507,7 @@ func TestForwardingHopRetainsPaceAcrossReopen(t *testing.T) {
 	hop, hopAddr, hopKey := startCappedHop(t, sinkAddr, 10, 100, rate)
 
 	first := dialForward(t, hopAddr, hopKey, sinkAddr)
-	<-sink.first
+	sink.waitFirstAccept(t, hopTestDeadline)
 	if _, err := first.Write(make([]byte, burst)); err != nil {
 		t.Fatalf("write through circuit one: %v", err)
 	}
@@ -681,7 +696,7 @@ func TestClientTellsARefusingHopFromADeadOne(t *testing.T) {
 type sinkNode struct {
 	ln    net.Listener
 	count chan struct{}
-	first chan struct{} // closed on the first accept, for tests that must not start timing early
+	first chan struct{} // closed AFTER the first accept is counted; read it through waitFirstAccept
 	bytes atomic.Int64  // everything drained, so a pacing test can time ARRIVAL rather than a local write
 }
 
@@ -703,6 +718,32 @@ func (s *sinkNode) waitBytes(t *testing.T, n int64, within time.Duration) {
 
 func (s *sinkNode) accepted() int { return len(s.count) }
 
+// waitFirstAccept blocks until the sink's accept loop has counted its first
+// connection, and is the barrier issue #269 is about.
+//
+// accepted() is fed by a goroutine on the far end of a TCP connection the hop
+// opens AFTER it has admitted the circuit, so every hop-side barrier in this
+// file — waitForwardCount above all — releases strictly before the sink has
+// seen anything. Asserting on accepted() straight after one of those is
+// asserting on a counter nothing has waited for, which passes on an idle machine
+// and fails at whatever rate a loaded runner sets. #269 is that failure, on
+// main, on a commit that introduced nothing it depends on.
+//
+// The channel is the right barrier rather than a poll because startSink already
+// built it for this: the accept loop sends to count and THEN closes first, so a
+// receive here is proof that accepted() is at least 1 rather than a guess that
+// enough time has passed. The deadline is not the barrier — it only converts a
+// hang into a legible failure, since a bare receive on a sink that never accepts
+// is a test binary that reports nothing until go test's own ten-minute panic.
+func (s *sinkNode) waitFirstAccept(t *testing.T, within time.Duration) {
+	t.Helper()
+	select {
+	case <-s.first:
+	case <-time.After(within):
+		t.Fatalf("nothing reached the next hop within %v; the hop admitted a circuit and never dialed", within)
+	}
+}
+
 func startSink(t *testing.T) (*sinkNode, string) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -718,6 +759,11 @@ func startSink(t *testing.T) (*sinkNode, string) {
 			if err != nil {
 				return
 			}
+			// Count BEFORE closing first, and the order is load-bearing: it is
+			// what makes waitFirstAccept a barrier for accepted() rather than
+			// merely a signal that an accept has happened somewhere. Swap these
+			// two lines and every test that waits on first goes back to racing
+			// the counter it then reads (issue #269).
 			select {
 			case s.count <- struct{}{}:
 			default:
