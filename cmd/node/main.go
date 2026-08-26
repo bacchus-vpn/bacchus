@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core"
+	"github.com/bacchus-vpn/bacchus/core/version"
 )
 
 func main() {
@@ -92,7 +93,34 @@ func main() {
 	// against (issue #170, ADR-0071). See enroll.go for why the claim code is not
 	// a flag.
 	acct := registerAccountFlags()
+	showVersion := flag.Bool("version", false,
+		"print this build's release version and quit. Reaches no coordinator and opens no port, so it answers "+
+			"\"which node is installed here\" without a connect attempt (issue #263).")
 	flag.Parse()
+
+	// The release, before anything that can fail — bacchus-netd's shape and
+	// bacchus-coordinator's, so the three agree (issue #223, issue #263). An
+	// unstamped build warns inside core/version and reports 0.0.0; a malformed stamp
+	// panics here rather than three layers down.
+	//
+	// ABOVE checkStartupDemotion, and that placement is the whole of issue #240's
+	// second half. The two one-shots below are exempted by a PREDICATE somebody has
+	// to remember to extend, and this is the third one-shot this binary has grown
+	// since that predicate was written — the exact instance #240 said would arrive.
+	// A one-shot that returns before the watchdog runs cannot inherit the bug at
+	// all, so this one is structurally exempt rather than listed.
+	//
+	// The other two stay where they are. -list needs the whole engine
+	// configuration built below it and could not move; -enroll sits in ADR-0071's
+	// provisioning position deliberately, and moving it would buy nothing it does
+	// not already have from the predicate. What closes the class is not where any
+	// one of them sits but cmd/node/oneshot_probation_test.go, which discovers
+	// every one-shot from this binary's own flag help and holds all of them to the
+	// same assertion, whichever way each is exempted.
+	if *showVersion {
+		fmt.Println(version.Current())
+		return
+	}
 
 	// BEFORE anything else: if a previous START of an applied release never
 	// confirmed it, put the previous binary back and exit so the supervisor starts

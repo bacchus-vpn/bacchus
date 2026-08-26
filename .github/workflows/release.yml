@@ -549,10 +549,13 @@ jobs:
       #     -trimpath it records the flag STRING that was passed - byte for byte
       #     the same whether or not the linker resolved the symbol - which is the
       #     value this step must never take on trust.
-      #   - NOT running the binary. Only bacchus-netd has a -version flag, and
-      #     even it cannot settle a dry run: 0.0.0 is what an UNSTAMPED build
-      #     reports too, so an execution read-back agrees with itself on a
-      #     release whose stamp never landed.
+      #   - NOT running the binary. All three answer -version since
+      #     bacchus-vpn/bacchus#263 (only bacchus-netd did when this was
+      #     written), and not one of them can settle a dry run: 0.0.0 is what an
+      #     UNSTAMPED build reports too, so an execution read-back agrees with
+      #     itself on a release whose stamp never landed. What the flag on all
+      #     three buys is a wider CALIBRATION of the byte reader below, not a
+      #     replacement for it.
       #
       # core/update.TestReleaseArtifactsCarryTheStamp decodes the Go string
       # header at core/version.current out of the artifact's own bytes - the same
@@ -607,28 +610,49 @@ jobs:
             go test -count=1 -v -run 'TestReleaseArtifactsCarryTheStamp' ./core/update/
 
           # CALIBRATION, not the gate, and the distinction is the point. The gate
-          # above reads bytes; this asks the one fleet binary that can answer for
-          # itself (bacchus-netd -version, bacchus-vpn/bacchus#223) and requires
-          # the two to agree. That is what makes the reader answerable for the
-          # other two, which have no such flag and are trusted to it.
+          # above reads bytes; this asks each fleet binary what it says it is and
+          # requires the two answers to agree.
+          #
+          # EVERY binary the gate asserts, since bacchus-vpn/bacchus#263. It used
+          # to be one - bacchus-netd was the only one with a -version flag
+          # (bacchus-vpn/bacchus#223), so the byte reader was calibrated against a
+          # third of what it was trusted for and the other two were taken on that
+          # calibration's word. cmd/node and cmd/coordinator answer the same flag
+          # now, and asking a coordinator no longer means binding a public UDP
+          # port to find out.
+          #
+          # The list is the SAME derivation as the gate's, reused rather than
+          # rewritten: a binary that stops linking core/version drops out of both
+          # at once, and one that is added is asserted and calibrated together.
           #
           # It can be asked at all only because this job builds for the runner's
           # own platform - no GOOS/GOARCH above, and artifacts.json below says
           # linux/amd64. A cross-compiled fleet would keep the gate and lose this.
-          if ! spoken="$(./dist-fleet/a/bacchus-netd -version)"; then
-            echo "::error::bacchus-netd -version did not run on the machine that built it. The gate"
-            echo "::error::above already read the stamp out of its bytes; this step asks the binary"
-            echo "::error::itself, which is what makes that reader trustworthy for the binaries that"
-            echo "::error::cannot be asked."
+          asked=0
+          for path in $artifacts; do
+            name="$(basename "$path")"
+            if ! spoken="$("$path" -version)"; then
+              echo "::error::$name -version did not run on the machine that built it. The gate above"
+              echo "::error::already read the stamp out of its bytes; this step asks the binary itself,"
+              echo "::error::which is what makes that reader trustworthy at all. Every fleet binary"
+              echo "::error::answers -version and none of them needs privilege, a port or a config to"
+              echo "::error::do it (bacchus-vpn/bacchus#263)."
+              exit 1
+            fi
+            if [ "$spoken" != "$SEMVER" ]; then
+              echo "::error::$name reports release '$spoken' and this release is '$SEMVER', so the value"
+              echo "::error::read out of the artifact's bytes and the value the artifact states are not"
+              echo "::error::the same value. One of the two is wrong and neither can be preferred."
+              exit 1
+            fi
+            echo "$name states $spoken, which is what its bytes carry"
+            asked=$((asked + 1))
+          done
+          if [ "$asked" -eq 0 ]; then
+            echo "::error::no fleet binary was asked what it is, so this calibration reported success"
+            echo "::error::over nothing. \$artifacts was non-empty above, so the loop stopped matching it."
             exit 1
           fi
-          if [ "$spoken" != "$SEMVER" ]; then
-            echo "::error::bacchus-netd reports release '$spoken' and this release is '$SEMVER', so the"
-            echo "::error::value read out of the artifact's bytes and the value the artifact states are"
-            echo "::error::not the same value. One of the two is wrong and neither can be preferred."
-            exit 1
-          fi
-          echo "bacchus-netd states $spoken, which is what its bytes carry"
 
       # The rows the OFFLINE signer reads (cmd/release-sign plan -from). This is
       # the whole handover between CI and the signing ceremony: hashes and

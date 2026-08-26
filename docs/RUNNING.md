@@ -105,6 +105,39 @@ shape of both `VERSION` and the tag; and `core/version`'s own tests parse the fi
 on every push. If all three are bypassed — a hand-typed `-ldflags` — the panic
 message names the rule and the file.
 
+### Asking an installed binary which release it is (issue #263)
+
+All three fleet binaries answer `-version`: they print a bare
+`MAJOR.MINOR.PATCH` on stdout, exit 0, and do nothing else.
+
+```sh
+/usr/local/bin/bacchus-coordinator -version
+/usr/local/bin/bacchus-node -version
+/usr/local/lib/bacchus/bacchus-netd -version
+```
+
+This is the first question a pin, a rollback or a skew investigation asks, and
+until #263 it could only be answered by *starting the service* — which for a
+coordinator means binding a public UDP port and for a node means a connect
+attempt. So the flag is answered before anything that can fail and before
+anything that changes the box: no privilege, no listener, no configuration read,
+no key generated. In particular `-version` is answered **before**
+`-print-bootstrap-pubkey`, which *mints* a snapshot-signing key when none is
+there, and before `bacchus-node`'s demotion watchdog, so asking a node what it
+is cannot roll its release back (issue #240).
+
+`0.0.0` means *no release*: the binary was built without the stamp above. It
+still runs, and every build path that ships a binary stamps it, so a `0.0.0` on
+a deployed box means something built it by hand.
+
+**What this does not settle**, so it is not discovered later: a DRY release run
+stamps `0.0.0` too, and an unstamped build reports the same number. Executing a
+binary therefore cannot tell a dry run from a build whose stamp never landed —
+that is what `core/update.TestReleaseArtifactsCarryTheStamp` does, by decoding
+the string header out of the artifact's own bytes. `-version` on all three
+*calibrates* that reader against every binary the release gate asserts, rather
+than against one of them.
+
 All of that sits at the front of the pipeline because **nothing downstream would
 catch it**. No CI job runs a coordinator or node binary, and the two that launch
 the GUI smoke-test it without connecting — the client reads its release on
@@ -1132,6 +1165,33 @@ binds assertions to and the CA it pins the service's TLS identity against, both 
 of band, so an address named here still has to present the identity that client
 already pins.
 
+**Confirming it from the box** (issue #260). The coordinator states what it
+published, in the same startup journal every other gate announces itself in:
+
+```
+account service: 2 address(es) published in the signed directory as role "account" (issue #193)
+account service: NONE published (-account-service unset) — every client stays on its own configuration (issue #193)
+```
+
+The empty case is stated rather than left silent, matching `-operators` and the
+two revocation flags. Read it with
+`journalctl -u bacchus-coordinator --since …`.
+
+This exists for `deploy/bacchus-gate-check.sh`, which takes its posture from this
+journal on purpose: a flag in `ExecStart` says what an operator *asked for*, and
+a journal line says what the binary *concluded*. Until this line existed, that
+check had one row it could not answer from any journal on any build, so a
+deployment declaring this gate exited **4** — "could not be read" — rather than
+0. **The check does not read the line yet**: it still prints
+`account-service UNKNOWN`, and teaching it costs one `index()` on
+`account service: `, tracked as its own change.
+
+The count and the empty/non-empty fact are what is printed; the addresses
+themselves are not, because they are already in the directory every client
+fetches and this is a choice about journal noise. A wrong-but-well-formed address
+is not something the line can catch — an address that no client can use is
+refused at flag-parse time instead.
+
 **Client side.** A client needs an invite to fetch the directory at all. Mint one
 per recipient, exactly as for `cmd/coldstart-bootstrap`:
 ```
@@ -1215,7 +1275,9 @@ It needs no privilege, starts no listener and does not activate the socket unit,
 and the helper states the same number on the first line of its log. A `0.0.0`
 answer means the binary was built without the stamp above — the helper still
 works, but nothing can tell you which build owns the routing state on that
-machine (issue #223).
+machine (issue #223). The coordinator and the node answer the same flag the same
+way (issue #263) — see
+[Asking an installed binary which release it is](#asking-an-installed-binary-which-release-it-is-issue-263).
 
 ### What changes once it is installed
 
