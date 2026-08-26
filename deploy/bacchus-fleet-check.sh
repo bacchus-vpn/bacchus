@@ -2,8 +2,15 @@
 # Answer "is every box on the commit I pinned?" from the coordinator's journal alone,
 # without reaching a single node (issue #205, ADR-0064).
 #
-# usage: bacchus-fleet-check.sh [--expect N] [--ids-to FILE] REVISION [JOURNAL_FILE]
+# usage: bacchus-fleet-check.sh [--expect N] [--ids-to FILE] [--label L] REVISION [JOURNAL_FILE]
 #        journalctl -u bacchus-coordinator --since -10min | bacchus-fleet-check.sh REVISION
+#
+# ONE WINDOW, ONE MEMBER. The coordinators are a pool with no replication between members
+# (issue #250), so this answers about the member whose journal it was given and about no
+# other. Run it once per member and read the answers side by side: a node registered with
+# one member and missing from another is a real finding, and it is invisible to any single
+# window. `--label` is what tells two of these reports apart — an ordinal, never a host,
+# for the reason under "--expect takes a COUNT" below.
 #
 # REVISION is the commit the fleet was pinned to — a git sha of at least 7 characters.
 # `git rev-parse HEAD` is the safe thing to hand it; see "The abbreviation trap" below.
@@ -104,7 +111,7 @@
 set -eu
 
 usage() {
-	printf 'usage: %s [--expect N] [--ids-to FILE] REVISION [JOURNAL_FILE]\n' "${0##*/}" >&2
+	printf 'usage: %s [--expect N] [--ids-to FILE] [--label L] REVISION [JOURNAL_FILE]\n' "${0##*/}" >&2
 	printf '       journalctl -u bacchus-coordinator --since -10min | %s REVISION\n' "${0##*/}" >&2
 	printf '\nREVISION is the commit the fleet was pinned to (>= 7 hex characters).\n' >&2
 	# %s rather than a literal: a printf format beginning with `-` is undefined in
@@ -113,17 +120,27 @@ usage() {
 	printf '%s\n' '             A count, never a host list: nothing here prints a hostname.' >&2
 	printf '%s\n' '--ids-to F   also write the node ids counted, one per line, to F. Ids are public;' >&2
 	printf '%s\n' '             stdout is unchanged. bacchus-pin.sh pairs them with its host list.' >&2
+	printf '%s\n' '--label L    which pool member this window came from. An ordinal, never a host.' >&2
 	printf 'Exit: 0 pinned · 1 drift · 2 usage · 3 no coordinator start in this window\n' >&2
 	printf '      4 a node that should be there did not register in this window\n' >&2
 }
 
 expect=0
 idsfile=""
+label=""
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	-h | --help)
 		usage
 		exit 0
+		;;
+	--label)
+		[ "$#" -ge 2 ] || {
+			printf 'bacchus-fleet-check: --label needs a value\n' >&2
+			exit 2
+		}
+		label="$2"
+		shift 2
 		;;
 	--expect)
 		[ "$#" -ge 2 ] || {
@@ -161,6 +178,27 @@ case "$expect" in
 	printf 'bacchus-fleet-check: --expect takes a count of node processes, not %s.\n' "$expect" >&2
 	printf '  It is deliberately not a host list: this script prints no hostname, which is what\n' >&2
 	printf '  makes its output the half of a pin run that is safe to paste into an issue.\n' >&2
+	exit 2
+	;;
+esac
+
+# --label says WHICH pool member a window came from, because a coordinator pool produces
+# one of these reports per member and two unlabelled ones cannot be told apart — which is
+# how an asymmetry between members turns back into a single undifferentiated answer, the
+# thing reading them per member exists to avoid (issue #250).
+#
+# The one property this script has is that it prints no hostname, and a label is free text
+# that could carry one, so the characters an ssh target or an address needs are refused:
+# `.` for a domain, `@` for a user, `:` for a port or an IPv6 literal, `/` for a path.
+# bacchus-pin.sh passes an ordinal. This is a floor and not a wall — a bare unqualified
+# name would still fit through — and it is here so that reaching for the host takes a
+# deliberate act rather than being the obvious thing to type.
+case "$label" in
+*[./@:]* | *' '*)
+	printf 'bacchus-fleet-check: --label %s looks like a host, and this script prints none.\n' "$label" >&2
+	printf '  That is what makes its output the half of a pin run that is safe to paste into a\n' >&2
+	printf '  public issue. Use an ordinal — bacchus-pin.sh passes 1, 2, ... in COORDINATOR_TARGETS\n' >&2
+	printf '  order and prints the pairing itself, on output that already names ssh targets.\n' >&2
 	exit 2
 	;;
 esac
@@ -221,7 +259,16 @@ fi
 # by the shell first; want is passed with -v, which is the reason nothing here needs to
 # interpolate at all.
 # shellcheck disable=SC2016
-awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
+awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" -v label="$label" '
+	# who names the row and pfx the sentences, so one report can be told from the next
+	# when a pool produces several. Empty label leaves every line byte-identical to what
+	# a single-coordinator deployment printed before, which is what keeps the reader of
+	# an old pasted report right.
+	BEGIN {
+		who = (label == "" ? "coordinator" : "coordinator " label)
+		pfx = (label == "" ? "" : "coordinator " label ": ")
+	}
+
 	# The comparison is a PREFIX one: `git rev-parse --short` produces 7-ish characters,
 	# the wire carries 12, and a full sha is 40, so three correct spellings of one commit
 	# would fail an equality test. want is already lowered and capped at 12 by the shell.
@@ -287,7 +334,7 @@ awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
 	END {
 		if (!started) {
 			fflush()
-			print "bacchus-fleet-check: no `coordinator release` startup line in this input." > "/dev/stderr"
+			print pfx "bacchus-fleet-check: no `coordinator release` startup line in this input." > "/dev/stderr"
 			print "  Without one there is no way to tell a registration made AFTER the pin from one made" > "/dev/stderr"
 			print "  before it, and the pre-pin values look exactly as convincing. Widen the window" > "/dev/stderr"
 			print "  (journalctl --since) so it covers the coordinator restart, and re-read." > "/dev/stderr"
@@ -303,8 +350,9 @@ awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
 			close(idsfile)
 		}
 
-		# One column width for every row, taken from the rows themselves.
-		width = 12
+		# One column width for every row, taken from the rows themselves — and from the
+		# label, which widens the first column when a pool numbers its members.
+		width = (length(who) > 12 ? length(who) : 12)
 		for (i = 0; i < nodes; i++) {
 			k = roles[order[i]] " " order[i]
 			if (length(k) > width) width = length(k)
@@ -313,24 +361,24 @@ awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
 
 		bad = 0
 		if (coord == "unknown") {
-			printf "%s build UNRECORDED  — this coordinator was built without VCS data (a worktree, or a\n", pad("coordinator", width)
+			printf "%s build UNRECORDED  — this coordinator was built without VCS data (a worktree, or a\n", pad(who, width)
 			printf "%ssource tarball). Its own commit cannot be established from here.\n", indent
 			bad = 1
 		} else if (coorddirty) {
-			printf "%s %-14s DIRTY — built from a tree with uncommitted changes, so it is not at any\n", pad("coordinator", width), coord
+			printf "%s %-14s DIRTY — built from a tree with uncommitted changes, so it is not at any\n", pad(who, width), coord
 			printf "%snamed commit. Rebuild from a clean checkout.\n", indent
 			bad = 1
 		} else if (!matches(coord)) {
-			printf "%s %-14s MISMATCH — wanted %s\n", pad("coordinator", width), coord, want
+			printf "%s %-14s MISMATCH — wanted %s\n", pad(who, width), coord, want
 			bad = 1
 		} else {
-			printf "%s %-14s ok\n", pad("coordinator", width), coord
+			printf "%s %-14s ok\n", pad(who, width), coord
 		}
 
 		if (nodes == 0) {
 			fflush()
 			print "" > "/dev/stderr"
-			print "bacchus-fleet-check: the coordinator started and NO node has registered since." > "/dev/stderr"
+			print pfx "bacchus-fleet-check: the coordinator started and NO node has registered since." > "/dev/stderr"
 			print "  A live node re-registers every 10s, so after a restart this window should name every" > "/dev/stderr"
 			print "  one of them within seconds. Either the nodes are down, or they cannot reach this" > "/dev/stderr"
 			print "  coordinator, or this window was captured before they got a chance." > "/dev/stderr"
@@ -366,7 +414,7 @@ awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
 		if (expect > 0 && nodes < expect) missing = expect - nodes
 
 		if (expect > 0) {
-			printf "\n%d of %d expected node(s) registered since the coordinator started.\n", nodes, expect
+			printf "\n%s%d of %d expected node(s) registered since the coordinator started.\n", pfx, nodes, expect
 			if (nodes > expect) {
 				printf "  (More than expected, which is not a failure: a volunteer client serves as a relay\n"
 				printf "   or an exit and registers exactly like a deployed node, without being in any host\n"
@@ -374,7 +422,7 @@ awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
 				printf "   deployed box is absent.)\n"
 			}
 		} else {
-			printf "\n%d node(s) registered since the coordinator started.\n", nodes
+			printf "\n%s%d node(s) registered since the coordinator started.\n", pfx, nodes
 			printf "  No --expect given, so the only floor is that SOMETHING registered: a box that never\n"
 			printf "  came back cannot be seen from here. Pass --expect with the number of node processes.\n"
 		}
@@ -382,7 +430,7 @@ awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
 		if (bad) {
 			fflush()
 			print "" > "/dev/stderr"
-			print "bacchus-fleet-check: the fleet is NOT on one commit. A node on a different build" > "/dev/stderr"
+			print pfx "bacchus-fleet-check: the fleet is NOT on one commit. A node on a different build" > "/dev/stderr"
 			print "  registers, heartbeats and is assigned work exactly as a current one does, and then" > "/dev/stderr"
 			print "  drops every session it is given, with every log involved reporting health (issue" > "/dev/stderr"
 			print "  #114). Re-run deploy/bacchus-pin.sh before trusting any result from these boxes." > "/dev/stderr"
@@ -390,7 +438,7 @@ awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
 		if (missing > 0) {
 			fflush()
 			print "" > "/dev/stderr"
-			printf "bacchus-fleet-check: %d of %d expected node(s) did NOT register in this window.\n", missing, expect > "/dev/stderr"
+			printf "%sbacchus-fleet-check: %d of %d expected node(s) did NOT register in this window.\n", pfx, missing, expect > "/dev/stderr"
 			print "  This is not drift: every node that DID register is accounted for above. It is a box" > "/dev/stderr"
 			print "  that is not there — down, unable to reach this coordinator, or still coming up when" > "/dev/stderr"
 			print "  the window was captured, which is possible because a pin reads it about 20s after" > "/dev/stderr"
@@ -403,7 +451,7 @@ awk -v want="$want" -v expect="$expect" -v idsfile="$idsfile" '
 		if (bad) exit 1
 		if (missing > 0) exit 4
 
-		printf "the fleet is pinned to %s\n", want
+		printf "%sthe fleet is pinned to %s\n", pfx, want
 		exit 0
 	}
 '

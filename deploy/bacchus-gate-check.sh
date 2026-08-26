@@ -3,8 +3,15 @@
 # journal, and fail when a gate the deployment DECLARED is off (issues #249, #247,
 # ADR-0072).
 #
-# usage: bacchus-gate-check.sh [--require GATE[,GATE...]] [JOURNAL_FILE]
+# usage: bacchus-gate-check.sh [--require GATE[,GATE...]] [--label L] [JOURNAL_FILE]
 #        journalctl -u bacchus-coordinator --since -10min | bacchus-gate-check.sh
+#
+# ONE WINDOW, ONE MEMBER. The coordinators are a pool with no replication (issue #250)
+# and a client rotates freely, so a gate is only as on as the WEAKEST member: one
+# coordinator started without -device-root-pubkey is a way around the gate rather than a
+# partial deployment of it. Run this against every member and require the whole list of
+# each. `--label` tells two reports apart — an ordinal, never a host, for the reason under
+# "IT PRINTS NO HOSTNAME" below.
 #
 # ---------------------------------------------------------------------------
 # WHY THIS EXISTS: EVERY GATE FAILS OPEN, SO A HEALTHY FLEET PROVES NOTHING
@@ -71,20 +78,30 @@ set -eu
 self="${0##*/}"
 
 usage() {
-	printf 'usage: %s [--require GATE[,GATE...]] [JOURNAL_FILE]\n' "$self" >&2
+	printf 'usage: %s [--require GATE[,GATE...]] [--label L] [JOURNAL_FILE]\n' "$self" >&2
 	printf '       journalctl -u bacchus-coordinator --since -10min | %s\n' "$self" >&2
 	printf '\n%s\n' 'Gates: admission device revocation-lists signed-revocations policy account-service' >&2
 	printf '%s\n' '--require    the gates this deployment declares ON. Anything else is reported only.' >&2
+	printf '%s\n' '--label L    which pool member this window came from. An ordinal, never a host.' >&2
 	printf 'Exit: 0 every required gate is on · 1 a required gate is OFF · 2 usage\n' >&2
 	printf '      3 no coordinator start in this window · 4 a required gate could not be read\n' >&2
 }
 
 require=""
+label=""
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	-h | --help)
 		usage
 		exit 0
+		;;
+	--label)
+		[ "$#" -ge 2 ] || {
+			printf '%s: --label needs a value\n' "$self" >&2
+			exit 2
+		}
+		label="$2"
+		shift 2
 		;;
 	--require)
 		[ "$#" -ge 2 ] || {
@@ -114,6 +131,18 @@ if [ "$#" -gt 1 ]; then
 	usage
 	exit 2
 fi
+
+# The label may not be a host, for the reason above: this script's one property is that
+# its output is pasteable, and free text is where a hostname gets in. Same rule and same
+# characters as deploy/bacchus-fleet-check.sh — `.` `@` `:` `/` and a space.
+case "$label" in
+*[./@:]* | *' '*)
+	printf '%s: --label %s looks like a host, and this script prints none.\n' "$self" "$label" >&2
+	printf '  Use an ordinal — bacchus-pin.sh passes 1, 2, ... in COORDINATOR_TARGETS order and\n' >&2
+	printf '  prints the pairing itself, on output that already names ssh targets.\n' >&2
+	exit 2
+	;;
+esac
 
 # Commas are the documented separator; spaces are accepted because a shell variable
 # holding a list is more often space separated and refusing that would be a papercut
@@ -148,7 +177,7 @@ fi
 # ships, and feeds the bytes the real binary produced through this script.
 #
 # shellcheck disable=SC2016
-awk -v require="$require" '
+awk -v require="$require" -v label="$label" '
 	function set_state(gate, state, note) {
 		st[gate] = state
 		nt[gate] = note
@@ -161,6 +190,10 @@ awk -v require="$require" '
 	}
 
 	BEGIN {
+		# pfx names which pool member this window came from, so one report can be told
+		# from the next. Empty label leaves every line byte-identical to what a
+		# single-coordinator deployment printed before.
+		pfx = (label == "" ? "" : "coordinator " label ": ")
 		started = 0
 		# Every gate starts UNREAD. Not "off": a journal that never said is a
 		# different fact from a coordinator that said DISABLED, and collapsing the
@@ -267,7 +300,7 @@ awk -v require="$require" '
 	END {
 		if (!started) {
 			fflush()
-			print "bacchus-gate-check: no `coordinator release` startup line in this input." > "/dev/stderr"
+			print pfx "bacchus-gate-check: no `coordinator release` startup line in this input." > "/dev/stderr"
 			print "  A gate posture read from before the last restart is not evidence about the" > "/dev/stderr"
 			print "  coordinator that is running now, and it looks exactly as convincing. Widen the" > "/dev/stderr"
 			print "  window (journalctl --since) so it covers the coordinator start, and re-read." > "/dev/stderr"
@@ -298,7 +331,7 @@ awk -v require="$require" '
 
 		w = 0
 		for (i in order) if (length(order[i]) > w) w = length(order[i])
-		print "bacchus-gate-check: what this coordinator said about its own gates at startup"
+		print pfx "bacchus-gate-check: what this coordinator said about its own gates at startup"
 		for (i = 1; i <= 6; i++) {
 			g = order[i]
 			line = "  " pad(g, w) "  " pad(st[g], 7)
@@ -340,26 +373,26 @@ awk -v require="$require" '
 			if (st[g] == "on") continue
 			if (st[g] == "UNREAD" || st[g] == "UNKNOWN") {
 				unread++
-				printf "bacchus-gate-check: %s is DECLARED ON and this journal does not say either way (%s).\n", g, st[g] > "/dev/stderr"
+				printf "%sbacchus-gate-check: %s is DECLARED ON and this journal does not say either way (%s).\n", pfx, g, st[g] > "/dev/stderr"
 				if (nt[g] != "") printf "  %s\n", nt[g] > "/dev/stderr"
 				continue
 			}
 			bad++
-			printf "bacchus-gate-check: %s is DECLARED ON and is %s.\n", g, st[g] > "/dev/stderr"
+			printf "%sbacchus-gate-check: %s is DECLARED ON and is %s.\n", pfx, g, st[g] > "/dev/stderr"
 			if (nt[g] != "") printf "  %s\n", nt[g] > "/dev/stderr"
 		}
 		if (bad > 0) {
-			print "bacchus-gate-check: this deployment declares gates it is not enforcing. Any test" > "/dev/stderr"
+			print pfx "bacchus-gate-check: this deployment declares gates it is not enforcing. Any test" > "/dev/stderr"
 			print "  that expects a refusal will PASS without refusing anything (issue #249) — do not" > "/dev/stderr"
 			print "  run #167, #173 or #209 against this fleet until the report above is clean." > "/dev/stderr"
 			print "  The flags, and what each one needs staged first: deploy/coordinator-gates.env.example." > "/dev/stderr"
 			exit 1
 		}
 		if (unread > 0) {
-			print "bacchus-gate-check: a gate that could not be read is NOT a gate that is on." > "/dev/stderr"
+			print pfx "bacchus-gate-check: a gate that could not be read is NOT a gate that is on." > "/dev/stderr"
 			exit 4
 		}
-		if (n > 0) print "bacchus-gate-check: every declared gate is enforcing"
+		if (n > 0) print pfx "bacchus-gate-check: every declared gate is enforcing"
 		exit 0
 	}
 '

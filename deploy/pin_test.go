@@ -30,12 +30,14 @@ const (
 	pinRelPath        = "deploy/bacchus-pin.sh"
 	fleetCheckRelPath = "deploy/bacchus-fleet-check.sh"
 	adrRelPath        = "docs/adr/0064-pinning-the-testbed-to-a-commit.md"
+	poolADRRelPath    = "docs/adr/0074-the-coordinators-are-a-pool-and-the-pin-delivers-what-nobody-edits.md"
 
 	// The fake fleet. Documentation hostnames throughout (RFC 2606's .invalid, which
 	// resolves nowhere), the same rule deploy/testbed.env.example itself follows.
-	coordTarget = "admin@coordinator.example.invalid"
-	exitTarget  = "admin@exit-a.example.invalid"
-	relayTarget = "admin@relay-b.example.invalid"
+	coordTarget  = "admin@coordinator.example.invalid"
+	coord2Target = "admin@coordinator-b.example.invalid"
+	exitTarget   = "admin@exit-a.example.invalid"
+	relayTarget  = "admin@relay-b.example.invalid"
 
 	fakeHead = "2f4f77887c679eaaf41046d27f5fd25dad15ea11"
 
@@ -54,6 +56,21 @@ const (
 	exitUnitRelPath   = "deploy/bacchus-exit.service"
 	coordUnitRelPath  = "deploy/bacchus-coordinator.service"
 	rollbackOnFailure = "OnFailure=bacchus-update-rollback@%n.service"
+
+	// The two artifacts deploy/bacchus-pin.sh delivers (issue #234, ADR-0074), and
+	// where they land. These paths are also deploy/install.sh's and
+	// deploy/bacchus-update-rollback@.service's own ExecStart, which is why they are
+	// constants here rather than assembled per test.
+	rollbackHandlerRelPath = "deploy/bacchus-update-rollback.sh"
+	rollbackUnitRelPath    = "deploy/bacchus-update-rollback@.service"
+	rollbackHandlerDst     = "/usr/local/lib/bacchus/bacchus-update-rollback"
+	rollbackUnitDst        = "/etc/systemd/system/bacchus-update-rollback@.service"
+
+	// An EARLIER version of the handler, committed before the real one in the fake
+	// checkout's history. It is what makes "a digest this repository has shipped at
+	// some point" a testable distinction from "a digest nobody here ever wrote" — the
+	// rule that lets the pin update a file without ever overwriting somebody's edit.
+	oldRollbackHandler = "#!/bin/sh\n# an earlier version of this handler\nexit 0\n"
 )
 
 // nodeJournal renders what a node box's OWN journal holds after a start: the lines
@@ -91,7 +108,15 @@ func (f *fleet) log(name string) string {
 
 // remoteFile is the path a file on `target` really lives at inside the fake fleet.
 func (f *fleet) remoteFile(target, name string) string {
-	return filepath.Join(f.dir, "root", target, "usr/local/bin", name)
+	return f.remotePath(target, "/usr/local/bin/"+name)
+}
+
+// remotePath maps any absolute path on `target` into that host's tree. The ssh and scp
+// stubs rewrite the same three roots — /usr/local/bin, /usr/local/lib/bacchus and
+// /etc/systemd/system — so a `mv`, a `sha256sum` or a `cat` the script runs remotely acts
+// on a real file here.
+func (f *fleet) remotePath(target, abs string) string {
+	return filepath.Join(f.dir, "root", target, strings.TrimPrefix(abs, "/"))
 }
 
 func write(t *testing.T, path, content string, mode os.FileMode) {
@@ -113,6 +138,7 @@ func newFleet(t *testing.T) *fleet {
 
 	// A real checkout: the script's first refusal is "this is a git worktree", and the
 	// only honest way to get past it is a directory with a real .git in it.
+	root := repoRoot(t)
 	f.repo = filepath.Join(dir, "checkout")
 	write(t, filepath.Join(f.repo, "VERSION"), "0.1.0\n", 0o644)
 	git := func(args ...string) {
@@ -126,9 +152,22 @@ func newFleet(t *testing.T) *fleet {
 			t.Fatalf("git %v: %v\n%s", args, err, b)
 		}
 	}
+	// The two artifacts the pin delivers (issue #234) come from the CHECKOUT it is
+	// deploying, not from beside the script, so the fake checkout carries them.
+	//
+	// The handler is committed TWICE — an earlier body, then the real one. That is not
+	// scenery: what the script may overwrite is "a digest this repository has shipped at
+	// some point", which is the rule that lets it update a file without ever reverting
+	// somebody's edit, and a one-commit history cannot tell that rule apart from
+	// "byte-identical to what ships now".
+	write(t, filepath.Join(f.repo, rollbackHandlerRelPath), oldRollbackHandler, 0o755)
+	write(t, filepath.Join(f.repo, rollbackUnitRelPath), string(readFile(t, filepath.Join(root, rollbackUnitRelPath))), 0o644)
 	git("init", "-q")
 	git("add", "-A")
 	git("commit", "-q", "-m", "x")
+	write(t, filepath.Join(f.repo, rollbackHandlerRelPath), string(readFile(t, filepath.Join(root, rollbackHandlerRelPath))), 0o755)
+	git("add", "-A")
+	git("commit", "-q", "-m", "y")
 	head := strings.TrimSpace(run(t, f.repo, "git", "rev-parse", "HEAD"))
 	write(t, filepath.Join(dir, "HEAD"), head, 0o644)
 
@@ -140,17 +179,25 @@ func newFleet(t *testing.T) *fleet {
 			name = "bacchus-coordinator"
 		}
 		write(t, f.remoteFile(target, name), "PREVIOUS BINARY\n", 0o755)
+		f.seedRollbackArtifacts(target)
 	}
 
 	bin := filepath.Join(dir, "bin")
-	// ssh: rewrite /usr/local/bin into this host's tree, then really run the command.
+	// ssh: rewrite the three roots the script writes into — /usr/local/bin for the
+	// binaries and /usr/local/lib/bacchus plus /etc/systemd/system for the rollback
+	// artifacts (issue #234) — into this host's tree, then really run the command. The
+	// rewrite is what keeps `mkdir -p`, `sha256sum` and `mv -f` acting on real files
+	// inside the temporary directory and never on this machine's own /etc.
 	write(t, filepath.Join(bin, "ssh"), `#!/bin/sh
 target="$1"; shift
 printf '%s\t%s\n' "$target" "$*" >> "$FLEET/ssh.log"
 if [ -f "$FLEET/fail-ssh-$target" ]; then exit 255; fi
-root="$FLEET/root/$target/usr/local/bin"
-mkdir -p "$root"
-cmd=$(printf '%s' "$*" | sed "s|/usr/local/bin|$root|g")
+root="$FLEET/root/$target"
+mkdir -p "$root/usr/local/bin"
+cmd=$(printf '%s' "$*" | sed \
+  -e "s|/usr/local/lib/bacchus|$root/usr/local/lib/bacchus|g" \
+  -e "s|/etc/systemd/system|$root/etc/systemd/system|g" \
+  -e "s|/usr/local/bin|$root/usr/local/bin|g")
 PATH="$FLEET/bin:$PATH" FLEET="$FLEET" TARGET="$target" sh -c "$cmd"
 `, 0o755)
 	// scp: the same rewrite, then a real copy.
@@ -162,9 +209,13 @@ if [ -f "$FLEET/fail-scp-$target" ]; then
   echo "scp: connection closed" >&2
   exit 1
 fi
-root="$FLEET/root/$target/usr/local/bin"
-mkdir -p "$root"
-real=$(printf '%s' "$path" | sed "s|/usr/local/bin|$root|")
+root="$FLEET/root/$target"
+mkdir -p "$root/usr/local/bin"
+real=$(printf '%s' "$path" | sed \
+  -e "s|/usr/local/lib/bacchus|$root/usr/local/lib/bacchus|" \
+  -e "s|/etc/systemd/system|$root/etc/systemd/system|" \
+  -e "s|/usr/local/bin|$root/usr/local/bin|")
+mkdir -p "${real%/*}"
 cp "$src" "$real"
 if [ -f "$FLEET/corrupt-$target" ]; then printf 'x' >> "$real"; fi
 `, 0o755)
@@ -202,10 +253,15 @@ case "$*" in
 *bacchus-coordinator*) ;;
 *) exit 0 ;;   # a node box with no fixture answers nothing, rather than eating a coordinator read
 esac
-n=$(cat "$FLEET/journal.reads" 2>/dev/null || echo 0)
+c="$FLEET/coord-reads-$TARGET"
+n=$(cat "$c" 2>/dev/null || echo 0)
 n=$((n + 1))
-echo "$n" > "$FLEET/journal.reads"
-if [ -f "$FLEET/journal.$n" ]; then cat "$FLEET/journal.$n"; else cat "$FLEET/journal" 2>/dev/null || true; fi
+echo "$n" > "$c"
+if [ -f "$FLEET/journal-coord-$TARGET.$n" ]; then cat "$FLEET/journal-coord-$TARGET.$n"
+elif [ -f "$FLEET/journal-coord-$TARGET" ]; then cat "$FLEET/journal-coord-$TARGET"
+elif [ -f "$FLEET/journal.$n" ]; then cat "$FLEET/journal.$n"
+else cat "$FLEET/journal" 2>/dev/null || true
+fi
 `, 0o755)
 	// go: builds a deterministic stub and answers the two metadata questions the
 	// script asks about it. Every answer is a file the test can rewrite, which is how
@@ -236,8 +292,8 @@ done
 # A runnable stub: the pin script executes the one it builds for cmd/coordinator-probe.
 { echo '#!/bin/sh'
   echo "# BUILT $pkg"
-  echo 'echo "CURRENT (probe stub)"'
-  echo 'if [ -f "$FLEET/fail-probe" ]; then exit 1; fi'
+  echo 'echo "CURRENT (probe stub) $2"'
+  echo 'if [ -f "$FLEET/fail-probe" ] || [ -f "$FLEET/fail-probe-$2" ]; then exit 1; fi'
 } > "$out"
 chmod 0755 "$out"
 printf 'build\t%s\n' "$*" >> "$FLEET/go.log"
@@ -258,7 +314,6 @@ exit 0
 	// exactly what is shipped (issue #234).
 	write(t, filepath.Join(dir, "journal-"+exitTarget), nodeJournal("exit", exitNodeID), 0o644)
 	write(t, filepath.Join(dir, "journal-"+relayTarget), nodeJournal("relay", relayNodeID), 0o644)
-	root := repoRoot(t)
 	write(t, filepath.Join(dir, "unit-cat-"+coordTarget),
 		"# /etc/systemd/system/bacchus-coordinator.service\n"+string(readFile(t, filepath.Join(root, coordUnitRelPath))), 0o644)
 	write(t, filepath.Join(dir, "unit-cat-"+exitTarget),
@@ -272,6 +327,53 @@ exit 0
 		"BIN_DIR=/usr/local/bin\n", 0o644)
 
 	return f
+}
+
+// seedRollbackArtifacts puts both files on a box at the version this commit ships. The
+// fake fleet starts out correctly deployed, so a test that wants a gap creates one rather
+// than every test inheriting one.
+func (f *fleet) seedRollbackArtifacts(target string) {
+	f.t.Helper()
+	root := repoRoot(f.t)
+	write(f.t, f.remotePath(target, rollbackHandlerDst),
+		string(readFile(f.t, filepath.Join(root, rollbackHandlerRelPath))), 0o755)
+	write(f.t, f.remotePath(target, rollbackUnitDst),
+		string(readFile(f.t, filepath.Join(root, rollbackUnitRelPath))), 0o644)
+}
+
+// usePool turns the fake fleet's single coordinator into a pool of two and rewrites the
+// host list in the PLURAL spelling (issue #250). The default fleet keeps the singular
+// COORDINATOR_TARGET / COORDINATOR_UNIT pair, because that is what every deploy/testbed.env
+// in existence says today and the compatibility path deserves the coverage.
+func (f *fleet) usePool() {
+	f.t.Helper()
+	root := repoRoot(f.t)
+	write(f.t, f.remoteFile(coord2Target, "bacchus-coordinator"), "PREVIOUS BINARY\n", 0o755)
+	f.seedRollbackArtifacts(coord2Target)
+	write(f.t, filepath.Join(f.dir, "unit-cat-"+coord2Target),
+		"# /etc/systemd/system/bacchus-coordinator.service\n"+
+			string(readFile(f.t, filepath.Join(root, coordUnitRelPath))), 0o644)
+	write(f.t, f.cfg, "COORDINATOR_TARGETS=\""+coordTarget+"=bacchus-coordinator "+
+		coord2Target+"=bacchus-coordinator\"\n"+
+		"COORDINATOR_SIGNALING=\"coordinator.example.invalid:8080 coordinator-b.example.invalid:8080\"\n"+
+		"NODE_TARGETS=\""+exitTarget+"=bacchus-exit "+relayTarget+"=bacchus-relay\"\n"+
+		"BIN_DIR=/usr/local/bin\n", 0o644)
+}
+
+// coordJournal sets what one pool member's journal answers with. Without it a coordinator
+// box falls back to the shared $FLEET/journal fixture, which is what every
+// single-coordinator test uses.
+func (f *fleet) coordJournal(target, body string) {
+	f.t.Helper()
+	write(f.t, filepath.Join(f.dir, "journal-coord-"+target), body, 0o644)
+}
+
+// coordJournalRead sets what one member answers on its Nth read. A pin run reads each
+// member's journal twice when it has to restart a node that did not come back, and a fixed
+// answer could not tell a restart that worked from one that changed nothing.
+func (f *fleet) coordJournalRead(target string, n int, body string) {
+	f.t.Helper()
+	write(f.t, fmt.Sprintf("%s/journal-coord-%s.%d", f.dir, target, n), body, 0o644)
 }
 
 func run(t *testing.T, dir, name string, args ...string) string {
@@ -364,9 +466,15 @@ func TestPin_DeploysEveryBoxFromOneBuild(t *testing.T) {
 		t.Errorf("%d go build invocations, want 2 (one per binary, shared across boxes):\n%s", n, f.log("go.log"))
 	}
 
-	// 4. Nothing that is not a binary is ever copied — a .service file least of all.
-	if strings.Contains(f.log("scp.log"), ".service") {
-		t.Errorf("a unit file was copied; the coordinator's real unit carries hand-added flags\n%s", f.log("scp.log"))
+	// 4. No unit that carries the operator's configuration is ever copied. That is the
+	//    whole invariant, and ADR-0074 is careful that it is the invariant rather than
+	//    "no .service file": bacchus-update-rollback@.service holds none of a box's
+	//    configuration and the pin does deliver it. These two hold all of it.
+	for _, unit := range []string{"bacchus-coordinator.service", "bacchus-exit.service"} {
+		if strings.Contains(f.log("scp.log"), unit) {
+			t.Errorf("%s was copied; the live one carries hand-added flags this template does not\n%s",
+				unit, f.log("scp.log"))
+		}
 	}
 }
 
@@ -949,9 +1057,11 @@ func TestPin_ReportsALiveUnitMissingADirectiveItsTemplateShips(t *testing.T) {
 	if !strings.Contains(out, "-admission-cred /etc/bacchus/node.cred") {
 		t.Errorf("the hand-added flag is not shown, which is the half that explains the no-copy rule:\n%s", out)
 	}
-	// And still nothing was copied.
-	if strings.Contains(f.log("scp.log"), ".service") {
-		t.Errorf("a unit file was copied to answer the gap:\n%s", f.log("scp.log"))
+	// And still nothing was copied to answer it. The gap is in bacchus-exit.service,
+	// which carries this box's configuration, so a copy is exactly what must not happen
+	// — ADR-0064 §7, which ADR-0074 leaves standing.
+	if strings.Contains(f.log("scp.log"), "bacchus-exit.service") {
+		t.Errorf("the live unit was copied to answer the gap:\n%s", f.log("scp.log"))
 	}
 }
 
@@ -1670,7 +1780,8 @@ func TestDeployArtifactsNameNoRealHost(t *testing.T) {
 		// reason the scripts are: they are pasted from a session where the real
 		// values were right in front of whoever wrote them.
 		coordUnitRelPath, exitUnitRelPath,
-		adrRelPath, gatesADRRelPath,
+		rollbackHandlerRelPath, rollbackUnitRelPath,
+		adrRelPath, gatesADRRelPath, poolADRRelPath,
 	} {
 		body := string(readFile(t, filepath.Join(root, rel)))
 
@@ -1718,4 +1829,448 @@ func documentationHost(h string) bool {
 		return true
 	}
 	return false
+}
+
+// -------------------------------------------------------------------------
+// the artifacts the pin DELIVERS (issue #234, ADR-0074)
+// -------------------------------------------------------------------------
+//
+// ADR-0064 §7 refuses to copy a unit that carries the operator's own configuration, and
+// that refusal stays. Two files carry none — the rollback handler and its template unit —
+// and issue #222 shipped them to a repository and to no box because the rule was stated
+// over a file extension rather than over the property. These tests hold both halves: the
+// two are delivered, and nothing that this repository did not write is ever replaced.
+
+// The structural half, and the one that keeps ADR-0074 honest as the files change. What
+// makes these two deliverable is a PROPERTY — no per-box configuration — not their names,
+// so an edit that gave either one a configurable surface has to turn this red rather than
+// quietly widening what bacchus-pin.sh may write to a box.
+func TestTheDeliveredArtifactsCarryNoOperatorConfiguration(t *testing.T) {
+	root := repoRoot(t)
+	unit := string(readFile(t, filepath.Join(root, rollbackUnitRelPath)))
+
+	// Directives only: this file talks at length about having no [Install] section, and
+	// a substring search would find the sentence rather than the section.
+	for _, raw := range strings.Split(unit, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		for _, forbidden := range []string{"[Install]", "EnvironmentFile=", "WantedBy=", "RequiredBy="} {
+			if !strings.HasPrefix(line, forbidden) {
+				continue
+			}
+			t.Errorf("%s now carries %s, so it holds configuration a box could have its own version "+
+				"of — and ADR-0074's whole argument for delivering it is that it does not. Either take "+
+				"that back out, or remove the file from managed_artifacts in deploy/bacchus-pin.sh and "+
+				"let ADR-0064 §7 cover it again.", rollbackUnitRelPath, forbidden)
+		}
+	}
+
+	// The one ExecStart is a fixed path plus %i, which systemd supplies from the failing
+	// unit's name. No flag, no variable, nothing an operator would reach into.
+	var execs []string
+	for _, line := range strings.Split(unit, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "ExecStart=") {
+			execs = append(execs, strings.TrimSpace(line))
+		}
+	}
+	if len(execs) != 1 {
+		t.Fatalf("%s has %d ExecStart= lines, want exactly 1:\n%s", rollbackUnitRelPath, len(execs), unit)
+	}
+	if execs[0] != "ExecStart="+rollbackHandlerDst+" %i" {
+		t.Errorf("%s's ExecStart is %q, not the fixed path plus %%i. A configurable ExecStart is "+
+			"configuration, and configuration is what must never be copied over.", rollbackUnitRelPath, execs[0])
+	}
+	if !strings.Contains(unit, "Deliberately no [Install] section") {
+		t.Errorf("%s no longer states that it is never enabled. It is pulled in by OnFailure= and by "+
+			"nothing else; enabling it would run a rollback at boot.", rollbackUnitRelPath)
+	}
+}
+
+// A fleet that already carries both is left entirely alone — no copy, no rename, no
+// daemon-reload. Delivery that ran every time would be a copy with extra steps.
+func TestPin_LeavesTheRollbackArtifactsAloneWhenTheyAreAlreadyRight(t *testing.T) {
+	f := newFleet(t)
+	out, code := f.pin("--no-verify")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "every box already carries both, unmodified") {
+		t.Errorf("the run does not say it had nothing to deliver:\n%s", out)
+	}
+	if strings.Contains(f.log("scp.log"), "bacchus-update-rollback") {
+		t.Errorf("an artifact that was already correct was copied anyway:\n%s", f.log("scp.log"))
+	}
+	if strings.Contains(f.log("systemctl.log"), "daemon-reload") {
+		t.Errorf("daemon-reload ran with no unit file delivered:\n%s", f.log("systemctl.log"))
+	}
+}
+
+// The card's own case: issue #222's mechanism is in the repository and on no box.
+func TestPin_DeliversTheRollbackArtifactsToABoxThatHasNeither(t *testing.T) {
+	f := newFleet(t)
+	for _, dst := range []string{rollbackHandlerDst, rollbackUnitDst} {
+		if err := os.Remove(f.remotePath(exitTarget, dst)); err != nil {
+			t.Fatalf("clearing %s: %v", dst, err)
+		}
+	}
+
+	out, code := f.pin("--no-verify")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+
+	root := repoRoot(t)
+	for _, c := range []struct{ dst, src string }{
+		{rollbackHandlerDst, rollbackHandlerRelPath},
+		{rollbackUnitDst, rollbackUnitRelPath},
+	} {
+		got, err := os.ReadFile(f.remotePath(exitTarget, c.dst))
+		if err != nil {
+			t.Fatalf("%s did not reach the box: %v\n%s", c.dst, err, out)
+		}
+		if string(got) != string(readFile(t, filepath.Join(root, c.src))) {
+			t.Errorf("%s on the box is not what this commit ships", c.dst)
+		}
+		if f.remote(exitTarget, filepath.Base(c.dst)+".bacchus-pin.new") != "" {
+			t.Errorf("%s: the staging file was left behind", c.dst)
+		}
+	}
+
+	// A unit file that arrived is not a unit systemd knows about until it re-reads them.
+	if !strings.Contains(f.log("systemctl.log"), exitTarget+"\tdaemon-reload") {
+		t.Errorf("no daemon-reload on the box that received the unit:\n%s", f.log("systemctl.log"))
+	}
+	// And only on that box: the other two already had it.
+	if n := strings.Count(f.log("systemctl.log"), "daemon-reload"); n != 1 {
+		t.Errorf("%d daemon-reloads, want 1 — only the box that received a unit needs one:\n%s",
+			n, f.log("systemctl.log"))
+	}
+	// The handler is not a unit and needs no reload, so a box that got only the handler
+	// must not get one either. It got both here; the count above is what proves it.
+
+	// The two operator-owned units are still never copied.
+	for _, unit := range []string{"bacchus-coordinator.service", "bacchus-exit.service"} {
+		if strings.Contains(f.log("scp.log"), unit) {
+			t.Errorf("%s was copied:\n%s", unit, f.log("scp.log"))
+		}
+	}
+}
+
+// A box carrying an EARLIER version of the handler is updated. This is the case that
+// makes the rule "a digest this repository has shipped at some point" rather than
+// "byte-identical to what ships now" — the second would refuse every box the moment the
+// template changed, which is issue #234 all over again one commit later.
+func TestPin_UpdatesAnEarlierVersionOfADeliveredArtifact(t *testing.T) {
+	f := newFleet(t)
+	write(t, f.remotePath(relayTarget, rollbackHandlerDst), oldRollbackHandler, 0o755)
+
+	out, code := f.pin("--no-verify")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "is an earlier version of this file") {
+		t.Errorf("the run does not say what it recognised:\n%s", out)
+	}
+	got, err := os.ReadFile(f.remotePath(relayTarget, rollbackHandlerDst))
+	if err != nil {
+		t.Fatalf("reading the handler back: %v", err)
+	}
+	want := string(readFile(t, filepath.Join(repoRoot(t), rollbackHandlerRelPath)))
+	if string(got) != want {
+		t.Errorf("the handler was not updated to this commit's version")
+	}
+}
+
+// The half that keeps ADR-0064 §7 true. A file this repository never wrote is somebody's
+// edit until proven otherwise, and the pin leaves it exactly where it is.
+func TestPin_RefusesToReplaceADeliveredArtifactItCannotRecognise(t *testing.T) {
+	f := newFleet(t)
+	const edited = "[Unit]\nDescription=edited on the box by somebody who meant it\n"
+	write(t, f.remotePath(coordTarget, rollbackUnitDst), edited, 0o644)
+
+	out, code := f.pin("--no-verify")
+	// The binaries are pinned, so this reports rather than failing the run — the same
+	// call the unit comparison makes.
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — the binaries are pinned; an unrecognised artifact reports\n%s", code, out)
+	}
+	if !strings.Contains(out, "REFUSING to replace") || !strings.Contains(out, coordTarget) {
+		t.Errorf("the refusal does not name the file and the box:\n%s", out)
+	}
+	if !strings.Contains(out, "install -D -m 0644") {
+		t.Errorf("the refusal does not print the command that settles it:\n%s", out)
+	}
+	got, err := os.ReadFile(f.remotePath(coordTarget, rollbackUnitDst))
+	if err != nil || string(got) != edited {
+		t.Errorf("the edited unit was replaced anyway — that is exactly what ADR-0064 §7 forbids: %v %q", err, string(got))
+	}
+	if strings.Contains(f.log("systemctl.log"), coordTarget+"\tdaemon-reload") {
+		t.Errorf("daemon-reload ran on a box where nothing was delivered:\n%s", f.log("systemctl.log"))
+	}
+}
+
+// -------------------------------------------------------------------------
+// the coordinator POOL (issue #250)
+// -------------------------------------------------------------------------
+
+// gatesOnJournalTail is the two lines cmd/coordinator prints when the admission and
+// device gates ARE configured, which is what a member that passes has to say.
+func gatesOnJournalTail() string {
+	p := "Aug 08 12:00:01 box bacchus-coordinator[9]: "
+	return p + "admission ENABLED — anchors: 2 (client, node)\n" +
+		p + "device-credential gate ENABLED — every connect must present a credential\n"
+}
+
+// The order property, restated for a pool: every node first, then every member. Reversing
+// it makes `build=` unreadable, which is what ADR-0064 §2 is about.
+func TestPin_EveryCoordinatorRestartsAfterEveryNode(t *testing.T) {
+	f := newFleet(t)
+	f.usePool()
+	if _, code := f.pin("--no-verify"); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	lines := strings.Split(strings.TrimSpace(f.log("systemctl.log")), "\n")
+	lastNode, firstCoord := -1, -1
+	for i, l := range lines {
+		if !strings.Contains(l, "\tstart ") {
+			continue
+		}
+		isCoord := strings.HasPrefix(l, coordTarget+"\t") || strings.HasPrefix(l, coord2Target+"\t")
+		if isCoord {
+			if firstCoord < 0 {
+				firstCoord = i
+			}
+			continue
+		}
+		if i > lastNode {
+			lastNode = i
+		}
+	}
+	if firstCoord < 0 || lastNode < 0 {
+		t.Fatalf("could not find both node starts and coordinator starts:\n%s", f.log("systemctl.log"))
+	}
+	if firstCoord < lastNode {
+		t.Errorf("a coordinator restarted before the last node — the fleet check then reads pre-deploy values:\n%s",
+			f.log("systemctl.log"))
+	}
+	for _, target := range []string{coordTarget, coord2Target} {
+		if !strings.Contains(f.remote(target, "bacchus-coordinator"), "BUILT ") {
+			t.Errorf("%s did not get the new binary", target)
+		}
+	}
+}
+
+// Every member is read, checked and probed on its own, and the reports say which is which
+// without either of the two pasteable scripts printing a hostname.
+func TestPin_ReadsChecksAndProbesEveryMemberSeparately(t *testing.T) {
+	f := newFleet(t)
+	f.usePool()
+	head := f.head()
+	body := journalFor(head[:12], head[:12], head[:12])
+	f.coordJournal(coordTarget, body)
+	f.coordJournal(coord2Target, body)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	for _, want := range []string{"coordinator 1", "coordinator 2"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("no report labelled %q — two unlabelled reports cannot be told apart, which is\n"+
+				"how an asymmetry between members turns back into one undifferentiated answer:\n%s", want, out)
+		}
+	}
+	if n := strings.Count(out, "the fleet is pinned to"); n != 2 {
+		t.Errorf("%d fleet-check verdicts, want one per member:\n%s", n, out)
+	}
+	if n := strings.Count(out, "CURRENT (probe stub)"); n != 2 {
+		t.Errorf("%d capability probes, want one per member — a member nothing probes is a member\n"+
+			"this run cannot say anything about:\n%s", n, out)
+	}
+	// Four boxes, four unit comparisons: two nodes and two coordinators.
+	if !strings.Contains(out, "of 4 compared clean") {
+		t.Errorf("the unit comparison did not cover every member:\n%s", out)
+	}
+}
+
+// THE finding this card exists for. There is no replication between members, so a node
+// registered with one and missing from another is a real and permanent state — and every
+// count in the run can be right while it holds.
+func TestPin_ARegistrationMissingFromOneMemberIsItsOwnFinding(t *testing.T) {
+	f := newFleet(t)
+	f.usePool()
+	head := f.head()
+	rev := head[:12]
+	// Member 1 saw both nodes. Member 2 saw only the exit — and its own count is a
+	// perfectly ordinary 1 of 2, so nothing about member 2's report alone is alarming.
+	f.coordJournal(coordTarget, journalOf(rev,
+		registration{"exit", exitNodeID, rev}, registration{"relay", relayNodeID, rev}))
+	f.coordJournal(coord2Target, journalOf(rev, registration{"exit", exitNodeID, rev}))
+
+	out, code := f.pin()
+	if code != 3 {
+		t.Fatalf("exit %d, want 3 — an asymmetry is not a confirmed pin\n%s", code, out)
+	}
+	if !strings.Contains(out, "registered with SOME pool members and not others") {
+		t.Errorf("the asymmetry was not reported as its own finding:\n%s", out)
+	}
+	if !strings.Contains(out, relayTarget) || !strings.Contains(out, "missing from coordinator(s): 2") {
+		t.Errorf("the report does not name the box and the member that did not see it:\n%s", out)
+	}
+	if !strings.Contains(out, "no coordinator-to-coordinator replication") &&
+		!strings.Contains(out, "NO coordinator-to-coordinator replication") {
+		t.Errorf("the report does not say why this does not settle itself:\n%s", out)
+	}
+	// It is the same failure as an absence — a node holds one link per member and issue
+	// #225 kills a link, not a node — so the containment restart fires for it too.
+	if !strings.Contains(out, "restarting every node unit ONCE") {
+		t.Errorf("the containment did not fire for a partial re-registration:\n%s", out)
+	}
+}
+
+// A gate is only as on as the weakest member, because a client rotates and nothing
+// replicates. One member with the gates off is a way AROUND the gate.
+func TestPin_ADeclaredGateMustBeOnEveryMember(t *testing.T) {
+	f := newFleet(t)
+	f.usePool()
+	head := f.head()
+	body := journalFor(head[:12], head[:12], head[:12])
+	f.coordJournal(coordTarget, body+gatesOnJournalTail())
+	f.coordJournal(coord2Target, body+gatesOffJournalTail())
+	appendTo(t, f.cfg, "COORDINATOR_GATES=\"admission device\"\n")
+
+	out, code := f.pin()
+	if code != 3 {
+		t.Fatalf("exit %d, want 3\n%s", code, out)
+	}
+	if !strings.Contains(out, "coordinator 2: bacchus-gate-check: admission is DECLARED ON and is OFF") {
+		t.Errorf("the report does not say WHICH member is not enforcing it:\n%s", out)
+	}
+	if !strings.Contains(out, "only as on as the WEAKEST pool member") {
+		t.Errorf("the run does not say why one member is enough to sink the claim:\n%s", out)
+	}
+	if !strings.Contains(out, "coordinator 1: bacchus-gate-check: every declared gate is enforcing") {
+		t.Errorf("the member that IS enforcing them was not reported as such:\n%s", out)
+	}
+}
+
+// One address per member, and the counts must agree. A member nothing probes reads
+// exactly like a member that passed, which is issue #248's finding in the one check that
+// establishes a coordinator is serving this commit at all.
+func TestPin_RefusesASignalingListThatDoesNotMatchTheMembers(t *testing.T) {
+	f := newFleet(t)
+	f.usePool()
+	write(t, f.cfg, "COORDINATOR_TARGETS=\""+coordTarget+"=bacchus-coordinator "+
+		coord2Target+"=bacchus-coordinator\"\n"+
+		"COORDINATOR_SIGNALING=coordinator.example.invalid:8080\n"+
+		"NODE_TARGETS=\""+exitTarget+"=bacchus-exit "+relayTarget+"=bacchus-relay\"\n"+
+		"BIN_DIR=/usr/local/bin\n", 0o644)
+
+	out, code := f.pin()
+	if code != 2 {
+		t.Fatalf("exit %d, want 2\n%s", code, out)
+	}
+	if !strings.Contains(out, "2 coordinator(s) and 1 signaling address(es)") {
+		t.Errorf("the refusal does not say what did not add up:\n%s", out)
+	}
+	if strings.Contains(f.log("go.log"), "build\t") {
+		t.Errorf("it built something before noticing the configuration is unusable:\n%s", f.log("go.log"))
+	}
+}
+
+// The singular spelling is what every deploy/testbed.env in existence says today, so it
+// keeps working — and setting both is refused rather than resolved, because a run that
+// guessed which one meant the fleet would be guessing about the thing it exists to pin.
+func TestPin_AcceptsTheSingularCoordinatorSpellingAndRefusesBoth(t *testing.T) {
+	f := newFleet(t)
+	head := f.head()
+	write(t, filepath.Join(f.dir, "journal"), journalFor(head[:12], head[:12], head[:12]), 0o644)
+	if out, code := f.pin(); code != 0 {
+		t.Fatalf("the singular COORDINATOR_TARGET spelling stopped working: exit %d\n%s", code, out)
+	}
+
+	appendTo(t, f.cfg, "COORDINATOR_TARGETS=\""+coordTarget+"=bacchus-coordinator\"\n")
+	out, code := f.pin()
+	if code != 2 {
+		t.Fatalf("exit %d, want 2 for both spellings at once\n%s", code, out)
+	}
+	if !strings.Contains(out, "sets BOTH COORDINATOR_TARGETS and COORDINATOR_TARGET") {
+		t.Errorf("the refusal does not name the conflict:\n%s", out)
+	}
+}
+
+// Every member's units are compared too. A second coordinator installed by hand is
+// exactly the box most likely to be missing a directive, and it must not be the box
+// nothing looked at.
+func TestPin_ComparesTheUnitOnEveryMember(t *testing.T) {
+	f := newFleet(t)
+	f.usePool()
+	head := f.head()
+	body := journalFor(head[:12], head[:12], head[:12])
+	f.coordJournal(coordTarget, body)
+	f.coordJournal(coord2Target, body)
+
+	shipped := string(readFile(t, filepath.Join(repoRoot(t), coordUnitRelPath)))
+	live := strings.ReplaceAll(shipped, rollbackOnFailure, "")
+	write(t, filepath.Join(f.dir, "unit-cat-"+coord2Target),
+		"# /etc/systemd/system/bacchus-coordinator.service\n"+live, 0o644)
+
+	out, code := f.pin()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — a unit gap reports and does not fail the run\n%s", code, out)
+	}
+	if !strings.Contains(out, "unit bacchus-coordinator on "+coord2Target) {
+		t.Errorf("the second member's unit was not compared at all:\n%s", out)
+	}
+	if !strings.Contains(out, "MISSING from the live unit") || !strings.Contains(out, rollbackOnFailure) {
+		t.Errorf("the directive the second member lacks was not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "of 4 compared clean, 1 with a gap") {
+		t.Errorf("the summary does not count all four boxes with one gap:\n%s", out)
+	}
+}
+
+// -------------------------------------------------------------------------
+// bacchus-fleet-check.sh --label
+// -------------------------------------------------------------------------
+
+func TestFleetCheck_LabelsWhichMemberAWindowCameFrom(t *testing.T) {
+	rev := "2f4f77887c67"
+	out, code := fleetCheck(t, journalOf(rev, registration{"exit", exitNodeID, rev}), "--label", "2", rev)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "coordinator 2 ") {
+		t.Errorf("the row does not carry the label:\n%s", out)
+	}
+	if !strings.Contains(out, "coordinator 2: the fleet is pinned to") {
+		t.Errorf("the verdict does not carry the label:\n%s", out)
+	}
+}
+
+// Without a label every line stays byte-identical to what a single-coordinator run
+// printed before, which is what keeps an old pasted report readable.
+func TestFleetCheck_AnUnlabelledReportIsUnchanged(t *testing.T) {
+	rev := "2f4f77887c67"
+	journal := journalOf(rev, registration{"exit", exitNodeID, rev})
+	plain, _ := fleetCheck(t, journal, rev)
+	if strings.Contains(plain, "coordinator 1") || strings.Contains(plain, ": the fleet is pinned") {
+		t.Errorf("an unlabelled report grew a label:\n%s", plain)
+	}
+}
+
+// The label is free text and this script's one property is that it prints no hostname.
+func TestFleetCheck_RefusesALabelThatLooksLikeAHost(t *testing.T) {
+	rev := "2f4f77887c67"
+	for _, label := range []string{"coordinator.example.invalid", "admin@box", "192.0.2.1:8080", "a/b"} {
+		out, code := fleetCheck(t, journalOf(rev), "--label", label, rev)
+		if code != 2 {
+			t.Errorf("--label %q: exit %d, want 2\n%s", label, code, out)
+		}
+		if !strings.Contains(out, "looks like a host") {
+			t.Errorf("--label %q: the refusal does not say why:\n%s", label, out)
+		}
+	}
 }
