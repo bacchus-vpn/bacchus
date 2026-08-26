@@ -580,7 +580,26 @@ func main() {
 	admissionRevocationsState := pathFlag("admission-revocations-state", "secrets/admission-revocations-state.json", "a cold start: no as_of floor for this namespace until a signed bundle verifies", "path to this coordinator's persistent state for the ADMISSION-namespace signed bundle (issue #199) — the admission-namespace counterpart to -device-revocations-state; see it for what this protects and why it belongs with the other secrets.")
 	rendezvousDTLS := flag.Bool("rendezvous-dtls", true, "accept the shaped rendezvous handshake on -addr — a STUN connectivity check and DTLS, alongside raw JSON, on the same port (issues #175/#202, ADR-0059/0060). READ THIS BEFORE TURNING IT OFF. It was written as a free valve for shedding the per-source association table under a spoofed-source flood, and it is no longer free: since #175 slice 2 (ADR-0062) the client speaks this shape and has DELIBERATELY NO CLEARTEXT FALLBACK, because a censor dropping the handshake and a coordinator that never learned it are the same silence, and answering that silence with plaintext would send exactly what the shape exists to hide. So switching this off does not degrade this coordinator, it REMOVES it: no current client can reach it at all, they rotate away on the existing 30-second cooldown, and this coordinator's share of the pool goes to its peers. The cost it still sheds is real but small — a bounded table of per-source DTLS associations that a spoofed-source flood can hold slots in for the length of a handshake timeout, and no further, because DTLS's own cookie exchange is never answered from a spoofed source. Under attack, shedding the whole coordinator to save that table is almost certainly the wrong trade; the right lever is upstream filtering.")
 	printBootstrapPub := flag.Bool("print-bootstrap-pubkey", false, "load (or generate) the snapshot-signing key at -bootstrap-key, print its public key (hex) to stdout, and exit. Provision this to mesh-walk clients (bacchus-node -mesh-pubkey) so they can verify coordinator-signed snapshots recovered via a peer (issue #31, design §4.3). Couriers get the same key inside their -courier-invite.")
+	showVersion := flag.Bool("version", false,
+		"print this build's release version and exit. Binds no port and reads no configuration, so it answers "+
+			"\"which coordinator is installed here\" without putting a public UDP listener up (issue #263).")
 	flag.Parse()
+
+	// The release, before anything that can fail — bacchus-netd's shape, and the
+	// reason for it is the same (issue #223, issue #263). An unstamped build warns
+	// here, inside core/version, and reports 0.0.0, which is the honest answer from
+	// a binary nobody told; a malformed stamp panics HERE rather than three layers
+	// down, after a port has been bound and a key possibly generated.
+	//
+	// FIRST of the two one-shots on purpose. -print-bootstrap-pubkey GENERATES a
+	// signing key when none is there, so it is not a question that can be asked of
+	// an arbitrary installed binary; this one is, and that is what an operator
+	// asking "which release is on this box" needs it to be.
+	release := version.Current()
+	if *showVersion {
+		fmt.Println(release)
+		return
+	}
 
 	// One-shot: print the snapshot-signing public key and exit. This is the
 	// operator's distribution path for the key that verifies signed snapshots —
@@ -603,7 +622,7 @@ func main() {
 		log.Fatalf("invalid -min-serving-version %q: %v", *minServingVersion, err)
 	}
 	servingFloor = floor
-	coordRelease = version.Current().String()
+	coordRelease = release.String()
 	if servingFloor == (version.Version{}) {
 		log.Printf("version fence DISABLED (-min-serving-version 0.0.0) — any node version may serve (issue #36); coordinator release %s", coordBuild())
 	} else {
@@ -676,6 +695,22 @@ func main() {
 	// rather than a fatal because that configuration is legal and worked before this
 	// change; what it must not be is silent.
 	warnTierEnforcementIsOff()
+	// What -account-service publishes, stated at startup (issue #260). Here, beside
+	// -operators, because these two are the deployment's inputs to the SIGNED
+	// DIRECTORY rather than gates on a connect, and a journal that groups them reads
+	// as "what this coordinator publishes" followed by "what it enforces".
+	//
+	// It is announced at all because deploy/bacchus-gate-check.sh reads posture out
+	// of this journal on purpose (issue #249, ADR-0072): a flag in ExecStart says
+	// what an operator ASKED FOR and a journal line says what the binary CONCLUDED,
+	// and until this line existed that check had one row it could only report
+	// UNKNOWN. The empty case is the one worth stating, matching -operators and the
+	// two revocation flags, which announce their absence rather than staying silent.
+	//
+	// The COUNT, not the addresses. They are already in the directory every client
+	// fetches, so this is a choice about journal noise rather than about disclosure
+	// — and the count plus the empty/non-empty fact is what a posture check reads.
+	log.Print(describeAccountServicePublication(len(accountServices)))
 	// Load the operator/vouch-subtree assignments once, before any goroutine that reads
 	// the map (the snapshot refresh loop) starts. Failing hard on a malformed file keeps
 	// a typo from silently blanking the operator-diversity signal (issue #124).
@@ -1820,6 +1855,26 @@ func describeBuild(release string, settings []debug.BuildSetting) string {
 		revision = revision[:12]
 	}
 	return fmt.Sprintf("%s (revision %s%s)", release, revision, dirty)
+}
+
+// describeAccountServicePublication renders the -account-service startup line
+// (issue #260), which is the one gate deploy/bacchus-gate-check.sh could not read.
+//
+// A rendering half split from its caller for the reason describeBuild is: the
+// format is the contract. A shell reader keys on ASCII substrings of these lines,
+// so the two constant prefixes below — "account service: NONE published" and
+// "account service: N address(es) published" — change together with that reader or
+// not at all, and a test can pin them without running a coordinator.
+//
+// Both spellings begin "account service: " so a reader that only wants to know
+// whether the window said anything at all can ask one question. The two then
+// diverge on the second word, because the distinction that matters to an operator
+// is whether a client learns an address from this deployment or keeps its own.
+func describeAccountServicePublication(n int) string {
+	if n == 0 {
+		return "account service: NONE published (-account-service unset) — every client stays on its own configuration (issue #193)"
+	}
+	return fmt.Sprintf("account service: %d address(es) published in the signed directory as role \"account\" (issue #193)", n)
 }
 
 // releaseOrUnknown renders a node's self-reported release for the operator log,

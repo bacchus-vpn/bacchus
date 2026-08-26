@@ -82,6 +82,13 @@ jobs:
       # close it — one asserts every package install.sh stamps links the
       # package, the other builds bacchus-netd and reads the number back out of
       # `-version` — and both run here because this job is where the class lives.
+      #
+      # ALL THREE FLEET BINARIES, since issue #263. bacchus-netd was the only one
+      # that could be asked what it is; cmd/node and cmd/coordinator answer the
+      # same flag now, so the read-back covers every binary the release gate
+      # asserts a stamp on rather than one of them. The other two are the ones
+      # where it matters most operationally: asking a coordinator used to mean
+      # binding a public UDP port.
       - name: the release stamp reaches the binaries that claim it
         env:
           BACCHUS_REQUIRE_STAMP: "1"
@@ -91,10 +98,14 @@ jobs:
           # printed on BOTH paths, because a failing `go test` inside a command
           # substitution under `set -e` would otherwise abort this step with the
           # failure it was run to show scrolled off into a variable.
+          #
+          # -run is an UNANCHORED regex, so TestVersionFlag covers both the netd
+          # and the node pair; the coordinator's names begin
+          # TestCoordinatorVersionFlag and need their own alternative.
           if ! out=$(go test -count=1 -v \
             -ldflags "-X github.com/bacchus-vpn/bacchus/core/version.current=$(cat VERSION)" \
-            -run 'TestStampMatchesTheVersionFile|TestCurrentIsParseable|TestVersionFileIsCanonical|TestMalformedStamp|TestEveryStampedBuildLinksTheVersionPackage|TestVersionFlag' \
-            ./core/version/ ./cmd/bacchus-netd/ 2>&1); then
+            -run 'TestStampMatchesTheVersionFile|TestCurrentIsParseable|TestVersionFileIsCanonical|TestMalformedStamp|TestEveryStampedBuildLinksTheVersionPackage|TestVersionFlag|TestNodeVersionFlag|TestCoordinatorVersionFlag' \
+            ./core/version/ ./cmd/bacchus-netd/ ./cmd/node/ ./cmd/coordinator/ 2>&1); then
             printf '%s\n' "$out"
             exit 1
           fi
@@ -106,6 +117,10 @@ jobs:
           # that runs and SKIPS still prints "=== RUN", so this does not cover
           # skips; BACCHUS_REQUIRE_STAMP above is what covers the one skip in
           # this set that would matter.)
+          # Every name is distinct across the three commands on purpose. A `=== RUN`
+          # grep cannot tell which PACKAGE produced a line, so two packages sharing
+          # a test name would let one of them disappear entirely while this list
+          # still matched — the same vacuous-green shape the list exists to prevent.
           for t in TestStampMatchesTheVersionFile \
                    TestCurrentIsParseable \
                    TestVersionFileIsCanonical \
@@ -113,7 +128,11 @@ jobs:
                    TestMalformedStampMessageNamesPreRelease \
                    TestEveryStampedBuildLinksTheVersionPackage \
                    TestVersionFlagReportsTheStampedRelease \
-                   TestVersionFlagOnAnUnstampedBuildSaysNoRelease; do
+                   TestVersionFlagOnAnUnstampedBuildSaysNoRelease \
+                   TestNodeVersionFlagReportsTheStampedRelease \
+                   TestNodeVersionFlagOnAnUnstampedBuildSaysNoRelease \
+                   TestCoordinatorVersionFlagReportsTheStampedRelease \
+                   TestCoordinatorVersionFlagOnAnUnstampedBuildSaysNoRelease; do
             if ! printf '%s\n' "$out" | grep -qE "^=== RUN[[:space:]]+$t\$"; then
               echo "::error::$t did not run, so this step checked less than it claims."
               echo "::error::A -run filter matching no test exits 0, which is how a renamed or"

@@ -88,6 +88,69 @@ named here rather than left to be discovered.
 > which is the check this section's argument actually rests on, so it is the check
 > that was run.
 
+> **Update (2026-08-26, `#239`): the ruling is unchanged and the CHECK above was
+> the wrong check.** `go list -deps ./core` has never named no HTTP client.
+> Measured on `7f1a36b`:
+>
+> ```
+> $ go list -deps ./core | grep '^net/http'
+> net/http/httptrace
+> net/http/internal
+> net/http/internal/ascii
+> net/http/internal/httpcommon
+> net/http
+> ```
+>
+> **The dependency is load-bearing and it stays.** The route is `core` →
+> `github.com/refraction-networking/utls` → `github.com/andybalholm/brotli` →
+> `net/http`: `core/transport_reality.go` imports utls directly for the
+> ClientHello fingerprint work (ADR-0018, ADR-0032, and the vendored fork
+> `go.mod` names by `replace`), brotli is utls's own certificate-compression
+> dependency, and brotli ships an `http.Handler` helper. Not one of those three
+> hops is a choice this record gets to make, none of them dials an account
+> service, and all of it predates `core/accountclient` entirely.
+>
+> So the first bullet above — an operator with no account service "imports no HTTP
+> client" — **is false, and was false on the day it was written.** It stands in
+> the record uncorrected in place, because this repo amends rather than rewrites,
+> but it must not be read as written and nothing should cite it. The same applies
+> to ADR-0046 §6 reason 3, whose concrete form it is; that record carries the
+> matching amendment.
+>
+> **What the seam's argument actually rests on is a DIRECTION, not an absence.**
+> Two statements, both true and both measurable:
+>
+> 1. `core/accountclient` imports `core`, and `core` imports nothing of it —
+>    `go list -deps ./core` really does say so. That half of the sentence above
+>    was always sound and is not what went wrong.
+> 2. **No package in this repository that `core` can reach speaks HTTP at all.**
+>    HTTP is the account service's transport (§4), so this is the property the
+>    grep was reaching for. On `7f1a36b` exactly three first-party packages
+>    import `net/http` — `cmd/coordinator`, `core/update` and
+>    `core/accountclient` — and none of them is in `core`'s dependency graph.
+>
+> An operator running Bacchus with no account service therefore configures
+> nothing, dials nothing, and is not degraded. That is the property, restated so
+> that it can be measured rather than asserted.
+>
+> **The check, so the next record that wants to rest on this can.**
+> `core.TestCoreImportsNothingThatDialsTheAccountService`
+> (`core/accountservice_seam_deps_test.go`) asserts both statements above and
+> fails on the commit that breaks either. It is deliberately not a grep for
+> `net/http` in `go list -deps ./core`: that pattern reports a breach that has
+> not happened, and it would go on matching — for the same accounted-for reason —
+> on a build that really had grown a built-in renewal client, which is the one
+> case it exists to catch. The two forms that do work are this test and the one
+> `#166` used above, `go list -deps ./core` being UNCHANGED by the change under
+> review; the second needs a before and an after, so the first is what CI can run
+> on a branch.
+>
+> **ADR-0071 §6 got here first** and is the record that named the fault, in the
+> same paragraph that ruled `core/accountclient` a second embedder rather than a
+> second implementation: *"the absolute form of the check does not measure it"*,
+> with `#239` named as the card to fix the two earlier records. It is fixed here,
+> and the three records now agree.
+
 ### 3. Where the claim code is entered — ADR-0046's first question
 
 **`clients/fyne`'s config file, as a one-shot field, plus a `Controller` method
