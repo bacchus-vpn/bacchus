@@ -2274,3 +2274,20 @@ func TestFleetCheck_RefusesALabelThatLooksLikeAHost(t *testing.T) {
 		}
 	}
 }
+
+// A box that cannot be reached is NOT a box whose file is missing. The remote pipeline
+// ends in `cut`, so it exits 0 either way and only a failed ssh distinguishes them —
+// collapsing the two would report an unreachable machine as one with a gap, and then plan
+// a delivery to it.
+func TestPin_ABoxThatCannotBeAskedIsNotABoxWithAMissingArtifact(t *testing.T) {
+	f := newFleet(t)
+	write(t, filepath.Join(f.dir, "fail-ssh-"+relayTarget), "", 0o644)
+
+	out, _ := f.pin("--no-verify")
+	if !strings.Contains(out, relayTarget+": could not be asked about "+rollbackHandlerDst) {
+		t.Errorf("an unreachable box was not reported as unchecked:\n%s", out)
+	}
+	if strings.Contains(out, relayTarget+": "+rollbackHandlerDst+" is not on this box") {
+		t.Errorf("an unreachable box was reported as one with a missing file:\n%s", out)
+	}
+}

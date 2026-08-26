@@ -570,7 +570,14 @@ plan_artifact() {
 		return 0
 	fi
 
-	_live=$("$SSH" "$_target" "sha256sum $_dst 2>/dev/null | cut -d' ' -f1" 2>/dev/null) || _live=""
+	# The remote pipeline ends in `cut`, so it exits 0 whether or not the file is there
+	# and a non-zero status means the BOX did not answer. Those are different findings and
+	# collapsing them would report an unreachable machine as one with a missing file — and
+	# then plan a delivery to it.
+	if ! _live=$("$SSH" "$_target" "sha256sum $_dst 2>/dev/null | cut -d' ' -f1" 2>/dev/null); then
+		log "  $_target: could not be asked about $_dst — not checked, and nothing planned for it"
+		return 0
+	fi
 	_live=$(printf '%s' "$_live" | tr -d '[:space:]')
 
 	if [ -z "$_live" ]; then
@@ -609,7 +616,13 @@ for _a in $managed_artifacts; do
 	_adst=$(printf '%s' "$_a" | cut -d: -f2)
 	_amode=$(printf '%s' "$_a" | cut -d: -f3)
 	_aship=""
-	[ "$dry" -eq 1 ] || _aship=$(digest_of "$repo/deploy/$_asrc")
+	if [ "$dry" -eq 0 ]; then
+		[ -r "$repo/deploy/$_asrc" ] ||
+			fail "managed_artifacts names deploy/$_asrc and this checkout does not have it. Nothing
+       was deployed. Either the file moved and the list above did not, or this is not a
+       checkout of this repository."
+		_aship=$(digest_of "$repo/deploy/$_asrc")
+	fi
 	_aknown="$stage/known-${_asrc##*/}"
 	[ "$dry" -eq 1 ] || artifact_known "$_asrc" "$_aknown"
 	for _box in $all_targets; do
