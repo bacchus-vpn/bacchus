@@ -65,5 +65,8 @@
     "Saved, but launch-on-boot could not be set:": "Сохранено, но не удалось настроить запуск при входе в систему:",
     "Settings…": "Настройки…",
     "File": "Файл",
-    "Launch-on-boot could not be set:": "Не удалось настроить запуск при входе в систему:"
+    "Launch-on-boot could not be set:": "Не удалось настроить запуск при входе в систему:",
+    "These settings are saved to:": "Эти настройки сохраняются в файл:",
+    "Bacchus reads that file once, when it starts, so editing it by hand takes effect at the next launch rather than at the next connect.": "Bacchus читает этот файл один раз, при запуске, поэтому изменения, внесённые в него вручную, вступают в силу при следующем запуске программы, а не при следующем подключении.",
+    "This system has nowhere to keep a settings file, so nothing here can be saved.": "В этой системе негде хранить файл настроек, поэтому сохранить изменения не получится."
 }

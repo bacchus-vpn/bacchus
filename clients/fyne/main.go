@@ -151,6 +151,14 @@ func main() {
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		log.Println("config:", err)
 	}
+	// WHICH file, said out loud, before anything acts on what is in it
+	// (bacchus#267). This client reads two candidates, reads the winner exactly
+	// once, and until now reported neither fact — so a user comparing the file
+	// they edited against what the app is doing had nothing to compare it to.
+	// See appstate.ConfigSource: the sentence also carries the read-once rule,
+	// because a hand edit that never reached the running process leaves no other
+	// trace anywhere in this log.
+	log.Println("config:", appstate.ConfigSource(cfgPath))
 
 	a := app.NewWithID(appID)
 	a.Settings().SetTheme(newCalmTheme())

@@ -677,6 +677,106 @@ func LoadConfig() (Config, string, error) {
 	return Config{}, "", lastErr
 }
 
+// ConfigSource is one sentence naming which of this client's candidate config
+// files was actually read, and what happened to the other one. loaded is the
+// path LoadConfig returned, empty when it found no file at all.
+//
+// It exists because bacchus#267: LoadConfig has always returned the path and
+// every caller used it only as somewhere to save back to, so nothing in this
+// client ever SAID which file it read. That is the missing half of two separate
+// silences, and both of them were paid for on real machines:
+//
+//   - The file is read ONCE, at startup, and handed to a Controller that is only
+//     ever told about a save made in the Settings window. A hand edit therefore
+//     does not reach a reconnect in the same process, which is very probably what
+//     bacchus#258 measured — a bypass range added by hand that never appeared in
+//     the firewall rule, on a running client that had never seen it.
+//   - There are TWO candidates (configPaths) and nothing reported which one won.
+//     A user editing the per-user file on a machine that has an exe-adjacent one
+//     sees their change ignored with no way to find out why, which is issue #118
+//     arriving from the reading side.
+//
+// So every answer names an absolute path, and the two-file answers name both.
+// Paths rather than "the per-user file" because the point is to be diffable
+// against what the user has open in an editor. That is safe in the one place
+// this is written: clientlog's sink replaces this user's home directory with "~"
+// on every line before it reaches the disk (clientlog.redactHome), so what lands
+// in a log somebody sends for help is ~/.config/Bacchus/fyne-client.json and not
+// their name.
+//
+// The read-once rule is carried on every answer that read a file rather than
+// left to the README, because the log is the artifact read LATER, by whoever the
+// user asked for help — and for a setting that was edited and never picked up,
+// nothing else in the log looks wrong.
+func ConfigSource(loaded string) string {
+	const readOnce = " It is read once, at startup: an edit made to it by hand takes effect at the next launch, not at the next connect."
+	exePath, userPath := configCandidates()
+	exists := func(p string) bool {
+		if p == "" {
+			return false
+		}
+		_, err := os.Stat(p)
+		return err == nil
+	}
+
+	if loaded == "" {
+		var looked []string
+		present := false
+		for _, p := range []string{exePath, userPath} {
+			if p == "" {
+				continue
+			}
+			looked = append(looked, p)
+			if exists(p) {
+				present = true
+			}
+		}
+		switch {
+		case len(looked) == 0:
+			return "no configuration file was read, and this system names neither a directory for the running program nor a per-user configuration directory to look in."
+		case present:
+			// A file IS there and none of them could be read — a permission, a
+			// busy handle, a directory in a file's place. Distinguished from the
+			// empty case because the two want opposite actions from the reader,
+			// and because saying "there is none" over a file they can see is how a
+			// diagnostic loses its reader. main.go logs the errno on the line
+			// above; this says what state the client is in as a result.
+			return fmt.Sprintf("no configuration file could be read, though one exists among the places looked in (%s), so this client is running as if nothing were configured. Settings would write to %s.",
+				strings.Join(looked, ", "), DefaultConfigPath())
+		default:
+			// The save target is named too. "Where do I put one" is the only
+			// question a machine in this state has, and DefaultConfigPath's answer
+			// is deliberately NOT the first path looked in (issue #118), so the two
+			// lists cannot be inferred from each other.
+			return fmt.Sprintf("no configuration file was read; there is none at either place one is looked for (%s). Settings would create one at %s.",
+				strings.Join(looked, ", "), DefaultConfigPath())
+		}
+	}
+
+	switch {
+	// The exe-adjacent file won, which is configPaths' documented precedence: a
+	// config beside this copy of the program is a deliberate act and outranks the
+	// per-user one. Nothing was wrong, and the per-user file is still entirely
+	// inert, so it is named.
+	case loaded == exePath && exists(userPath):
+		return fmt.Sprintf("read from %s, which ranks ahead of the per-user file. %s exists and none of it is in force.%s",
+			loaded, userPath, readOnce)
+
+	// The per-user file won while a HIGHER-ranked file exists. That combination
+	// can only mean the exe-adjacent one was tried first and could not be read at
+	// all — a permission, a busy handle, a directory where a file should be —
+	// because one that merely fails to PARSE stops this client instead
+	// (ConfigUnreadableError). LoadConfig drops that first error on the floor
+	// when a later candidate answers, and this is the only place it is reported.
+	case loaded == userPath && exists(exePath):
+		return fmt.Sprintf("read from %s. %s exists and ranks ahead of it, but could not be read, so it was passed over — fix or remove it, because the day it becomes readable it silently takes over.%s",
+			loaded, exePath, readOnce)
+
+	default:
+		return fmt.Sprintf("read from %s.%s", loaded, readOnce)
+	}
+}
+
 // errNoConfigPath is SaveConfig's error for an empty path - a caller that
 // never loaded a config and never asked DefaultConfigPath for one either.
 var errNoConfigPath = errors.New("no config file path to save to")

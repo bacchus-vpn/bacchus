@@ -2,6 +2,7 @@ package appstate
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -408,6 +409,197 @@ func TestLoadConfigPrefersExeAdjacent(t *testing.T) {
 	}
 	if got.DNS != "1.1.1.1:53" {
 		t.Fatalf("LoadConfig read the per-user file: DNS = %q, want %q", got.DNS, "1.1.1.1:53")
+	}
+}
+
+// marshalConfig is writePerUserConfig's other half for a test that cares about
+// the config's FIELDS rather than the file's exact bytes.
+func marshalConfig(t *testing.T, c Config) []byte {
+	t.Helper()
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	return b
+}
+
+// blockExeAdjacentPath makes configPaths' FIRST candidate exist and be
+// unreadable, by putting a DIRECTORY where the file goes.
+//
+// A directory rather than a chmod, because chmod proves nothing when the test
+// runs as root and does nothing at all on Windows. os.ReadFile on a directory
+// fails on every platform this client builds for — "is a directory" on Unix, and
+// on Windows opening one without FILE_FLAG_BACKUP_SEMANTICS is refused — which
+// is exactly the state being modelled: LoadConfig's first candidate EXISTS and
+// cannot be read, so the load falls through to the second and drops the first
+// error on the floor.
+func blockExeAdjacentPath(t *testing.T) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("os.Executable: %v", err)
+	}
+	path := filepath.Join(filepath.Dir(exe), "bacchus-fyne.config.json")
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("%s already exists - refusing to overwrite it", path)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Skipf("cannot create a directory beside the test binary: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(path) })
+	return path
+}
+
+// TestConfigSourceNamesTheFileThatWasRead is bacchus#267's minimum: the client
+// reads one of two candidates, exactly once, and said neither fact.
+//
+// The read-once clause is asserted rather than left to the README because it is
+// the sentence that explains an observation nothing else in the log explains — a
+// setting that is in the file, was accepted, and is not in force, which is what
+// bacchus#258 measured from the other end.
+func TestConfigSourceNamesTheFileThatWasRead(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	perUserPath := writePerUserConfig(t, dir, marshalConfig(t, Config{DNS: "1.1.1.1:53"}))
+
+	_, path, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	got := ConfigSource(path)
+	if !strings.Contains(got, perUserPath) {
+		t.Fatalf("ConfigSource = %q, want it to name %s", got, perUserPath)
+	}
+	if !strings.Contains(got, "read once, at startup") {
+		t.Fatalf("ConfigSource = %q, want it to say the file is read once", got)
+	}
+	if !strings.Contains(got, "next launch") {
+		t.Fatalf("ConfigSource = %q, want it to say when a hand edit takes effect", got)
+	}
+}
+
+// TestConfigSourceNamesTheFileThatLOST is the half that only matters on a
+// machine with two config files. LoadConfig ranks the exe-adjacent one first
+// (configPaths, a portable install), so a user editing the per-user file there
+// sees nothing change and has no way to discover why — issue #118 arriving from
+// the reading side.
+func TestConfigSourceNamesTheFileThatLOST(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	perUserPath := writePerUserConfig(t, dir, marshalConfig(t, Config{DNS: "9.9.9.9:53"}))
+	exePath := writeExeAdjacentConfig(t, Config{DNS: "1.1.1.1:53"})
+
+	_, path, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if path != exePath {
+		t.Fatalf("LoadConfig read %q, want the exe-adjacent %q - this test's premise", path, exePath)
+	}
+	got := ConfigSource(path)
+	if !strings.Contains(got, exePath) {
+		t.Fatalf("ConfigSource = %q, want it to name the file that won (%s)", got, exePath)
+	}
+	if !strings.Contains(got, perUserPath) {
+		t.Fatalf("ConfigSource = %q, want it to name the file that is being ignored (%s)", got, perUserPath)
+	}
+	if !strings.Contains(got, "none of it is in force") {
+		t.Fatalf("ConfigSource = %q, want it to say the losing file does nothing", got)
+	}
+}
+
+// TestConfigSourceReportsAHigherRankedFileThatCouldNotBeRead covers the one
+// error LoadConfig throws away. Its first candidate can fail to READ — a
+// permission, a busy handle, a directory in the file's place — and it falls
+// through to the next candidate with err == nil, so nothing anywhere reports
+// that a file which OUTRANKS the one in force exists and was skipped. It is a
+// live trap: the day it becomes readable it takes over silently.
+func TestConfigSourceReportsAHigherRankedFileThatCouldNotBeRead(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	perUserPath := writePerUserConfig(t, dir, marshalConfig(t, Config{DNS: "9.9.9.9:53"}))
+	blocked := blockExeAdjacentPath(t)
+
+	cfg, path, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	// The premise: the unreadable first candidate is passed over silently and
+	// the per-user file is what is in force.
+	if path != perUserPath || cfg.DNS != "9.9.9.9:53" {
+		t.Fatalf("LoadConfig = (%q, DNS %q), want the per-user file %q", path, cfg.DNS, perUserPath)
+	}
+	got := ConfigSource(path)
+	if !strings.Contains(got, blocked) {
+		t.Fatalf("ConfigSource = %q, want it to name the unreadable higher-ranked file (%s)", got, blocked)
+	}
+	if !strings.Contains(got, "could not be read") {
+		t.Fatalf("ConfigSource = %q, want it to say that file could not be read", got)
+	}
+}
+
+// TestConfigSourceSaysWhereToPutOneWhenThereIsNoConfig: a fresh install reads
+// nothing, which is not an error, and the only question that machine has is
+// where a config goes. Both candidates and the save target are named because
+// DefaultConfigPath deliberately is NOT the first path looked in (issue #118),
+// so neither list can be inferred from the other.
+func TestConfigSourceSaysWhereToPutOneWhenThereIsNoConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	_, path, err := LoadConfig()
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadConfig = (%q, %v), want os.ErrNotExist on a machine with no config", path, err)
+	}
+	got := ConfigSource(path)
+	if !strings.Contains(got, "no configuration file was read") {
+		t.Fatalf("ConfigSource = %q, want it to say no file was read", got)
+	}
+	for _, want := range configPaths() {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ConfigSource = %q, want it to name the candidate %s", got, want)
+		}
+	}
+	if target := DefaultConfigPath(); target != "" && !strings.Contains(got, target) {
+		t.Fatalf("ConfigSource = %q, want it to name the save target %s", got, target)
+	}
+}
+
+// TestConfigSourceTellsAnUnreadableFileFromNoFile: LoadConfig reports the same
+// two things — an empty path and an error — whether every candidate was missing
+// or every candidate merely could not be READ, and those two states want
+// opposite actions from whoever reads the log. Saying "there is none" over a
+// file the user can see in their own file manager is how a diagnostic loses its
+// reader.
+func TestConfigSourceTellsAnUnreadableFileFromNoFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	blocked := blockExeAdjacentPath(t)
+
+	// The premise: one candidate exists, neither could be read, so LoadConfig
+	// reports no path at all.
+	_, path, err := LoadConfig()
+	if err == nil || path != "" {
+		t.Fatalf("LoadConfig = (%q, %v), want an error and no path", path, err)
+	}
+	got := ConfigSource(path)
+	if !strings.Contains(got, "could be read") {
+		t.Fatalf("ConfigSource = %q, want it to say a file exists and could not be read", got)
+	}
+	if strings.Contains(got, "there is none") {
+		t.Fatalf("ConfigSource = %q, but %s exists — this is the sentence for a machine with no config file", got, blocked)
+	}
+	if !strings.Contains(got, blocked) {
+		t.Fatalf("ConfigSource = %q, want it to name %s", got, blocked)
 	}
 }
 

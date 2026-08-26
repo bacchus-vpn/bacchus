@@ -1176,6 +1176,12 @@ Behaviour worth knowing before you rely on it:
   keeps the addresses it started with until it reconnects.
 - Re-issuing an invite takes effect at the next Connect: a cached snapshot signed by
   a key the new invite does not name simply does not verify.
+- When **every** address a client holds for the account service fails, the client
+  says so in its log, naming them and how many there were — including when there is
+  only one, which is what a client with no invite and no second address has. That
+  line is what distinguishes a bad minute on the network from a move this client was
+  never told about, and the second one starts a ~6 h countdown (the renewal margin)
+  to that device no longer connecting through a gate-enabled coordinator.
 
 ## Routing the whole device on Linux (issue #37, ADR-0049)
 
