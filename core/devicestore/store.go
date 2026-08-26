@@ -106,6 +106,19 @@ type Store struct {
 // that entitlement invisibly, which is the harm LoadOrGenerateKey refuses to
 // risk. A damaged credential cache must never be why a client cannot even try to
 // connect.
+//
+// Since issue #244 that same file has a second reader with the opposite posture,
+// and the two are not in conflict — they ask different questions of it.
+// LoadOrGenerateKey refuses on this file's mere PRESENCE beside a missing
+// device.key, without opening it, because presence answers "has this device ever
+// enrolled" and that is a fact about the past which a corrupt body does not
+// retract. Open reads the CONTENTS and asks "can this device present a
+// credential right now", which a corrupt body answers with no. So a half-written
+// credential.json is simultaneously proof that the key is lost rather than
+// absent, and no use for a connect. Both readings are right, and swapping either
+// one's posture for the other's would be wrong: refusing to open would strand a
+// client behind a cache it can rebuild, and minting a key would strand it behind
+// one it cannot.
 func Open(path string) (*Store, error) {
 	s := &Store{path: path}
 	if path == "" {

@@ -119,6 +119,37 @@ func TestLoadOrGenerateKey_MissingKeyBesideACredentialNamesBothFiles(t *testing.
 	}
 }
 
+// TestLoadOrGenerateKey_ADamagedCredentialStillProvesTheKeyWasLost pins the one
+// place #244's check and Open deliberately disagree about the same file.
+//
+// Open soft-fails a corrupt or empty credential to "this device holds nothing",
+// because that is a renewable cache and refusing to open it would strand a
+// client behind something it can rebuild. The key's check never opens the file:
+// presence answers "has this device ever enrolled", which is a fact about the
+// past that a half-written body does not retract. A zero-length credential.json
+// is therefore both — no use for a connect, and proof that the key beside it is
+// lost rather than absent. Reading the contents here would put the worst case
+// (mint a second key) behind the flimsiest evidence (a truncated file).
+func TestLoadOrGenerateKey_ADamagedCredentialStillProvesTheKeyWasLost(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, CredFileName), nil, 0o600); err != nil {
+		t.Fatalf("seed empty credential: %v", err)
+	}
+	if _, err := LoadOrGenerateKey(dir); !errors.Is(err, ErrOrphanedCredential) {
+		t.Fatalf("a zero-length credential beside a missing key = %v, want ErrOrphanedCredential — "+
+			"a device whose credential file was truncated is not a device that never enrolled", err)
+	}
+	// And the credential reader still says the device holds nothing, which is the
+	// half that must NOT change: these two read the same file for different facts.
+	s, err := Open(filepath.Join(dir, CredFileName))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, ok := s.Get(); ok {
+		t.Error("a zero-length credential file was reported as presentable")
+	}
+}
+
 // TestLoadOrGenerateKey_ColdStartIsStillAColdStart is the other half of #244 and
 // the half that keeps the check from becoming "refuse whenever the directory is
 // not empty".
