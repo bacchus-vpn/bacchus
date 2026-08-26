@@ -488,3 +488,53 @@ func TestTheShippedGatesConfigurationTurnsTheGatesOn(t *testing.T) {
 		})
 	}
 }
+
+// -------------------------------------------------------------------------
+// --label: one window, one pool member (issue #250, ADR-0074)
+// -------------------------------------------------------------------------
+//
+// A gate is only as ON as the weakest member — every gate fails open, a client rotates
+// freely, and there is no replication between coordinators — so this runs once per
+// member and produces one report per member. Two unlabelled reports cannot be told
+// apart, which is how per-member reading turns back into one undifferentiated answer.
+
+func TestGateCheck_LabelsWhichMemberAWindowCameFrom(t *testing.T) {
+	out, code := gateCheck(t, gatesOffJournal(), "--label", "2")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0\n%s", code, out)
+	}
+	if !strings.Contains(out, "coordinator 2: bacchus-gate-check: what this coordinator said") {
+		t.Errorf("the report header does not carry the label:\n%s", out)
+	}
+
+	out, code = gateCheck(t, gatesOffJournal(), "--label", "2", "--require", "admission")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "coordinator 2: bacchus-gate-check: admission is DECLARED ON and is OFF") {
+		t.Errorf("the finding does not say which member it is about:\n%s", out)
+	}
+}
+
+// Without a label every line is byte-identical to what a single-coordinator deployment
+// printed before, so an already-pasted report stays readable.
+func TestGateCheck_AnUnlabelledReportIsUnchanged(t *testing.T) {
+	out, _ := gateCheck(t, gatesOffJournal())
+	if strings.Contains(out, "coordinator 1") {
+		t.Errorf("an unlabelled report grew a label:\n%s", out)
+	}
+}
+
+// The one property this script has is that it prints no hostname, and a free-text label
+// is where one would get in.
+func TestGateCheck_RefusesALabelThatLooksLikeAHost(t *testing.T) {
+	for _, label := range []string{"coordinator.example.invalid", "admin@box", "192.0.2.1:8080", "a/b"} {
+		out, code := gateCheck(t, gatesOffJournal(), "--label", label)
+		if code != 2 {
+			t.Errorf("--label %q: exit %d, want 2\n%s", label, code, out)
+		}
+		if !strings.Contains(out, "looks like a host") {
+			t.Errorf("--label %q: the refusal does not say why:\n%s", label, out)
+		}
+	}
+}

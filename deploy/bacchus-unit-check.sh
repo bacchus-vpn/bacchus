@@ -233,13 +233,12 @@ awk '
 			print "  units carry hand-added flags these templates do not, so copying one would revert a" > "/dev/stderr"
 			print "  working configuration silently. Add the missing line(s) BY HAND, keeping everything" > "/dev/stderr"
 			print "  the unit already has, then `systemctl daemon-reload`." > "/dev/stderr"
-			print "  For OnFailure=bacchus-update-rollback@%n.service the handler also has to be on the" > "/dev/stderr"
-			print "  box (issue #234) — deploy/install.sh places it, or by hand from a checkout at the" > "/dev/stderr"
-			print "  pinned commit:" > "/dev/stderr"
-			print "    install -D -m 0755 deploy/bacchus-update-rollback.sh \\" > "/dev/stderr"
-			print "      /usr/local/lib/bacchus/bacchus-update-rollback" > "/dev/stderr"
-			print "    install -D -m 0644 deploy/bacchus-update-rollback@.service \\" > "/dev/stderr"
-			print "      /etc/systemd/system/bacchus-update-rollback@.service" > "/dev/stderr"
+			print "  For OnFailure=bacchus-update-rollback@%n.service that ONE line is now the whole" > "/dev/stderr"
+			print "  job. deploy/bacchus-pin.sh delivers the handler and the template unit itself" > "/dev/stderr"
+			print "  (issue #234, ADR-0074): neither of those carries any of this box\047s own" > "/dev/stderr"
+			print "  configuration, so there is nothing in them a copy could revert. This line does" > "/dev/stderr"
+			print "  carry it, which is why it is still yours and why the no-copy rule still holds" > "/dev/stderr"
+			print "  for THIS unit." > "/dev/stderr"
 			exit 5
 		}
 		exit 0

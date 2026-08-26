@@ -1426,20 +1426,27 @@ sh deploy/bacchus-pin.sh --commit "$(git rev-parse HEAD)"
 
 That builds both server binaries once, from that one checkout, stamped from
 `VERSION`; stages a checked copy onto every box without replacing anything;
-then installs and restarts **nodes first and the coordinator last**; then
+then installs and restarts **every node first and every coordinator last**; then
 establishes the result rather than asserting it. `--dry-run` prints every
 remote command it would run and touches nothing.
 
 ### The five things it will not do, and why each one matters
 
-1. **It never copies a `.service` file.** The coordinator's live unit carries
-   hand-added flags that are *not* in `deploy/bacchus-coordinator.service`, so
-   re-copying that file silently reverts a working configuration and the
-   deployment then behaves differently for reasons no diff shows. Units are
-   installed once — by hand or by `deploy/install.sh` — and edited in place.
-   This is binaries only, and there is no flag that changes that. It does
+1. **It never copies a unit that carries your configuration.** The coordinator's
+   live unit carries hand-added flags that are *not* in
+   `deploy/bacchus-coordinator.service`, so re-copying that file silently reverts
+   a working configuration and the deployment then behaves differently for reasons
+   no diff shows. Those units are installed once — by hand or by
+   `deploy/install.sh` — and edited in place, and there is no flag that changes
+   that. It does
    [compare](#does-each-box-run-the-unit-this-commit-ships-issue-234) them, which
    is how you find out that a box is missing a line this commit ships.
+
+   It **does** deliver the two files that carry none of it — the rollback handler
+   and its template unit
+   ([below](#the-two-files-the-pin-delivers-issue-234-adr-0074)). ADR-0064 §7's
+   refusal is about a unit holding *the operator's* configuration; ADR-0074 draws
+   the line where the reason actually falls.
 2. **It never checks anything out.** It reads the commit the repository is
    already on and refuses if `--commit` disagrees. A script that moved HEAD for
    you could turn a half-finished rebase into a deployment.
@@ -1461,8 +1468,8 @@ remote command it would run and touches nothing.
 
 ### The order is part of the check, not a preference
 
-Restart the coordinator **last**. That is not tidiness: it is what makes the
-node check readable at all.
+Restart the coordinators **last**, every one of them, after every node. That is
+not tidiness: it is what makes the node check readable at all.
 
 `build=` (issue #182) rides the `registered:` line, and that line fires only for
 a node the coordinator does not already hold in its registry. A node restarts in
@@ -1471,6 +1478,44 @@ every binary in the fleet without printing `registered` once** — and a journal
 read afterwards then answers with values from before the deploy, with total
 confidence. Restarting the coordinator empties its registry, so every node
 re-registers as new and prints a fresh line naming the binary it is running now.
+
+### The coordinators are a pool, and every check runs per member (issue #250, ADR-0074)
+
+`deploy/testbed.env` names them as a list, spelled exactly like `NODE_TARGETS`,
+with one signaling address per member in the same order:
+
+```sh
+COORDINATOR_TARGETS="admin@coordinator-a.example.invalid=bacchus-coordinator admin@coordinator-b.example.invalid=bacchus-coordinator"
+COORDINATOR_SIGNALING="coordinator-a.example.invalid:8080 coordinator-b.example.invalid:8080"
+```
+
+The older singular `COORDINATOR_TARGET` / `COORDINATOR_UNIT` pair still works and
+reads as a pool of one. Setting both spellings is refused rather than resolved.
+
+**There is no coordinator-to-coordinator replication.** A node registers with
+every member it was given — `registerLoop` broadcasts on every tick precisely
+because there is nothing to replicate. So the journal read, the fleet check, the
+gate check, the unit comparison and the capability probe all run **once per
+member**, and each report is labelled `coordinator 1`, `coordinator 2`, … Three
+things follow that one coordinator can never show you:
+
+| | |
+|---|---|
+| **A node seen by one member and missing from another** | A real, stable finding. That member will never assign it work, and a client rotating there sees a smaller fleet than the one running. Every count in the run can be right while it holds — each member's own total looks ordinary — so the pin compares identities per member and names which ordinals missed which box. |
+| **A gate that is on for only some members** | Not a partial deployment: a way *around* the gate. Gates fail open, clients rotate, so `COORDINATOR_GATES` is required of **every** member and a pin that finds one short fails and says which. |
+| **The issue #225 window** | Widens with the pool. A node holds one link per member, every member restarts last by design, so each member added is one more stranded link per deploy. The containment restart now fires on essentially every run, and it fires for a partial re-registration too — #225 kills a *link*, not a node. |
+
+A member whose journal could not be read is **left out** of the comparison rather
+than counted as a member that saw nothing. Otherwise one failed `ssh` reports
+every box as absent from that member and restarts the whole fleet because a
+journal could not be fetched.
+
+`--label` is what tells two reports apart, and it is an **ordinal, never a host**:
+`bacchus-fleet-check.sh` and `bacchus-gate-check.sh` print no hostname, which is
+what makes their output the half of a pin run that is safe to paste into a public
+issue. Both refuse a label containing `.`, `@`, `:`, `/` or a space. That is a
+floor rather than a wall — a bare unqualified name would fit through — and it is
+there so that reaching for the host takes a deliberate act.
 
 ### Establishing the result
 
@@ -1585,8 +1630,45 @@ continuations normalised away — and sorts what it finds into three:
 warning below: the binaries are pinned, units are configuration this procedure
 does not manage, and a check that failed every run until three units were
 hand-edited would end up switched off. Fixing it is a hand edit that keeps
-everything the unit already has, plus `systemctl daemon-reload` — and for the
-rollback handler, the two files it needs, which `deploy/install.sh` places.
+everything the unit already has, plus `systemctl daemon-reload`. For
+`OnFailure=bacchus-update-rollback@%n.service` that one line is now the **whole**
+job — the two files it needs arrive on their own, below.
+
+### The two files the pin delivers (issue #234, ADR-0074)
+
+`deploy/bacchus-update-rollback.sh` → `/usr/local/lib/bacchus/bacchus-update-rollback`
+and `deploy/bacchus-update-rollback@.service` → `/etc/systemd/system/`. This is
+issue #222's supervisor-side rollback, which shipped to this repository and
+reached **no box** because the pin delivered binaries only, and every pin run
+afterwards reported a pinned fleet — correctly, because the binaries were.
+
+They are deliverable because of a **property**, not a name. Neither carries one
+byte of a box's own configuration: no `EnvironmentFile=`, no `[Install]` section
+(the template is never enabled — it is pulled in by `OnFailure=` and by nothing
+else, and enabling it would run a rollback at boot), and one `ExecStart` that is a
+fixed path with `%i` as its only variable, which systemd fills from the failing
+unit's name. There is nothing in either file for a copy to revert, which is what
+ADR-0064 §7 exists to prevent. `deploy/pin_test.go` fails the build if either one
+ever grows a configurable surface.
+
+**Nothing unrecognised is replaced.** Before overwriting, the pin digests what is
+on the box and asks whether that digest is *any version of that file in this
+repository's history*. Absent, or a version this repository shipped → delivered.
+Anything else → **refused**, named, left alone, with the one command that settles
+it printed:
+
+```sh
+install -D -m 0644 deploy/bacchus-update-rollback@.service   /etc/systemd/system/bacchus-update-rollback@.service
+```
+
+Asking the history rather than "is it byte-identical to what ships now" is what
+makes the rule survive its own second use: the cheaper test would refuse every box
+the moment the template changed, which is issue #234 again one commit later.
+
+What stays yours, forever: the `OnFailure=bacchus-update-rollback@%n.service` line
+on the live `bacchus-exit` and `bacchus-coordinator` units. Those units carry your
+flags; that line is configuration; §7 applies in full. The unit comparison prints
+it on every run until the box has it, plus `systemctl daemon-reload`.
 
 **A box it could not compare is NOT COMPARED, and that is counted** (issue #248).
 The pin's summary reads

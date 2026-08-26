@@ -103,7 +103,7 @@ systemctl start bacchus-exit
 ```
 
 For a **deployment**, do not do the above once per box. Use `bacchus-pin.sh`,
-which takes the coordinator and every node to one named commit from one build:
+which takes every coordinator and every node to one named commit from one build:
 
 ```bash
 cp testbed.env.example testbed.env    # once; testbed.env is gitignored
@@ -113,12 +113,53 @@ sh bacchus-pin.sh --commit "$(git rev-parse HEAD)"
 
 It refuses a build that cannot be identified (a `git worktree` checkout, a dirty
 tree, a missing or unapplied release stamp), stages a digest-checked copy onto
-every box before replacing anything, restarts the **coordinator last** — which is
-what makes every node's build readable from the coordinator's journal — and then
+every box before replacing anything, restarts **every coordinator last** — which
+is what makes every node's build readable from a coordinator's journal — and then
 checks the result with `bacchus-fleet-check.sh` and `cmd/coordinator-probe`
-rather than reporting success because `scp` exited 0. **It never copies a
-`.service` file**, because the coordinator's live unit carries hand-added flags
-that the template here does not.
+rather than reporting success because `scp` exited 0. **It never copies a unit
+that carries this box's configuration**, because the live server units carry
+hand-added flags the templates here do not.
+
+### The coordinators are a POOL (issue #250, ADR-0074)
+
+`COORDINATOR_TARGETS` is a list of `TARGET=UNIT` entries, spelled exactly like
+`NODE_TARGETS`, and `COORDINATOR_SIGNALING` is one address per member in the same
+order. The older singular `COORDINATOR_TARGET` / `COORDINATOR_UNIT` pair still
+works and reads as a pool of one; setting both spellings is refused.
+
+**There is no coordinator-to-coordinator replication.** A node registers with
+every member it was given, and that broadcast *is* the mechanism. So every check
+runs once per member and is reported per member, labelled `coordinator 1`,
+`coordinator 2`, …, and three things follow that a single-coordinator run cannot
+show you:
+
+- **A node registered with one member and missing from another is a real
+  finding**, not a delay. The member that did not see it will never assign it
+  work, and a client that rotates there sees a smaller fleet than the one running.
+  Every count in the run can be right while it holds, so the pin compares
+  identities per member and names the ordinals that missed a box.
+- **A gate is only as on as the weakest member.** Gates fail open and a client
+  rotates freely, so one member started without `-device-root-pubkey` is a way
+  *around* the gate. `COORDINATOR_GATES` is required of every member.
+- **Each member widens the issue #225 window.** A node holds one link per member
+  and every member restarts last by design, so each one added is another stranded
+  link per deploy — and the containment restart now fires on essentially every run.
+
+### The two files it DOES deliver (issue #234, ADR-0074)
+
+`deploy/bacchus-update-rollback.sh` and `bacchus-update-rollback@.service` — the
+supervisor-side rollback issue #222 shipped, which reached no box because the pin
+delivered binaries only. Neither carries any of a box's configuration: no
+`EnvironmentFile=`, no `[Install]`, one fixed `ExecStart` with `%i` as its only
+variable. ADR-0064 §7's refusal is about a unit that holds *the operator's*
+configuration, and these hold none.
+
+Nothing unrecognised is ever replaced: the pin overwrites a live copy only when
+its digest is **some version of that file in this repository's history**, and
+refuses anything else by name with the one `install -D` command that settles it.
+The `OnFailure=bacchus-update-rollback@%n.service` line on the live server units
+stays a hand edit, forever — that line *is* configuration — and the unit
+comparison below prints it on every run until the box carries it.
 
 The fleet check counts **node ids**, not role lines: a box serving two roles is
 one node, and the count is compared against the number of `NODE_TARGETS` entries
@@ -148,7 +189,7 @@ beyond convenience: it prints **no hostname**, so its output is the half of a pi
 run that is safe to paste into a public issue. `bacchus-pin.sh`'s own output
 names every ssh target on every line, which is why the pairing lives there.
 
-**The units are compared, never copied** (issue #234). `bacchus-unit-check.sh`
+**The server units are compared, never copied** (issue #234). `bacchus-unit-check.sh`
 diffs the directives of a live unit against the template shipped here and reports
 what the box is missing, what it has that the template does not (the hand-added
 flags), and what differs. It is a warning, not a failure — the binaries are
@@ -181,8 +222,10 @@ above and refuses nothing anywhere. `bacchus-gate-check.sh` reads the posture ou
 of the coordinator's own journal and says which are on:
 
 ```bash
+# once per pool member; --label is an ordinal and never a host, because this
+# script's output is the half of a run that is safe to paste into an issue
 ssh <coordinator-host> "journalctl -u bacchus-coordinator --since -10min --no-pager" |
-  sh bacchus-gate-check.sh
+  sh bacchus-gate-check.sh --label 1
 ```
 
 It reads what the binary **concluded**, not what its flags say, because those
