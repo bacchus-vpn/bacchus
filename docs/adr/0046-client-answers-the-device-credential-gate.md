@@ -298,6 +298,47 @@ the seam when due.
 > repository originates the exchange and what an operator with no account service
 > has to configure, and both answers are what they were.
 
+> **Update (2026-08-26, `#239`): reason 3's evidence never measured reason 3, and
+> the ruling is unaffected.** Two sentences above are the ones a future reader
+> must not act on.
+>
+> 1. Reason 3's *"At `b30ce54` the whole tree holds exactly one `net/http`
+>    import — `cmd/coordinator/policy.go`"*. Dated, and superseded three times
+>    over: on `7f1a36b` the first-party packages importing `net/http` are
+>    `cmd/coordinator`, `core/update` and `core/accountclient`. That is a count
+>    going up as designed, not a breach — none of the three is reachable from
+>    `core`.
+> 2. The 2026-08-04 update's item 3, *"`go list -deps ./core` still names no HTTP
+>    client"*. **That one is not merely stale, it is false, and it was false when
+>    it was written.** `net/http` has been in `core`'s dependency graph since long
+>    before this record existed, by a route with nothing to do with the account
+>    service: `core` → `github.com/refraction-networking/utls` →
+>    `github.com/andybalholm/brotli` → `net/http`. `core` imports utls directly
+>    for the ClientHello fingerprint work (ADR-0018, ADR-0032) and brotli is
+>    utls's own certificate-compression dependency, so the dependency is
+>    load-bearing and stays.
+>
+> Both sentences stand where they are, uncorrected in place, because this repo
+> amends rather than rewrites. Neither should be cited, and in particular nobody
+> should run that grep: it reports a breach that has not happened, and it goes on
+> matching — for the same accounted-for reason — on a build that really did grow
+> a built-in account-service client. A reader who ran it and concluded "the seam
+> is already breached, so this costs nothing" would reach the wrong answer from
+> real output, which is the worse of the two failures it enables.
+>
+> **The property is untouched.** Reason 3 is that an operator running Bacchus
+> with no account service should not have to configure their way out of a
+> component the client assumes, and that is true: no package in this repository
+> reachable from `core` speaks HTTP at all, and `core/devicecred`'s and
+> `verify.go`'s package docs — that the device-credential machinery "never
+> depends on, and never leaks to, the closed account service" — remain kept by the
+> import graph rather than by assertion. The claim needed a better instrument,
+> not a different verdict.
+>
+> **The instrument.** `core.TestCoreImportsNothingThatDialsTheAccountService`
+> (`core/accountservice_seam_deps_test.go`). ADR-0056 §2's amendment of the same
+> date carries the full statement of what it measures and why the grep could not.
+
 ### 7. Config surface: `-device-cred-dir` is proposed, not applied, in this change
 
 Issue #53 asks for "how an operator/user supplies the initial credential,
