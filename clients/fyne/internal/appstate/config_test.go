@@ -572,6 +572,37 @@ func TestConfigSourceSaysWhereToPutOneWhenThereIsNoConfig(t *testing.T) {
 	}
 }
 
+// TestConfigSourceTellsAnUnreadableFileFromNoFile: LoadConfig reports the same
+// two things — an empty path and an error — whether every candidate was missing
+// or every candidate merely could not be READ, and those two states want
+// opposite actions from whoever reads the log. Saying "there is none" over a
+// file the user can see in their own file manager is how a diagnostic loses its
+// reader.
+func TestConfigSourceTellsAnUnreadableFileFromNoFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	blocked := blockExeAdjacentPath(t)
+
+	// The premise: one candidate exists, neither could be read, so LoadConfig
+	// reports no path at all.
+	_, path, err := LoadConfig()
+	if err == nil || path != "" {
+		t.Fatalf("LoadConfig = (%q, %v), want an error and no path", path, err)
+	}
+	got := ConfigSource(path)
+	if !strings.Contains(got, "could be read") {
+		t.Fatalf("ConfigSource = %q, want it to say a file exists and could not be read", got)
+	}
+	if strings.Contains(got, "there is none") {
+		t.Fatalf("ConfigSource = %q, but %s exists — this is the sentence for a machine with no config file", got, blocked)
+	}
+	if !strings.Contains(got, blocked) {
+		t.Fatalf("ConfigSource = %q, want it to name %s", got, blocked)
+	}
+}
+
 // TestDefaultConfigPathPrefersPerUserDir is issue #118 itself. With the GUI
 // installed at /usr/local/bin, the old DefaultConfigPath - configPaths()[0],
 // next to the executable - sent a fresh user's first Settings save at a

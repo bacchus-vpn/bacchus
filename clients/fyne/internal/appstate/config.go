@@ -721,20 +721,36 @@ func ConfigSource(loaded string) string {
 
 	if loaded == "" {
 		var looked []string
+		present := false
 		for _, p := range []string{exePath, userPath} {
-			if p != "" {
-				looked = append(looked, p)
+			if p == "" {
+				continue
+			}
+			looked = append(looked, p)
+			if exists(p) {
+				present = true
 			}
 		}
-		if len(looked) == 0 {
+		switch {
+		case len(looked) == 0:
 			return "no configuration file was read, and this system names neither a directory for the running program nor a per-user configuration directory to look in."
+		case present:
+			// A file IS there and none of them could be read — a permission, a
+			// busy handle, a directory in a file's place. Distinguished from the
+			// empty case because the two want opposite actions from the reader,
+			// and because saying "there is none" over a file they can see is how a
+			// diagnostic loses its reader. main.go logs the errno on the line
+			// above; this says what state the client is in as a result.
+			return fmt.Sprintf("no configuration file could be read, though one exists among the places looked in (%s), so this client is running as if nothing were configured. Settings would write to %s.",
+				strings.Join(looked, ", "), DefaultConfigPath())
+		default:
+			// The save target is named too. "Where do I put one" is the only
+			// question a machine in this state has, and DefaultConfigPath's answer
+			// is deliberately NOT the first path looked in (issue #118), so the two
+			// lists cannot be inferred from each other.
+			return fmt.Sprintf("no configuration file was read; there is none at either place one is looked for (%s). Settings would create one at %s.",
+				strings.Join(looked, ", "), DefaultConfigPath())
 		}
-		// The save target is named too. "Where do I put one" is the only question
-		// a machine in this state has, and DefaultConfigPath's answer is
-		// deliberately NOT the first path looked in (issue #118), so the two lists
-		// cannot be inferred from each other.
-		return fmt.Sprintf("no configuration file was read; there is none at either place one is looked for (%s). Settings would create one at %s.",
-			strings.Join(looked, ", "), DefaultConfigPath())
 	}
 
 	switch {
