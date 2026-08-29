@@ -53,9 +53,9 @@ import (
 
 // knownOneShots is a FLOOR, not the list under test. Discovery is what decides
 // which flags are exercised; this only asserts that discovery still finds the
-// three that exist, so a renamed flag or a reworded usage string fails here
+// four that exist, so a renamed flag or a reworded usage string fails here
 // rather than silently shrinking the check to nothing.
-var knownOneShots = []string{"enroll", "list", "version"}
+var knownOneShots = []string{"enroll", "list", "print-acct-pubkey", "version"}
 
 // oneShotArgs is how each one-shot is invoked. Every discovered flag must appear
 // here — see the package comment for why a missing entry is a failure and not a
@@ -71,6 +71,12 @@ func oneShotArgs(t *testing.T, flagName string) []string {
 	switch flagName {
 	case "version":
 		return []string{"-version"}
+	case "print-acct-pubkey":
+		// A real key rather than none. This one-shot REFUSES an empty -exit-key
+		// (there is no stable identity to print for a node that generates one every
+		// start), and a refusal exits before the assertion below, which would make
+		// it pass for the wrong reason.
+		return []string{"-print-acct-pubkey", "-exit-key", strings.Repeat("ab", 32)}
 	case "list":
 		// Port 1 on loopback: nothing answers, so this fails on the country-list
 		// timeout a few seconds in. Explicit SOCKS and listen addresses so a
