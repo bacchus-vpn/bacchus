@@ -275,3 +275,52 @@ here is which key the testbed uses this month, not what ships.
   work through *systemd's* env-file parser and word splitting on a live box is a
   `needs-owner-test` blocker (#261), and no card that needs the gates should
   assume they are on until it passes.
+
+## Amendment (2026-08-29): §3's unreadable row is read, and the Consequence that dated itself is spent (#260, #275, #280)
+
+**§3's "One gate cannot be read this way" is no longer true of
+`-account-service`.** #260 gave `cmd/coordinator` a startup line for it —
+`account service: NONE published (-account-service unset) …` or `account
+service: N address(es) published …` — and #275 taught
+`deploy/bacchus-gate-check.sh` to read it. The Consequences entry above,
+"`account-service` is a permanently UNKNOWN row until #260 lands", dates itself
+and stands where it is: it is an accurate record of the decision as taken, and
+this repository amends rather than rewrites. Neither passage should be cited for
+what the row does now.
+
+**The row has three outcomes, not two, and the third is what §3's rule became.**
+
+- **`on`** — an address is published. That is step 2 of
+  `coordinator-gates.env.example`, still blocked on `bacchus-payment#82`, so it
+  is a state no box in this deployment can currently be in.
+- **`OFF`** — the coordinator said `NONE published`. A *stated* answer rather
+  than an unread one, and declaring the gate against it exits **1**. This is what
+  step 1 produces, which `deploy/gate_check_test.go`'s step-1 row asserts against
+  the real binary.
+- **`UNKNOWN`** — still exits **4**, for a coordinator predating #260 or an
+  `account service:` line in a shape the reader does not parse (ADR-0069 §4's
+  silently-drifting Go/shell pair, which is why an unrecognised tail must not
+  fall into the `on` branch). Merging deploys nothing, so a stale box is the
+  ordinary case rather than a hypothetical: **re-pin it before declaring the
+  gate**, because no width of window will make that journal answer.
+
+**What this changes for `testbed.env`, and what it does not.**
+`deploy/testbed.env.example` told an operator not to declare `account-service`
+because the row could not be read. The instruction survives the correction and
+its reason does not: the row reads fine, and it reads `OFF`, so declaring it
+today fails a pin at exit 1 rather than at exit 4. The example file now says
+that, and says which exit code distinguishes the two — because "re-pin and then
+declare it" would be a pin failure on every box in this fleet.
+
+**The instrument, because this file went stale with nothing failing.**
+`deploy/gate_docs_test.go` reads the exit codes back out of the real script for
+the three windows a real coordinator produces and holds the host list's
+commentary to them. §1's argument — a paragraph cannot be run, so the flag set is
+a file `gate_check_test.go` executes — applies to the sentence that says whether
+to declare a gate as much as to the recipe that turns one on. That sentence is
+read by `bacchus-pin.sh`, so it is an instruction, and it had no test.
+
+**The ruling is untouched.** An unreadable gate is still not a gate that is on
+(#248), and the check still reads what the binary *concluded* rather than what
+its flags say. What #260 removed is the one row where that rule had no evidence
+to work with; #261 now gets a report in which every row is answered.
