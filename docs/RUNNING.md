@@ -105,6 +105,42 @@ shape of both `VERSION` and the tag; and `core/version`'s own tests parse the fi
 on every push. If all three are bypassed — a hand-typed `-ldflags` — the panic
 message names the rule and the file.
 
+### Reading an exit's accounting public key (issue #271)
+
+Whatever pays a node per byte needs to know which accounting key that node's
+receipts are signed with, and it cannot work it out: the key is a
+domain-separated hash of the node's X25519 **private** scalar, so it is in no
+snapshot, no admission credential and no log line. This one-shot prints it.
+
+```sh
+bacchus-node -print-acct-pubkey -exit-key <64-hex X25519 private key>
+```
+
+```
+id: 7b4e909b…0f73f13
+acct_pub: iqKTaDMxZ1gFEt+L/GYQjZt76OuimkimAT4K0mTz4bA=
+acct_pub_hex: 8aa29368…64f3e1b0
+```
+
+The field names are the ones an operator roster uses, so transcription is
+mechanical. **`acct_pub` is base64 and that matters**: a roster's `acct_pub`
+holds an Ed25519 public key, which is a `[]byte`, so JSON reads it as base64 —
+a 64-character hex string pasted there decodes to 48 bytes and is refused on
+*length*, which reads as "wrong key" rather than "wrong encoding".
+`acct_pub_hex` is the same 32 bytes, for eyeballing.
+
+`id` is what a receipt's `exitId` carries, and it is **always** the hex of the
+exit's X25519 public key — a configured `-id` is overridden for the exit role
+and always has been. A roster row keyed on a hand-chosen `-id` therefore
+matches nothing, forever, and the receipts are refused one at a time into a
+rejection tally: the node earns **zero** and nothing says why.
+
+`-exit-key` is required rather than optional. Without one a node generates a
+fresh identity at every start, so printing the generated key would produce a
+well-formed pairing for an identity the process discards on exit.
+
+Like `-version`, this reaches no coordinator, opens no port and starts nothing.
+
 ### Asking an installed binary which release it is (issue #263)
 
 All three fleet binaries answer `-version`: they print a bare
