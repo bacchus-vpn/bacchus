@@ -74,6 +74,13 @@ of one `sha256.Sum256` call. The client's accounting key is a fresh
 Noise_NK's anonymity property (ADR-0009): nothing links a client's receipts
 across separate sessions.
 
+The exit's public half can be read off a box with `bacchus-node
+-print-acct-pubkey` (ADR-0075); it is **not** derivable from anything
+published, because the seed is the X25519 *private* scalar. That flag is the
+only route to it, and an operator roster pinning node id to accounting key is
+what the printed value is for — a receipt verifies against the keys it carries
+for itself, so nothing else binds one to a node.
+
 Neither accounting pubkey is folded into what gets signed (`canonical`
 excludes them). Each side signs only what it can itself attest to — session
 id, interval sequence, byte count, exit id — which sidesteps an ordering
@@ -111,6 +118,11 @@ record a flat file suits until that changes.
 completely (no counters, no extra streams, no files — every caller/test that
 predates this field is unaffected). `Config.AcctIntervalSec` (`-acct-interval`,
 default 60) sets the reporting cadence while enabled.
+
+`-print-acct-pubkey` (with `-exit-key`) is a one-shot rather than a setting: it
+prints `id`, `acct_pub` and `acct_pub_hex` and exits, touching no directory and
+starting nothing. It is independent of `-acct-dir`, since the key exists
+whether or not this node is recording anything.
 
 ## Testing
 
