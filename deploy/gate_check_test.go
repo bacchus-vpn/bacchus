@@ -127,8 +127,13 @@ func TestGateCheck_ADeclaredGateThatIsOffFailsTheRun(t *testing.T) {
 }
 
 // #248's finding, applied to this script first: a gate that could not be READ is not a
-// gate that is on, and it must not exit 0. -account-service is the standing instance —
-// cmd/coordinator says nothing about it at startup (issue #260).
+// gate that is on, and it must not exit 0.
+//
+// The standing instance used to be -account-service on every build, because
+// cmd/coordinator announced nothing about it. Issue #260 gave it a line, so the case
+// this now covers is a coordinator OLDER than that line — which is not hypothetical:
+// merging deploys nothing, so a box runs a wave behind until it is re-pinned, and the
+// window a stale box writes cannot answer this row no matter how wide it is opened.
 func TestGateCheck_AGateItCannotReadIsNotAPass(t *testing.T) {
 	out, code := gateCheck(t, gatesOffJournal(), "--require", "account-service")
 	if code != 4 {
@@ -136,6 +141,100 @@ func TestGateCheck_AGateItCannotReadIsNotAPass(t *testing.T) {
 	}
 	if !strings.Contains(out, "NOT a gate that is on") || !strings.Contains(out, "issue #260") {
 		t.Errorf("the reason is not stated:\n%s", out)
+	}
+	if !strings.Contains(out, "predates issue #260") {
+		t.Errorf("the row does not say a stale binary is why, so an operator is told to widen a"+
+			" window that will never carry the line:\n%s", out)
+	}
+}
+
+// -------------------------------------------------------------------------
+// -account-service, read from the journal (issues #193, #260, #275)
+// -------------------------------------------------------------------------
+//
+// The row #261 exists to settle. Both spellings cmd/coordinator prints begin
+// `account service: ` and diverge on the next word, and the two states are not
+// interchangeable: one says a client learns an address from this deployment, the other
+// says every client stays on the address in its own config file. A reader that matched
+// the shared prefix and not the distinction would report the second as the first.
+//
+// The strings below are hand-written on purpose, unlike
+// TestTheShippedGatesConfigurationTurnsTheGatesOn, which runs the real binary. Both are
+// needed: that one proves this script reads what cmd/coordinator actually emits, and
+// these prove what it does with the shapes a real coordinator will not produce on
+// demand — a stale binary that emits nothing, and a future spelling neither side has
+// written yet.
+
+const (
+	acctPublished = `account service: 2 address(es) published in the signed directory as role "account" (issue #193)`
+	acctNone      = "account service: NONE published (-account-service unset) — every client stays on its own configuration (issue #193)"
+)
+
+func TestGateCheck_ReadsAPublishedAccountServiceAsOn(t *testing.T) {
+	p := "Aug 09 10:00:00 box bacchus-coordinator[9]: "
+	out, code := gateCheck(t, coordStart+p+acctPublished+"\n", "--require", "account-service")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 — a published address is the gate being on\n%s", code, out)
+	}
+	if !strings.Contains(out, "account-service     on") {
+		t.Errorf("a published address is not reported as on:\n%s", out)
+	}
+	// The count is what makes the row worth reading: one address here narrows a
+	// client that was configured with two (ADR-0061), so "on" alone is not the
+	// whole answer.
+	if !strings.Contains(out, "2 address(es) published") {
+		t.Errorf("the report does not carry how many addresses were published:\n%s", out)
+	}
+}
+
+// The case a prefix-only match gets wrong. NONE published is a coordinator that said
+// something definite — every client stays on its own configuration — and it is not the
+// gate being on. Declaring it must FAIL the run (exit 1), not pass it and not exit 4.
+func TestGateCheck_ReadsNONEPublishedAsOffAndNotAsOn(t *testing.T) {
+	p := "Aug 09 10:00:00 box bacchus-coordinator[9]: "
+	out, code := gateCheck(t, coordStart+p+acctNone+"\n", "--require", "account-service")
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 — NONE published is a stated OFF, not an on and not an unread\n%s", code, out)
+	}
+	if !strings.Contains(out, "account-service     OFF") {
+		t.Errorf("NONE published is not reported as OFF:\n%s", out)
+	}
+	if !strings.Contains(out, "account-service is DECLARED ON and is OFF") {
+		t.Errorf("declaring a gate that publishes nothing does not fail the run:\n%s", out)
+	}
+	// Without --require it is a report and nothing is judged, like every other row.
+	if _, code := gateCheck(t, coordStart+p+acctNone+"\n"); code != 0 {
+		t.Errorf("exit %d with nothing required, want 0", code)
+	}
+}
+
+// A shape neither side has written yet. The Go/shell pair here is the one ADR-0069 §4
+// names as drifting silently, so the third outcome is deliberate: an `account service:`
+// line this script cannot parse stays UNKNOWN rather than falling into the on branch.
+// Reporting an unparsed line as "enforcing" to the person reading #261 is the one
+// answer worse than admitting the row cannot be read (#248).
+func TestGateCheck_AnUnrecognizedAccountServiceLineIsNotOn(t *testing.T) {
+	p := "Aug 09 10:00:00 box bacchus-coordinator[9]: "
+	j := coordStart + p + "account service: something a later release prints\n"
+	out, code := gateCheck(t, j, "--require", "account-service")
+	if code != 4 {
+		t.Fatalf("exit %d, want 4 — a line nobody parsed is not a gate that is on\n%s", code, out)
+	}
+	if !strings.Contains(out, "account-service     UNKNOWN") || !strings.Contains(out, "drifted apart") {
+		t.Errorf("the drift is not reported:\n%s", out)
+	}
+}
+
+// The same window rule every other row obeys. A publication announced by the
+// coordinator that is gone is not evidence about the one that is running.
+func TestGateCheck_AccountServiceDoesNotSurviveARestart(t *testing.T) {
+	p := "Aug 09 10:00:00 box bacchus-coordinator[9]: "
+	out, code := gateCheck(t, coordStart+p+acctPublished+"\n"+coordStart, "--require", "account-service")
+	if code != 4 {
+		t.Fatalf("exit %d, want 4 — the publication belongs to a coordinator that is gone\n%s", code, out)
+	}
+	if strings.Contains(out, "account-service     on") {
+		t.Errorf("a publication from before the restart survived it:\n%s", out)
 	}
 }
 
@@ -430,17 +529,20 @@ func TestTheShippedGatesConfigurationTurnsTheGatesOn(t *testing.T) {
 		require string
 		lines   []string
 	}{{
+		// account-service is OFF here rather than unread, and that is the half of
+		// issue #275 a hand-written fixture cannot prove: step 1 names no
+		// -account-service, and the coordinator says so out loud.
 		name:    "step 1 — admission and two revocation lists",
 		require: "admission,revocation-lists",
-		lines:   []string{"admission           on", "device              OFF", "revocation-lists    on"},
+		lines:   []string{"admission           on", "device              OFF", "revocation-lists    on", "account-service     OFF"},
 	}, {
 		name:    "step 2 — the device gate and the account service",
-		require: "admission,device,revocation-lists",
-		lines:   []string{"admission           on", "device              on", "revocation-lists    on"},
+		require: "admission,device,revocation-lists,account-service",
+		lines:   []string{"admission           on", "device              on", "revocation-lists    on", "account-service     on"},
 	}, {
 		name:    "step 3 — signed revocation bundles",
-		require: "admission,device,revocation-lists,signed-revocations",
-		lines:   []string{"signed-revocations  on"},
+		require: "admission,device,revocation-lists,signed-revocations,account-service",
+		lines:   []string{"signed-revocations  on", "account-service     on"},
 	}}
 
 	recipes := gatesRecipes(t)

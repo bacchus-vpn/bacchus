@@ -1114,7 +1114,7 @@ Re-running `-enroll` is safe. A node that already holds a credential is left
 alone and nothing is sent, so a provisioning script that runs twice cannot burn a
 second, live code.
 
-Three things worth knowing:
+Four things worth knowing:
 
 - **`-device-cred-dir` is required** with `-account-service`, and the node refuses
   to start without it. Empty is an in-memory device identity regenerated on every
@@ -1127,6 +1127,28 @@ Three things worth knowing:
 - **If the credential file is lost but `device.key` survives**, run `-enroll` with
   `-claim-code-file=` (empty). That collects a fresh credential for the key the
   account service already knows and spends no claim code.
+- **If `device.key` is lost while `credential.json` survives, the node refuses to
+  start** (issue #244). It does not mint a second key, because a key the surviving
+  credential does not bind would be refused on every connect for a reason naming
+  none of this. The service exits 1 and names both files:
+
+  ```
+  device credential: devicestore: device key missing beside its credential:
+  /var/lib/bacchus/device/device.key is gone but /var/lib/bacchus/device/credential.json
+  is still here, so this is not a first run. …
+  ```
+
+  `-enroll` refuses identically, under `device enrollment:` rather than `device
+  credential:`, so **re-enrolling is not the way out** — with or without a claim
+  code, and with `-claim-code-file=` empty too. It could not be: the account
+  service knows this device by the public half of the key that is gone. The
+  recovery is **restoring `device.key`** from a backup of that directory, the same
+  place the surviving `credential.json` would come from. Nothing can re-derive it.
+
+  A deliberate reset is therefore two files, not one: remove **both** `device.key`
+  and `credential.json`, then run `-enroll` with an **unspent** claim code. An
+  empty directory is a first run, so this is the one recovery here that **costs a
+  code** — the collect above spends none.
 
 The account service address list is **configuration only** for a node — unlike
 the desktop client, a node does not learn a moved address from the signed
@@ -1182,9 +1204,21 @@ journal on purpose: a flag in `ExecStart` says what an operator *asked for*, and
 a journal line says what the binary *concluded*. Until this line existed, that
 check had one row it could not answer from any journal on any build, so a
 deployment declaring this gate exited **4** — "could not be read" — rather than
-0. **The check does not read the line yet**: it still prints
-`account-service UNKNOWN`, and teaching it costs one `index()` on
-`account service: `, tracked as its own change.
+0. It reads the line now (issue #275), and the row it prints is one of three:
+
+| the coordinator said | the row | declaring it |
+|---|---|---|
+| `N address(es) published` | `account-service on` + the count | 0 |
+| `NONE published` | `account-service OFF` | 1 |
+| nothing, or a spelling the script cannot parse | `account-service UNKNOWN` | 4 |
+
+`NONE published` is a stated **off**, not an unread row: the coordinator answered,
+and the answer is that every client stays on the address in its own config file.
+The third row is where a coordinator that predates this line lands — merging
+deploys nothing, so a box runs a wave behind until `bacchus-pin.sh` reaches it —
+and it also catches the two sides drifting apart, which is the failure mode
+ADR-0069 §4 names for a contract written in Go and parsed in shell. An
+unrecognized line is **never** reported as on.
 
 The count and the empty/non-empty fact are what is printed; the addresses
 themselves are not, because they are already in the directory every client
@@ -1842,7 +1876,7 @@ never read a configuration string.
 | every gate named in `--require` is on | 0 | enforcing what this deployment declares |
 | a declared gate is off | 1 | do not run a test that expects a refusal against this fleet |
 | no `coordinator release` line in the window | 3 | the window cannot answer; widen it |
-| a declared gate cannot be read from a journal | 4 | **not a pass** — see `account-service` below |
+| a declared gate cannot be read from a journal | 4 | **not a pass** — the window is silent on it, or the binary is too old to say |
 
 `--require` is what turns the report into a verdict, and `bacchus-pin.sh` passes
 `COORDINATOR_GATES` from `deploy/testbed.env`:
@@ -1858,10 +1892,13 @@ were configured would be switched off long before they were.
 
 Two things to know before relying on it. Like `bacchus-fleet-check.sh` it prints
 **no hostname**, including not echoing the device gate's audience, so its output is
-the half of a run that is safe to paste into an issue. And **`account-service` is
-always UNKNOWN**: it is the one configured thing `cmd/coordinator` announces
-nothing about at startup (issue #260), so declaring it exits 4 rather than 0. An
-unreadable gate is not a gate that is on.
+the half of a run that is safe to paste into an issue — the `account-service` row
+carries a count and never the addresses, for the same reason. And **a row can still
+read UNKNOWN**, which is not a pass: a gate the window does not answer exits 4. The
+standing case is a coordinator that has not been re-pinned since issue #260, which
+publishes into the signed directory and announces nothing; its `account-service`
+row says so and names re-pinning as the fix, because no width of `--since` will
+make a binary say something it does not print.
 
 Turning them on is a separate, deliberate act, documented as three cumulative steps
 in [`deploy/coordinator-gates.env.example`](../deploy/coordinator-gates.env.example)

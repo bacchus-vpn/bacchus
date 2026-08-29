@@ -51,10 +51,11 @@
 # and policy lines, and the `paths:` block issue #226 added, which names every file
 # flag, what it RESOLVES to, whether it is there, and what its absence MEANS.
 #
-# One gate cannot be read this way and is reported as UNKNOWN rather than assumed:
-# -account-service (#209's publication) is the one gate cmd/coordinator says nothing
-# about at startup. See "account-service" below. An unreadable gate is never an ok —
-# that is #248's finding, and it applies to this script first of all.
+# Every row is read this way now, including -account-service (#209's publication),
+# which until issue #260 was the one configured thing cmd/coordinator announced
+# nothing about at startup. A coordinator older than that prints no such line, and the
+# row stays UNKNOWN rather than being assumed either way — an unreadable gate is never
+# an ok, which is #248's finding and it applies to this script first of all.
 #
 # ---------------------------------------------------------------------------
 # THE WINDOW
@@ -217,11 +218,15 @@ awk -v require="$require" -v label="$label" '
 		tier_off = 0
 		sigrev_dev = ""
 		sigrev_adm = ""
-		# -account-service is published into the signed cold-start directory and
-		# announced nowhere, so it is UNREAD in every window, on every build. Stated
-		# once, here, so the row carries its reason rather than looking like a gap in
-		# this window.
-		set_state("account-service", "UNKNOWN", "cmd/coordinator states nothing about -account-service at startup, so no journal can answer this (issue #260). Read the effective ExecStart the pin prints.")
+		# -account-service is answered by a line of its own below (issue #260), and
+		# this is what the row says when that line does not arrive: a coordinator
+		# built before #260 publishes into the signed directory and announces
+		# nothing, so its window cannot answer this and no amount of widening will.
+		# Stated here rather than left an empty UNREAD, the same way the
+		# revocation-lists row names issue #226 when there is no `paths:` block,
+		# because a pinned fleet runs a wave behind for a while and "this binary is
+		# too old" is a different instruction from "look again".
+		set_state("account-service", "UNKNOWN", "no `account service:` line after the last coordinator start — this coordinator predates issue #260, or this capture was cut short of it. Re-pin the box, or read the effective ExecStart the pin prints.")
 		next
 	}
 
@@ -267,6 +272,34 @@ awk -v require="$require" -v label="$label" '
 	}
 	index($0, "signed policy ENABLED") > 0 {
 		set_state("policy", "on", "past exp+grace this coordinator STOPS assigning new work — the one gate here that fails CLOSED")
+		next
+	}
+
+	# -account-service (issues #193, #260). This one is a publication into the signed
+	# cold-start directory rather than a gate on a connect, and it is on this report
+	# because #209 has no address to follow unless something was published — the
+	# journal is the only place a box says so.
+	#
+	# Both spellings cmd/coordinator prints begin `account service: `, so the prefix
+	# answers whether this window said anything at all and the tail says which state
+	# it is. THREE outcomes, not two: a tail this reader does not recognize stays
+	# UNKNOWN instead of falling into the on branch. The Go/shell pair here is the one
+	# ADR-0069 §4 names as the one that drifts silently, and this row is read by a
+	# person deciding whether an owner test passed — reporting a line nobody parsed as
+	# "enforcing" is the one answer worse than admitting the row cannot be read.
+	#
+	# The tail is echoed as the note because that line carries a COUNT and never the
+	# addresses, which cmd/coordinator.TestAccountServicePublicationLineFormat holds;
+	# a line that grew an address would have to become a constructed note here, for
+	# the reason the audience of the device gate is not echoed above.
+	(p = index($0, "account service: ")) > 0 {
+		tail = substr($0, p + 17)
+		if (index(tail, "NONE published") == 1)
+			set_state("account-service", "OFF", "no address is published, so every client stays on the address in its own configuration (issue #193)")
+		else if (index(tail, "address(es) published") > 0)
+			set_state("account-service", "on", tail)
+		else
+			set_state("account-service", "UNKNOWN", "this window carries an `account service:` line in a shape this script does not parse, so cmd/coordinator and this reader have drifted apart (issue #260, ADR-0069 §4). Read the line itself.")
 		next
 	}
 
