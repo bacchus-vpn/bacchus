@@ -144,6 +144,66 @@ fact about the coordinator's configuration, not about the credential.
 4. **Subject binding** — for a node (`subject != ""`), the credential's subject
    must equal the id presenting it.
 
+## The check is offline, and that is what the privacy claim rests on
+
+Every step above is arithmetic over bytes the peer sent and keys this
+coordinator was started with. Nothing in `register`, `list`, `challenge` or
+`connect` asks anything anywhere:
+
+| Coordinator function | resolves to | held root |
+|---|---|---|
+| `admit` (`admission.go`) | `admission.Verifier.Verify` | `-admission-pubkey` / `-admission-authority` |
+| `admitDevice` (`devicecred.go`) | `devicecred.Verifier.Verify` | `-device-root-pubkey` |
+| `resolveTier` (`tier.go`) | `policy.Policy.Limits` | `-policy-root-pubkey` |
+
+This matters beyond tidiness. The account service is the only component that
+ever sees an account, and the public privacy statement's strongest sentence —
+that the network cannot link your connections to your account — is true only if
+the coordinator never asks it anything at connect time. A coordinator that
+called out per connect would hand that service a stream of *this account, now*,
+which is the linkage the whole split exists to prevent, and it would do so
+whatever the answer was.
+
+**The strong form.** `core/admission`, `core/devicecred` and `core/policy` have
+no `net` anywhere in their transitive dependency graphs. An outbound call is not
+merely absent from them; it is not expressible in them. That is a proof rather
+than an audit, and it is what
+`cmd/coordinator/connect_path_offline_test.go`'s `TestConnectPathVerificationCannotDial`
+asserts — with a control proving the same measurement finds `net` in the
+coordinator's own graph, where it obviously belongs.
+
+**No route to the account service.** The coordinator holds account-service
+*addresses* (`-account-service`, published in the signed cold-start directory —
+see `accountservice.go`), because the desktop client has no other channel for
+learning that the service moved. Holding an address is not having a route.
+`core/accountclient` is the one package in this repository that speaks that
+service's protocol, and it is not linked into the coordinator binary
+(`TestCoordinatorHoldsNoAccountServiceClient`, with the control that
+`accountclient` really does carry a network stack, so the assertion keeps
+meaning something).
+
+**What is *not* claimed.** The coordinator process does make outbound calls: it
+holds an `http.Client` in `httpPolicySource` and two background loops
+(`refreshPolicyLoop`, `refreshRevocationsLoop`) use it to pull the signed policy
+and revocation bundles from an operator-configured `-policy-source`. Those run
+on tickers, carry no client identity, are not the account service, and are not
+reachable from `handle()` at all — the source is a parameter of the refresh
+goroutine, never a package-level value a handler could see. The claim is about
+the connect path and about that one service; stating it narrowly is what makes
+it checkable.
+
+**And the gate is still reached.** Structural absence says nothing about
+whether the check still runs, so
+`TestRegisterListConnectDecidedFromTheHeldRootKeyAlone` drives real `register`,
+`list` and `connect` datagrams through `handle()` against an admission root
+generated microseconds earlier — one no service anywhere has heard of — on a
+coordinator with no account service configured, and asserts all six outcomes:
+admitted for a valid credential, refused for an expired one (the local clock),
+refused for one signed by an unanchored authority (the held key). Between them,
+signature and expiry, which is the whole of the check.
+
+This settles claim 1 of `bacchus-vpn/bacchus-payment#98`.
+
 ## Subject binding: nodes vs clients
 
 The asymmetry is the subtlest part of the design.

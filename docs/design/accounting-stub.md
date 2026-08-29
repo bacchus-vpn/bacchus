@@ -112,6 +112,55 @@ database: the current stack is Go binaries + systemd (see the workspace
 guide), and a receipt history is exactly the kind of small, append-only
 record a flat file suits until that changes.
 
+## What a receipt discloses, and why the client's key is fresh every session
+
+A receipt is not a private record. The exit journals its copy, and that journal
+is what reaches the account service's host at payout — so every field on a
+`Receipt` is disclosed to the one party the account model works hardest to keep
+from assembling a per-user profile. The payout model on that side states the
+consequence as "receipts carry no user identity", and the public privacy
+statement leans on it.
+
+That claim is true, and it is true for exactly one reason: **`ClientAcctPub` is
+generated fresh for every session.** It is not an absence — a receipt *does*
+carry an `ed25519` public key belonging to the client, right next to
+`SessionID`, `Bytes` and `ExitID`. The claim survives on the key's lifetime
+instead.
+
+The generation site is `Engine.startAccounting` (`core/accounting.go`), which
+calls `ed25519.GenerateKey(rand.Reader)` and passes the result to
+`runClientAccounting` as an argument. The key reaches no `Engine` field, is not
+written to any file, and is unreachable once that goroutine returns.
+`Engine.connectVia` calls `startAccounting` once per established
+direct-disposition path, so one session gets one key and the next gets another —
+including across a reconnect, which mints a new one rather than resuming.
+
+Read the caller, not the comment: `runClientAccounting` takes the key as a
+*parameter*, so its own doc line about freshness is a statement about a value it
+was handed and cannot vouch for. This section, `Receipt`'s doc comment and
+`core/accounting_client_key_test.go` all point at `startAccounting` for that
+reason.
+
+**What would break if it were stable.** Every journal on the account-service
+host would hold a persistent per-client identifier beside a session id and a
+byte count. Nobody would have filed those as user records, and they would be
+one join away from a complete history of when a user connected and how much
+they moved — the profile `account-model.md` §2 exists to prevent, assembled out
+of files nobody thought of as records.
+
+**Two consequences worth stating.** The coordinator puts
+`hex(Receipt.ClientAcctPub)` into a capacity sample as `Attester`
+(`cmd/coordinator/capacity_feed.go`), to cap how much one attester can move a
+node's rating. That is harmless for privacy *because* the key is per-session —
+and it also means the attester cap is per-session rather than per-client, so the
+real Sybil cost there is the AS bound beside it, not this field.
+
+The exit's key is the mirror image and stable on purpose: an exit is the metered
+party a receipt must be attributable to across sessions (`AcctKeyFromSeed`,
+ADR-0075). The two keys are asymmetric because the two parties are.
+
+This settles claim 2 of `bacchus-vpn/bacchus-payment#98`.
+
 ## Configuration
 
 `Config.AcctDir` (`-acct-dir`) gates the entire feature: empty disables it
@@ -138,6 +187,21 @@ client-side periodic loop — ticker, `OpenStream`, handshake, cosign, persist �
 runs correctly against a fake exit built from the existing `loopbackTransport`
 test harness (`transport_test.go`), with no real WebRTC or coordinator
 needed, consistent with how the rest of `core` is tested.
+
+The per-session key property above is pinned separately, because a doc line
+near a seam is not evidence of the seam's semantics.
+`core/accounting_client_key_test.go` runs **two** real accounting round trips
+over two sessions on one client engine and compares the key on the receipts
+that come out — so it measures the observable property rather than the
+variable, and a `startAccounting` that cached its keypair for a plausible
+reason would still satisfy every doc comment in the package and fail there. It
+also checks the accounting key is never the *device* key (stable by design, and
+the most likely shape of the mistake), and enumerates `Engine`'s `ed25519`
+private-key fields so a new place for a client identity to live is reported
+rather than acquired. `core/accounting/receipt_surface_test.go` pins the field
+list the whole argument is made about: a field added to `Receipt` later would
+otherwise be covered by no test and by no sentence anywhere, and would simply
+start appearing in journals.
 
 ## Follow-ups (not this issue)
 
