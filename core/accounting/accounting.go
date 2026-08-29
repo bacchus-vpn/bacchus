@@ -49,11 +49,22 @@ var ErrMismatch = errors.New("accounting: client and exit byte counts do not agr
 //
 // ExitAcctPub is not itself proven to belong to ExitID beyond having arrived
 // over a connection already authenticated as ExitID by the Noise_NK handshake
-// in core/e2e.go (trust-on-first-use within that connection); ClientAcctPub is
-// a fresh keypair the client generates per session, not a persistent
-// identity, so receipts from different sessions cannot be linked to the same
-// client. Both are stub-appropriate simplifications, not load-bearing
-// security properties -- see the package doc.
+// in core/e2e.go (trust-on-first-use within that connection). That is a
+// stub-appropriate simplification and not a load-bearing security property --
+// see the package doc.
+//
+// ClientAcctPub is not in the same category, and used to be described as though
+// it were. It is a fresh keypair the client generates per session -- minted in
+// core.Engine.startAccounting by ed25519.GenerateKey and passed to the
+// accounting goroutine as an argument, so it reaches no field and does not
+// outlive the session -- which is what makes receipts from different sessions
+// unlinkable to one client. That IS load-bearing: the exit's journal of these
+// receipts is what reaches the account-service host at payout, so a client key
+// stable across sessions would put a persistent per-user identifier next to a
+// session id and a byte count, which is the profile the account model exists to
+// prevent and which the public privacy statement says does not exist
+// (bacchus-payment#98 claim 2). Pinned by core/accounting_client_key_test.go,
+// and the field list it depends on by receipt_surface_test.go here.
 type Receipt struct {
 	SessionID     string            `json:"sessionId"`
 	Seq           uint64            `json:"seq"`
