@@ -96,6 +96,14 @@ func main() {
 	showVersion := flag.Bool("version", false,
 		"print this build's release version and quit. Reaches no coordinator and opens no port, so it answers "+
 			"\"which node is installed here\" without a connect attempt (issue #263).")
+	printAcctPubkey := flag.Bool("print-acct-pubkey", false,
+		"print the node id and the accounting public key this exit's usage receipts are signed with, and quit "+
+			"(issue #271). Requires -exit-key and nothing else: it reaches no coordinator, opens no port and "+
+			"writes no file. The accounting key is derived from that key's PRIVATE half, so it appears in no "+
+			"snapshot, credential or log line and cannot be computed from anything published — an operator "+
+			"pairing a payable node id to the key it signs with has to carry these two values off the box by "+
+			"hand, once per node, and this is where they come from. Receipts only exist at all on a node "+
+			"serving as an exit with -acct-dir set.")
 	flag.Parse()
 
 	// The release, before anything that can fail — bacchus-netd's shape and
@@ -119,6 +127,25 @@ func main() {
 	// same assertion, whichever way each is exempted.
 	if *showVersion {
 		fmt.Println(version.Current())
+		return
+	}
+
+	// The accounting identity (issue #271), in the position -version just argued
+	// for and for the same reason: this is the FOURTH one-shot this binary has
+	// grown, and extending the predicate below to three entries is the maintenance
+	// #240 said somebody would eventually skip. A one-shot that returns before the
+	// watchdog runs cannot inherit the bug rather than being exempted from it.
+	//
+	// It also wants nothing from anything below this point — no engine, no
+	// coordinator, no writable directory, not even the resolved role set, since an
+	// exit's node id IS its X25519 public key however the role was arrived at (see
+	// core.New; the exit role overrides -id, which is why the value printed here is
+	// the only one worth putting in a roster). An operator asking a box what key it
+	// signs with should not have to satisfy a serving configuration first.
+	if *printAcctPubkey {
+		if err := printAcctIdentity(os.Stdout, *exitKey); err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 

@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bacchus-vpn/bacchus/core/accounting"
@@ -81,6 +84,62 @@ func setupAccounting(cfg Config, roles map[string]bool, exitKey noise.DHKey) (ac
 		clientStore = s
 	}
 	return acctKey, exitStore, clientStore, nil
+}
+
+// ExitAcctIdentity derives, from an exit's configured X25519 private key, the two
+// values that have to be paired off-box before any receipt that node mints can be
+// attributed to it: the node id it publishes and stamps into every receipt's
+// ExitID, and the Ed25519 accounting public key those receipts are signed by
+// (Receipt.ExitAcctPub).
+//
+// # Why a receipt cannot supply this itself
+//
+// Receipt.canonical covers (session, seq, interval, bytes, exit id) and NO public
+// key, so Receipt.Verify checks both signatures against the two keys the receipt
+// carries for itself: two fresh keypairs and any exit id produce a receipt that
+// verifies perfectly. Verification is therefore necessary and not attributing.
+// What attributes a receipt is an operator-maintained pairing of node id to
+// accounting key, and the key half of that pairing is not derivable from anything
+// published — accounting.AcctKeyFromSeed hashes the PRIVATE scalar, so no
+// snapshot, admission credential or receipt yields what a given node's key ought
+// to be. It has to be carried out of band, once per node, which is what this
+// function exists to make possible.
+//
+// # Why it re-derives rather than reading a constructed Engine
+//
+// Both halves are computed the way New computes them — exitStaticKey for the
+// keypair, hex of the public half for the id, AcctKeyFromSeed(private) for the
+// accounting key — rather than by building an Engine and reading acctKey and
+// cfg.ID off it. An Engine needs an advertise address, a coordinator and a
+// writable AcctDir before it exists, and an operator asking a box what key it
+// signs with should not have to satisfy any of that. The repetition is held
+// honest by a test that runs a REAL accounting round trip against a real engine
+// and compares the receipt that comes out (core/accounting_identity_test.go); if
+// New's derivation ever moves, that test fails rather than this function quietly
+// answering for a node that no longer exists.
+//
+// # An absent key is refused, not generated
+//
+// exitStaticKey mints a fresh keypair when handed an empty string, which is right
+// for the throwaway lab exit that behaviour exists for and worthless here: the
+// pair printed would belong to an identity this process discards when it returns,
+// and would be indistinguishable from a usable one. A node whose identity is
+// generated at startup has no stable accounting identity to publish, and saying so
+// is the only honest answer.
+func ExitAcctIdentity(exitKeyHex string) (nodeID string, acctPub ed25519.PublicKey, err error) {
+	if strings.TrimSpace(exitKeyHex) == "" {
+		return "", nil, errors.New("core: an accounting identity needs a persistent exit key (Config.ExitKeyHex, -exit-key): " +
+			"a node with none generates a fresh one every start, so there is no stable id or key to publish")
+	}
+	k, err := exitStaticKey(exitKeyHex)
+	if err != nil {
+		return "", nil, err
+	}
+	acct, err := accounting.AcctKeyFromSeed(k.Private)
+	if err != nil {
+		return "", nil, fmt.Errorf("core: accounting key: %w", err)
+	}
+	return hex.EncodeToString(k.Public), acct.Public().(ed25519.PublicKey), nil
 }
 
 // acctCounter returns the byte counter for sid, creating it on first use.
