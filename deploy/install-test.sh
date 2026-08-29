@@ -59,8 +59,8 @@ set -eu
 # `checks` is stable across hosts because a case that cannot run on this one
 # calls skip(), which counts. The only such case today is the user+mount
 # namespace one at the bottom.
-expected_cases=29
-expected_checks=146
+expected_cases=30
+expected_checks=151
 
 failures=0
 checks=0
@@ -192,6 +192,7 @@ a container booted with systemd as PID 1), as root:
   sh deploy/install.sh node --role exit --binaries /path/to/staged
   # edit /etc/bacchus/node.env, then re-run the same command
   systemctl status bacchus-exit                  # active
+  sh deploy/bacchus-key-inventory.sh --role exit # 0, and nothing unaccounted for
   sh deploy/install.sh uninstall node --purge
 EOF
 }
@@ -526,6 +527,50 @@ sed -i 's/YOUR_VPS_PUBLIC_IP/198\.51\.100\.7/; s/YOUR_COORDINATOR_HOST/198\.51\.
 : >"$calls"
 expect_ok node --role exit --binaries "$bins"
 assert_called 'systemctl enable --now bacchus-exit'
+
+# The one end-to-end tie between the installer and the key inventory (issues #251,
+# #227), and it is here rather than in deploy/key_inventory_test.go because this is the
+# only place in the repository where a real /etc/bacchus gets written by the thing that
+# writes real ones. Everything the Go tests do is against a fixture somebody typed, and
+# a fixture agrees with whatever the script expects by construction.
+#
+# Two directions. A box the installer has just finished with must come out CLEAN: if it
+# does not, the installer has started writing something the manifest does not name, and
+# the alternative to catching that here is every real box reporting a finding forever.
+# And the #227 pattern, made on purpose out of the file the installer itself warns
+# about, must come out as a finding — against a key that was generated on this host and
+# that nothing has ever printed.
+case_start 'node/exit: the box the installer just wrote is fully accounted for, and a .save beside it is not'
+new_stage inventory
+expect_ok node --role exit --binaries "$bins"
+
+inv=$work/inventory.log
+inventory() {
+	set +e
+	sh "$here/bacchus-key-inventory.sh" --role exit --dir "$stage/etc/bacchus" >"$inv" 2>&1
+	invrc=$?
+	set -e
+}
+
+inventory
+if [ "$invrc" -eq 0 ]; then
+	ok 'a freshly installed exit box holds nothing this deployment cannot account for'
+else
+	bad "bacchus-key-inventory.sh exited $invrc on a box install.sh had just finished writing:"
+	sed 's/^/        | /' "$inv"
+fi
+
+cp "$stage/etc/bacchus/node.env" "$stage/etc/bacchus/node.env.save"
+inventory
+if [ "$invrc" -eq 1 ]; then
+	ok 'a .save beside the live env file is a finding, not a clean run'
+else
+	bad "a duplicated EXIT_KEY exited $invrc, wanted 1:"
+	sed 's/^/        | /' "$inv"
+fi
+assert_grep "$inv" 'EXIT_KEY  in 2 files' 'the report names the variable that exists twice and the two files holding it'
+assert_not_grep "$inv" "$(sed -n 's/^EXIT_KEY=//p' "$stage/etc/bacchus/node.env")" \
+	'the key generated on this host is not in the report that found it duplicated'
 
 case_start 'node: uninstall keeps the identity unless asked to purge'
 : >"$calls"
