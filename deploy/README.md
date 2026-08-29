@@ -270,7 +270,74 @@ the **same** `TURN_PASS`. On the new box:
    an exit is registered, healthy, and **unreachable** — a country is the only
    thing a client can ask for.
 
-Each exit needs its **own** persistent `EXIT_KEY`.
+Each exit needs its **own** persistent `EXIT_KEY`, and **one copy of it** — see the
+next section, which is the rule that applies to every box rather than only to a new
+one.
+
+## What a box holds, and the ONE copy per node rule (issues #227, #251)
+
+Two rules, and a script that reads a box against both.
+
+**A node's key lives in `/etc/bacchus/node.env` and there is exactly ONE copy of it on
+that box.** `EXIT_KEY` is an X25519 private key *and* an identity — the node's id is its
+public half — so a second copy is a second private key with none of the attention the
+live one gets. It is not rotated when the live one is, not removed when the box is
+decommissioned, and in no inventory. The way it happens is ordinary (a `.save`, a
+`.bak`, a copy taken before an edit) and so is the way it bites: a file whose *name*
+says restore me is one restore away from reinstating an identity the signed directory
+does not name, after which the node goes quietly unreachable as a hop rather than
+failing loudly. Edit that file in place; if you want the identity to survive a rebuild,
+put the backup somewhere that **is not this machine**.
+[node.env.example](node.env.example) says the same thing where the key is set, and
+`install.sh` says it after provisioning an exit.
+
+**A box holds what its role names, and anything else is visible rather than
+discovered.** Issue #251 found an operator CA private key, an admission authority key
+and an account-service TLS identity on an exit box — inert, used by nothing, recorded
+nowhere, and found only because somebody listed the directory for an unrelated reason.
+Key material with no lifecycle is the same defect as the second copy, one level up.
+
+`bacchus-key-inventory.sh` answers both. It runs **on the box**, because the questions
+are about files:
+
+```bash
+# it needs to read /etc/bacchus, which is mode 0700
+ssh <box> "sudo sh -s -- --role exit --label 1" < bacchus-key-inventory.sh
+```
+
+It lists what is there, marks each entry against what that role's units, templates and
+flag defaults name, and reports what is left over. It **changes nothing**: whether a
+second copy is a spare of the live key or a *previous* identity decides what should
+happen to it, and that is the operator's call.
+
+- A leftover exits **1**, and so does a secret that exists in more than one file. What
+  could not be read exits **4** — a directory that was half looked at is not a clean
+  one (issue #248), and an unprivileged run sees every name and no contents, so a
+  duplicated key is invisible from it. `0` is a box that is fully accounted for.
+- `--expect NAME` declares material this box is *supposed* to hold, so it stops being a
+  finding. Record it somewhere as well; that is what #251 asks for, and a run that is
+  red forever is a run nobody makes.
+- **"Are these the same key?" is answered without printing either key** — or either
+  digest. Issue #227's recipe hashes both files and has a person compare the two by
+  eye; this compares them in process and prints only the verdict, which is strictly
+  less to leak. What it prints is **paths**: no key, no address, no hostname. Like
+  `bacchus-fleet-check.sh` and `bacchus-gate-check.sh` and unlike `bacchus-pin.sh`, its
+  output is the half of a run that is safe to paste into a public issue — which is why
+  `--label` is an ordinal and a host-shaped one is refused.
+
+What it deliberately does **not** offer is a way to compare two boxes, because that
+needs no digest to travel: an exit's id is its public key, it is in the signed
+directory, and two boxes sharing a key register as one id — which `bacchus-fleet-check.sh`
+and `bacchus-node-id.sh` (both under [Update a binary](#update-a-binary)) already
+show you.
+
+The manifest it judges against is not a list somebody typed once — `key_inventory_test.go`
+reads the `/etc/bacchus` paths out of the two `.service` files,
+[coordinator-gates.env.example](coordinator-gates.env.example) and `cmd/coordinator`'s
+own `secrets/…` flag defaults, and fails the build if any of them is missing from it. A
+file the deployment learns to write and the script does not know about would otherwise
+be a finding on every box forever, and a finding that is always there is one an operator
+learns to scroll past.
 
 Since issue #136 the coordinator **derives** each node's country from the source
 address it observes the node register from, using a local GeoIP database
