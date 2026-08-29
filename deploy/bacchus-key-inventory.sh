@@ -111,11 +111,16 @@ usage() {
 	printf '       ssh <box> "sudo sh -s -- --role exit" < deploy/bacchus-key-inventory.sh\n' >&2
 	printf '\nLists what a box holds under /etc/bacchus and flags what the deployment cannot\n' >&2
 	printf 'account for. It prints paths, never contents: no key, no address, no hostname.\n' >&2
-	printf '\n--role    which node this box is. Repeatable, or comma separated.\n' >&2
-	printf '--dir     the directory to inventory. Default /etc/bacchus.\n' >&2
-	printf '--expect  paths this box is SUPPOSED to hold, spelled as the report names them,\n' >&2
-	printf '          so they stop being findings. Record them somewhere too — #251.\n' >&2
-	printf '--label   which box this report came from. An ordinal, never a host.\n' >&2
+	# Through %s rather than as a format: a format string beginning with a dash is a
+	# printf OPTION in some shells and undefined in POSIX sh, which shellcheck reports
+	# as SC3045 and which is the kind of thing that works everywhere it was tried.
+	printf '\n' >&2
+	printf '%s\n' \
+		'--role    which node this box is. Repeatable, or comma separated.' \
+		'--dir     the directory to inventory. Default /etc/bacchus.' \
+		'--expect  paths this box is SUPPOSED to hold, spelled as the report names them,' \
+		'          so they stop being findings. Record them somewhere too — #251.' \
+		'--label   which box this report came from. An ordinal, never a host.' >&2
 	printf '\nExit: 0 everything is accounted for · 1 a finding · 2 usage\n' >&2
 	printf '      3 the directory could not be listed · 4 something could not be read\n' >&2
 }
@@ -191,7 +196,7 @@ if [ -z "$(printf '%s' "$roles" | tr -d ' ')" ]; then
 	printf '%s: --role is required.\n' "$self" >&2
 	printf '  What a box is SUPPOSED to hold is a function of what it runs, and a role\n' >&2
 	printf '  inferred from what is on disk would be inferred from the leftovers this\n' >&2
-	printf '  script exists to find. Say `--role exit` or `--role coordinator`.\n' >&2
+	printf '  script exists to find. Say --role exit, or --role coordinator.\n' >&2
 	exit 2
 fi
 
@@ -201,7 +206,7 @@ for r in $roles; do
 	*)
 		printf '%s: %s is not a role this knows.\n' "$self" "$r" >&2
 		printf '%s\n' '  Known: exit coordinator. A relay box runs the same binary and the same' >&2
-		printf '%s\n' '  node.env as an exit — `--role exit` is its inventory too.' >&2
+		printf '%s\n' '  node.env as an exit — --role exit is its inventory too.' >&2
 		exit 2
 		;;
 	esac
@@ -230,7 +235,7 @@ for e in $expect; do
 	/* | ../* | */../* | */.. | *@* | *:*)
 		printf '%s: --expect %s is not a path this report can produce.\n' "$self" "$e" >&2
 		printf '  Declare it exactly as the report names it: relative to the inventoried\n' >&2
-		printf '  directory, with no leading / and no `..`, and with no @ or : in it.\n' >&2
+		printf '  directory, with no leading / and no .. in it, and with no @ or :.\n' >&2
 		exit 2
 		;;
 	esac
