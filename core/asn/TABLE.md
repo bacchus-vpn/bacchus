@@ -13,9 +13,9 @@ record that has to sit beside the bytes.
 | Publisher | iptoasn.com |
 | URL | `https://iptoasn.com/data/ip2asn-combined.tsv.gz` |
 | Licence | **PDDL v1.0** (Open Data Commons Public Domain Dedication and Licence) |
-| Retrieved | 2026-07-29 |
-| Upstream SHA-256 | `c0cdfbec3431d04ba32c83a0e3a6f25b4698daf870651f52ab7c25027032992f` |
-| Staged SHA-256 | `ce0f9a083a0c435a9b4bd3e53703229bb9c749dcf93c72b399ff8a1d9397f949` |
+| Retrieved | 2026-09-04 |
+| Upstream SHA-256 | `44cb3808e3072767c5a0b2f2e1b8fcde3e3d09eed6399933e4feb7566ce23d21` |
+| Staged SHA-256 | `74c3f1483c36e18873bf2bdd4693d5ed4552a925423105dac2e82e6daf46fb9e` |
 
 Upstream rebuilds hourly, so the URL is not a stable artifact and the upstream hash
 pins **the snapshot this table was built from**, not something re-downloadable. The
@@ -62,10 +62,10 @@ genuinely adjacent same-AS runs, and splits what remains into aligned CIDR block
 
 | | |
 |---|---|
-| Rows | 700,442 (550,049 IPv4 + 150,393 IPv6) |
-| Distinct ASNs | 86,612 |
-| Uncompressed | 15.48 MB |
-| **Committed (gzip)** | **3.14 MB** |
+| Rows | 706,040 (555,166 IPv4 + 150,874 IPv6) |
+| Distinct ASNs | 86,922 |
+| Uncompressed | 15.60 MB |
+| **Committed (gzip)** | **3.16 MB** |
 | Parse cost | ~190 ms, ~28 MB heap, once per process, lazily |
 | Lookup cost | ~113 ns |
 
