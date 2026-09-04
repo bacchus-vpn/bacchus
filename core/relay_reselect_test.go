@@ -2,7 +2,7 @@ package core
 
 import "testing"
 
-// onRelayReselect is the client half of issue #96: a coordinator "reselect" push —
+// onRelayReselect is the client half of old #96: a coordinator "reselect" push —
 // the peer relay carrying this client's single-transport session has died — closes
 // the active session so reconnectLoop re-establishes onto a fresh relay or the TURN
 // fallback. It is scoped to the live session id so a stale nudge (for a path the

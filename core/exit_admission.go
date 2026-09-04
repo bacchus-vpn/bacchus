@@ -12,19 +12,19 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/admission"
 )
 
-// Client-side end-to-end admission verification (issue #60). Node admission
-// (#42, ADR-0023) is enforced only at the coordinator: an honest coordinator
+// Client-side end-to-end admission verification (old #60). Node admission
+// (old #42, ADR-0023) is enforced only at the coordinator: an honest coordinator
 // refuses to advertise an exit without a valid credential. But Noise_NK
 // (core/e2e.go, ADR-0009) only proves "this peer holds the id you asked for",
 // not "this id is admission-authorized" — so a hostile or compromised
-// coordinator (explicitly in docs/threat-model.md, and with the #6 coordinator
+// coordinator (explicitly in docs/threat-model.md, and with the old #6 coordinator
 // pool a client already rotates across members any one of which could be
 // hostile) can advertise a hostile exit whose id it legitimately controls,
 // complete Noise_NK, and route the client's traffic through it. This file closes
 // that gap: the exit presents its admission credential inside the Noise_NK
 // exchange and the client verifies it end-to-end against the admission root,
 // rejecting an exit the root never authorized even when a dishonest coordinator
-// vouched for it. #42 makes an honest coordinator reject hostile exits; this
+// vouched for it. Old #42 makes an honest coordinator reject hostile exits; this
 // makes a client reject them even via a dishonest coordinator — defense in depth.
 
 // errMissingExitCredential is returned when a client that requires admission (it
@@ -34,13 +34,13 @@ import (
 var errMissingExitCredential = errors.New("core: exit presented no admission credential")
 
 // buildExitVerifier constructs the client-side admission verifier from the
-// configured admission root public key (issue #60) and an optional signed
-// revocation bundle (issue #69, core/admission.CRL), sourced either as inline
+// configured admission root public key (old #60) and an optional signed
+// revocation bundle (old #69, core/admission.CRL), sourced either as inline
 // content (crlEncoded) or a file path re-read on an interval (crlPath, issue
-// #90) — at most one of the two may be set. An empty key returns a nil
+// old #90) — at most one of the two may be set. An empty key returns a nil
 // verifier and a nil ClientCRL: the client does not verify exit credentials
 // and accepts any exit it can complete Noise_NK with (fail-open, matching the
-// coordinator's behavior when -admission-pubkey is unset, #42). A malformed
+// coordinator's behavior when -admission-pubkey is unset, old #42). A malformed
 // key is a construction error — a client told to verify against an unusable
 // key must not silently fall through to trusting every exit.
 //
@@ -53,9 +53,9 @@ var errMissingExitCredential = errors.New("core: exit presented no admission cre
 // checking on must not have it silently degrade to "nothing is revoked" on a
 // stale or corrupt bundle.
 //
-// Leaving both CRL sources empty (anchor-only, matching #60 v1) keeps
+// Leaving both CRL sources empty (anchor-only, matching old #60 v1) keeps
 // today's fail-open-on-revocation behavior — every serial reports
-// not-revoked — unless requireCRL is set (issue #91), in which case that
+// not-revoked — unless requireCRL is set (old #91), in which case that
 // specific combination becomes a construction error too: an operator who
 // opted into requiring a CRL must not have a hostile coordinator strip one
 // from a coldstart invite and silently fall back to fail-open. requireCRL
@@ -131,7 +131,7 @@ func readCRLFile(path string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-// verifyExitCredential is the client-side admission predicate (issue #60): given
+// verifyExitCredential is the client-side admission predicate (old #60): given
 // the admission verifier, the exit static public key the Noise_NK handshake just
 // authenticated, and the credential bytes the exit presented in that handshake,
 // it decides whether to route through the exit. It admits only when the
@@ -189,7 +189,7 @@ var errUnboundExitKey = errors.New("core: exit admission check reached with no e
 // exit this particular handshake is against — and the wall clock.
 //
 // exitPub is a PARAMETER rather than engine state, and that is load-bearing under
-// country-only assignment (issue #146). The client no longer selects one exit for the
+// country-only assignment (old #146). The client no longer selects one exit for the
 // engine's lifetime: the coordinator chooses, per session, and may choose differently
 // on any reconnect or reselection. A callback closing over engine state would verify
 // the presented credential against whichever exit was current when the engine was
@@ -306,7 +306,7 @@ func hopVerifyFunc(v *admission.Verifier, hopPub []byte) func(cred []byte) error
 }
 
 // admissionCRLReloadInterval is the default cadence reloadCRLLoop re-reads
-// Config.AdmissionCRLPath at (issue #90), mirroring cmd/coordinator's own
+// Config.AdmissionCRLPath at (old #90), mirroring cmd/coordinator's own
 // admission.reloadRevocationsLoop. CRLs are minted short-lived by design
 // (cmd/admission-issue -crl-ttl defaults to 24h) so a revoked credential is
 // cut off within one distribution cycle even if a client never reloaded; this
@@ -318,7 +318,7 @@ const admissionCRLReloadInterval = 5 * time.Minute
 // reloadCRLLoop re-reads Config.AdmissionCRLPath on an interval and, when it
 // parses, verifies, and is unexpired, swaps it into e.clientCRL — so a
 // long-lived client picks up an operator's newly rotated revocation bundle
-// without a restart (issue #90), the client-side mirror of
+// without a restart (old #90), the client-side mirror of
 // cmd/coordinator's reloadRevocationsLoop. Runs only when a path is
 // configured (e.clientCRL != nil and cfg.AdmissionCRLPath != "", checked by
 // the caller) and only for the client role, since exitVerifier is read

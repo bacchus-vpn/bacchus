@@ -150,7 +150,7 @@ type Entry struct {
 // signed artifact's schema — cmd/coordinator holds an identical set of unexported
 // constants because that binary deliberately does not import core (see its wire doc),
 // and TestCountrySourceWireContract on each side pins the two copies against each
-// other, exactly as TestQuotaStateWireContract does for the quota literals (#97).
+// other, exactly as TestQuotaStateWireContract does for the quota literals (old #97).
 const (
 	// CountryObserved: the coordinator resolved the country from the address it
 	// observed the node register from, and — for an exit — the data-plane endpoint the

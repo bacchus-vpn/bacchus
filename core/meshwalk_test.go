@@ -11,7 +11,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 )
 
-// This file covers the client half of mesh-walk recovery (issue #31, design §4.3):
+// This file covers the client half of mesh-walk recovery (old #31, design §4.3):
 // when every coordinator is unreachable, the client walks known peer couriers for a
 // fresh coordinator-signed directory instead of failing cold. The courier mechanism
 // itself is proven in core/coldstart; here we drive the Engine.MeshWalk strategy and
@@ -25,7 +25,7 @@ func newMeshWalkClient(t *testing.T) *Engine {
 		Coordinators: []string{"127.0.0.1:1"}, // never dialed: MeshWalk does not touch links
 		Roles:        []string{RoleClient},
 		SocksAddr:    "127.0.0.1:0",
-		Geo:          "NL", // a connect names a country, not an exit (issue #146)
+		Geo:          "NL", // a connect names a country, not an exit (old #146)
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

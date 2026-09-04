@@ -339,7 +339,7 @@ func (s *pipeSession) Closed() <-chan struct{} { return nil }
 func (s *pipeSession) Close() error            { return nil }
 
 // TestHandleSocksUDPAssociateRoundTrip drives the whole client-core-side path
-// (issue #41): a manually-driven RFC 1928 SOCKS5 UDP ASSOCIATE handshake
+// (old #41): a manually-driven RFC 1928 SOCKS5 UDP ASSOCIATE handshake
 // (standing in for clients/internal/enforcement/udprelay.go's dialSOCKSUDPAssociate, which
 // lives in a separate package and is tested on its own there) against
 // handleSocksUDPAssociate, which in turn opens a real E2E channel to an exit
@@ -473,7 +473,7 @@ func echoUDPCapture(t *testing.T) (addr *net.UDPAddr, received chan []byte) {
 }
 
 // TestHandleSocksUDPAssociateDropsCrossDestinationDatagram proves the
-// one-destination-per-association invariant (issue #99): once an
+// one-destination-per-association invariant (old #99): once an
 // association's destination is fixed by its first datagram (here, echoA), a
 // later datagram on the same association naming a *different* destination
 // (echoB) must be dropped — not silently forwarded to the association's
@@ -574,7 +574,7 @@ func TestHandleSocksUDPAssociateDropsCrossDestinationDatagram(t *testing.T) {
 
 // failingSession is a Session whose OpenStream always fails — standing in
 // for a tunnel that can't be reached (the underlying transport/exit session
-// is down), to drive serveSOCKSUDPAssociate's fail-closed path (issue #99).
+// is down), to drive serveSOCKSUDPAssociate's fail-closed path (old #99).
 // opened signals every OpenStream attempt, so a test can distinguish "never
 // even tried to open the tunnel" (which would make a negative assertion pass
 // vacuously) from "tried, and correctly didn't fall back to anything else."
@@ -602,7 +602,7 @@ func (s *failingSession) Close() error            { return nil }
 
 // TestServeSOCKSUDPAssociateDropsWhenTunnelUnreachable is the core-side
 // counterpart to clients/internal/enforcement/udprelay_test.go's
-// TestHandleGeneralUDPDropsWhenTunnelUnreachable (issue #99): when the
+// TestHandleGeneralUDPDropsWhenTunnelUnreachable (old #99): when the
 // tunnel itself can't be reached (sess.OpenStream fails — the transport
 // session to the exit is down), the client's datagram must be dropped, never
 // relayed anywhere else — in particular, never dialed directly to its

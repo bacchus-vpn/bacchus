@@ -199,7 +199,7 @@ func TestRealityExhaustedNodeDrainsInsteadOfProxying(t *testing.T) {
 // the latter, and the claim was false: the splice limiter is AGGREGATE, so a single
 // continuously-renewed splice already spends the whole declared speed, and
 // time-to-exhaust is quota / (2 × speedCap) whether the volume arrives from one address
-// or a thousand. What prices the eviction attack is admitSplice, not this gate (#168;
+// or a thousand. What prices the eviction attack is admitSplice, not this gate (old #168;
 // ADR-0027 and ADR-0041 carry the corrected wording, and this was its last stale copy).
 //
 // Burst 2 is a test literal; production splicePerIPBurst is exercised only through the
@@ -307,7 +307,7 @@ func TestSpliceGateEvictsIdleBuckets(t *testing.T) {
 // TestRealitySpliceNilInertUnmetered is the opt-in guarantee: a node that declared
 // neither a cap nor a quota (every node in today's fleet) builds no splice limits at
 // all, and the nil handle admits, counts, and paces exactly nothing — so the splice
-// paths behave byte-for-byte as they did before #163.
+// paths behave byte-for-byte as they did before old #163.
 func TestRealitySpliceNilInertUnmetered(t *testing.T) {
 	if sl := newRealitySpliceLimits(nil, nil, context.Background()); sl != nil {
 		t.Fatalf("newRealitySpliceLimits(nil, nil) = %v; want nil (no declared limits => fully inert)", sl)

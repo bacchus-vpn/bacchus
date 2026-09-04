@@ -73,7 +73,7 @@ func newWebRTCTransport(cfg Config, onEvent func(kind, msg string)) *webrtcTrans
 		mdns:        cfg.ICEmDNS,
 		onEvent:     onEvent,
 	}
-	// Resolve the DTLS fingerprint profile once (issue #14, ADR-0018). It is
+	// Resolve the DTLS fingerprint profile once (old #14, ADR-0018). It is
 	// re-installed on each per-connection SettingEngine in newPC.
 	if prof, ok := profileFor(cfg.DTLSFingerprint, newConnRand()); ok {
 		t.profile = prof
@@ -90,16 +90,16 @@ func (t *webrtcTransport) Name() string { return "webrtc" }
 // pion bakes the ufrag/pwd into the API at construction time (the ICE gatherer
 // reads SettingEngine.candidates), so a shared API could only ever carry one
 // credential pair — and reusing one pair fleet-wide is a *stronger* fingerprint
-// than pion's default, not a weaker one (issue #49). Building the API here costs
+// than pion's default, not a weaker one (old #49). Building the API here costs
 // a little per dial/accept, but a DataChannel-only API is cheap to assemble.
 func (t *webrtcTransport) newPC() (*webrtc.PeerConnection, error) {
 	se := webrtc.SettingEngine{}
 	se.DetachDataChannels()
 
 	if t.profileActive {
-		// DTLS ClientHello + ServerHello reshaping (issues #14 and #49).
+		// DTLS ClientHello + ServerHello reshaping (old #14 and old #49).
 		t.profile.apply(&se)
-		// Browser-shaped, per-connection ICE ufrag/pwd (issue #49). On error we
+		// Browser-shaped, per-connection ICE ufrag/pwd (old #49). On error we
 		// leave pion's defaults rather than fail the connection: the pwd is a real
 		// MESSAGE-INTEGRITY key, so a bad randomness draw must never take a session
 		// down — camouflage is best-effort, connectivity is not.
@@ -109,7 +109,7 @@ func (t *webrtcTransport) newPC() (*webrtc.PeerConnection, error) {
 	}
 
 	// mDNS host candidates (.local) instead of raw private IPs. Off by default —
-	// a connectivity trade-off for the full-device client (issue #49, ADR-0022).
+	// a connectivity trade-off for the full-device client (old #49, ADR-0022).
 	if t.mdns {
 		se.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryAndGather)
 	}

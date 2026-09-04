@@ -19,7 +19,7 @@ import (
 	"github.com/flynn/noise"
 )
 
-// Relay chaining (issue #142, ADR-0038). These drive the SHIPPED code paths —
+// Relay chaining (old #142, ADR-0038). These drive the SHIPPED code paths —
 // the production exitTerminate on each hop, the production relayPipe standing in
 // for the coordinator-assigned blind relay, and the production dialChain on the
 // client — because the claims being made are about what ships, not about a model
@@ -167,10 +167,10 @@ func testSnapKeys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
 func testSnapPub(t *testing.T) ed25519.PublicKey   { p, _ := testSnapKeys(t); return p }
 func testSnapPriv(t *testing.T) ed25519.PrivateKey { _, p := testSnapKeys(t); return p }
 
-// TestRelayChainPreservesE2EAdmission is the #142 acceptance and the n-hop
+// TestRelayChainPreservesE2EAdmission is the old #142 acceptance and the n-hop
 // analogue of TestPeerRelaySplicePreservesE2E: with TWO peeling hops behind the
 // coordinator's blind relay — three nodes between client and exit — the exit's
-// admission credential (#60/#69) is still verified end to end, the real target
+// admission credential (old #60/#69) is still verified end to end, the real target
 // still reaches only the exit, and traffic flows both ways.
 //
 // Every node in the path is production code: relayPipe for the assigned relay,
@@ -295,7 +295,7 @@ func verifierFor(t *testing.T, root ed25519.PublicKey) *admission.Verifier {
 }
 
 // TestRelayChainRejectsUnauthorizedExit is the security half: chaining must not
-// weaken #60/#69. An exit at the end of a 2-hop chain that presents a credential
+// weaken old #60/#69. An exit at the end of a 2-hop chain that presents a credential
 // signed by a root the client does not trust is rejected before the real target
 // is ever sent — and no hop can vouch for it, because the credential is verified
 // inside a channel every hop only splices.

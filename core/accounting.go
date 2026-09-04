@@ -35,7 +35,7 @@ const acctLabel = "acct"
 const defaultAcctIntervalSec = 60
 
 // satBlockThreshold is how long a single tunnel write must block before the client
-// counts the interval demand-saturated (accounting.Counter.WatchSaturation, issue #158).
+// counts the interval demand-saturated (accounting.Counter.WatchSaturation, old #158).
 // A write to a healthy tunnel returns promptly; one that stalls this long means the
 // tunnel's send window is full while the application still has bytes to send — the
 // client wanted to move more than the link carried (design §5.3). 250ms is generous
@@ -179,7 +179,7 @@ func (e *Engine) dropAcctState(sid string) {
 // relay<->exit wire, which is a real follow-up, not a same-PR fix -- see
 // ADR-0021.
 // l is the coordinator link that paired this session; the client sends its
-// capacity-reports (issue #158) back over it. It may be nil (e.g. a reconnect that
+// capacity-reports (old #158) back over it. It may be nil (e.g. a reconnect that
 // re-establishes without a fresh pairing) — reports are then simply not sent, which is a
 // missed measurement, not a fault.
 func (e *Engine) startAccounting(sid string, sess Session, l *coordLink, exitPub []byte) *accounting.Counter {
@@ -228,7 +228,7 @@ func (e *Engine) runClientAccounting(sid string, sess Session, key ed25519.Priva
 			continue
 		}
 		// The accounting stream is a fresh Noise_NK handshake to the same exit, so
-		// it verifies the exit's admission credential (issue #60) exactly as a
+		// it verifies the exit's admission credential (old #60) exactly as a
 		// data stream does — a rejected exit yields no receipt round trip.
 		nc, err := clientHandshake(st, exitPub, acctSentinel, e.exitVerifyFunc(exitPub))
 		if err != nil {
@@ -250,7 +250,7 @@ func (e *Engine) runClientAccounting(sid string, sess Session, key ed25519.Priva
 }
 
 // sendCapacityReport turns one co-signed receipt into a capacity-report to the
-// coordinator (issue #158). It stamps the receipt with this interval's client-asserted
+// coordinator (old #158). It stamps the receipt with this interval's client-asserted
 // saturation bit — read-and-cleared from ctr, so it partitions into the same interval as
 // the byte count — signs the receipt+bit with the client accounting key (accounting.
 // SignReport, so a node cannot forge or flip the bit), and sends it back over the

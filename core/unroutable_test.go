@@ -12,7 +12,7 @@ import (
 
 // "Answered but unroutable" must not be reported as silence (issue #5).
 //
-// Silence is the mesh-walk trigger (#115): every coordinator unreachable, so a live one
+// Silence is the mesh-walk trigger (old #115): every coordinator unreachable, so a live one
 // has to be rediscovered through a peer and the engine rebuilt against it. A coordinator
 // that is up and answering in a shape this build cannot parse produces the same
 // non-event at every leg that waits for a reply — nothing usable arrives, the deadline
@@ -26,7 +26,7 @@ import (
 
 // unroutableCoordinator answers every datagram with a well-formed message of a type this
 // build does not route — the shape an older coordinator produces (`{"type":"exits"}` was
-// the real one, retired by #146) or a newer one this build has not learned yet.
+// the real one, retired by old #146) or a newer one this build has not learned yet.
 //
 // It answers EVERY request, so the member is unambiguously up: whatever the client
 // concludes, it cannot have concluded it from silence.
@@ -89,7 +89,7 @@ func unroutableTestEngine(t *testing.T, addr string) *Engine {
 }
 
 // TestListCountriesTellsUnroutableFromSilent is #5's headline. The country-list leg is
-// the one the issue names, and after #146 every connect takes it whenever Geo is unset,
+// the one the issue names, and after old #146 every connect takes it whenever Geo is unset,
 // because resolveCountry calls ListCountries.
 func TestListCountriesTellsUnroutableFromSilent(t *testing.T) {
 	e := unroutableTestEngine(t, unroutableCoordinator(t, "exits"))

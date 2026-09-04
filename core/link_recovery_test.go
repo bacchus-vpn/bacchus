@@ -361,7 +361,7 @@ func TestAStaleLinkIsNotReportedAsAnUnreachableNetwork(t *testing.T) {
 //
 // Silence from a member this client never had a conversation with is silence about the
 // MEMBER, and it is exactly what ErrNoCoordinatorReachable is for — the mesh-walk
-// trigger (issue #31). If a rebuilt socket claimed the local diagnosis here, a client
+// trigger (old #31). If a rebuilt socket claimed the local diagnosis here, a client
 // whose coordinators had genuinely moved would report a local fault forever and never
 // walk for the directory that would have saved it.
 func TestAnUnreachableCoordinatorIsNotAStaleLink(t *testing.T) {
@@ -661,7 +661,7 @@ func TestALiveCoordinatorThatStopsAnsweringIsRecoveredAnyway(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestAStaleLinkDoesNotResetTheMeshWalkStreak. Mesh-walk fires after a run of
-// consecutive all-silent passes (issue #31/#115). A stale-link pass is neither
+// consecutive all-silent passes (old #31/#115). A stale-link pass is neither
 // evidence that rendezvous is down nor evidence that it is up, so it must not COUNT —
 // a walk would rediscover the address this client is already dialling — and it must
 // not RESET, or a client whose coordinators really had moved would have its recovery

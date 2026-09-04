@@ -733,7 +733,7 @@ func TestRebuildRefusesWhenThePinnedHeadLeftTheDirectory(t *testing.T) {
 // that CAN replace a head (reconnectLoop / maintainPath re-run chainFor), with the head
 // cooled so the next selection avoids it.
 //
-// This is the client's own version of the coordinator's #96 relay-dead nudge, for the
+// This is the client's own version of the coordinator's old #96 relay-dead nudge, for the
 // node the coordinator cannot nudge about: it does not know which nodes are in the chain
 // past the first.
 func TestDeadChainHeadDropsThePathInsteadOfRebuilding(t *testing.T) {

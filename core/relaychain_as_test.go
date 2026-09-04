@@ -257,7 +257,7 @@ func TestChainLeaningOnAnUnplaceableHopIsDegraded(t *testing.T) {
 // With no table every hop resolves to unknown and pools into one bucket, so no pass
 // demanding AS distinctness can place anything. A ladder of just
 // (AS+operator, AS, neither) would therefore fall straight through to unconstrained
-// and switch OFF the operator diversity that has been running since #124 — adding a
+// and switch OFF the operator diversity that has been running since old #124 — adding a
 // control by removing one, on every deployment, silently. The rung where operator
 // diversity stands alone is what stops that.
 //

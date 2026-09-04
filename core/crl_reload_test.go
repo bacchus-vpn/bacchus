@@ -13,7 +13,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/admission"
 )
 
-// Client CRL hot-reload (issue #90): the engine re-reads Config.AdmissionCRLPath
+// Client CRL hot-reload (old #90): the engine re-reads Config.AdmissionCRLPath
 // on an interval and swaps a freshly verified bundle into the exit-admission
 // verifier's revocation oracle, so a long-lived client picks up an operator's
 // rotated CRL without a restart — the client-side mirror of
@@ -58,7 +58,7 @@ func writeCRLFile(t *testing.T, encoded string) string {
 	return path
 }
 
-// TestReloadCRLPicksUpNewRevocation is the #90 acceptance test: a credential
+// TestReloadCRLPicksUpNewRevocation is the old #90 acceptance test: a credential
 // that verifies against the client's initially loaded (non-revoking) CRL is
 // rejected once the operator rotates the file to a bundle that revokes it and
 // a reload runs — without restarting the client.
@@ -100,7 +100,7 @@ func TestReloadCRLPicksUpNewRevocation(t *testing.T) {
 	}
 }
 
-// TestReloadCRLKeepsPreviousOnFailure covers the fail-safe half of #90: a
+// TestReloadCRLKeepsPreviousOnFailure covers the fail-safe half of old #90: a
 // reload that cannot read or cannot verify the file must not blind the
 // client — the previously loaded bundle keeps being enforced, and the client
 // must not crash or panic.

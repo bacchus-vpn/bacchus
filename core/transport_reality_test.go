@@ -203,7 +203,7 @@ const originBanner = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHELLO"
 // root pool holding the CA and a server certificate presenting the leaf. A prober
 // that trusts the pool can validate a genuine handshake against this origin.
 // leafKey lets a caller choose the leaf's own key class (RSA vs a specific EC
-// curve, issue #98); a nil leafKey defaults to ECDSA P-256, the prior fixed
+// curve, old #98); a nil leafKey defaults to ECDSA P-256, the prior fixed
 // behaviour, and is the right choice whenever the leaf's key type isn't the point
 // of the test.
 func issueOriginCert(t *testing.T, dnsName string, notBefore, notAfter time.Time, leafKey crypto.Signer) (*x509.CertPool, tls.Certificate) {
@@ -284,12 +284,12 @@ func startBannerOrigin(t *testing.T, cfg *tls.Config) string {
 	return oln.Addr().String()
 }
 
-// TestRealityProberValidatesOriginChain is the #70 acceptance test. An
+// TestRealityProberValidatesOriginChain is the old #70 acceptance test. An
 // unauthenticated prober — one that cannot forge the ClientHello authenticator —
 // validates the presented TLS chain with verification ON and the origin's CA as its
 // only root. The handshake succeeds only because the exit splices it to the real
 // origin, whose leaf chains to that CA; if the exit had presented a self-signed leaf
-// of its own, verification would fail. That is exactly the self-signed anomaly #70
+// of its own, verification would fail. That is exactly the self-signed anomaly old #70
 // removes.
 func TestRealityProberValidatesOriginChain(t *testing.T) {
 	const sni = "origin.example"
@@ -374,7 +374,7 @@ func TestRealityAuthenticatedBadTokenBridgesToOrigin(t *testing.T) {
 	}
 }
 
-// TestRealityMimicTLSStealsOriginBytes is the #92 acceptance test for the static
+// TestRealityMimicTLSStealsOriginBytes is the old #92 acceptance test for the static
 // certificate data: the terminate-path config now carries the impersonated origin's
 // actual certificate chain, byte-for-byte, rather than a leaf that merely copies its
 // fields (the prior behaviour, ADR-0032 as first shipped). A fully-validating chain
@@ -413,13 +413,13 @@ func TestRealityMimicTLSStealsOriginBytes(t *testing.T) {
 	}
 }
 
-// TestRealityTerminatePathPresentsStolenChain is the #92 end-to-end acceptance test:
+// TestRealityTerminatePathPresentsStolenChain is the old #92 end-to-end acceptance test:
 // an authenticated client completes the terminate-path handshake even though the
 // exit presents a certificate chain it does not hold the private key for
 // (InsecureSkipCertVerifySignature, third_party/utls), and the chain the client
 // actually receives is the origin's real, publicly-chaining bytes rather than a
 // self-signed leaf. TestRealityAuthenticatedBadTokenBridgesToOrigin already covers
-// that the ADR-0027 bridge (issue #62) still works unmodified on this same
+// that the ADR-0027 bridge (old #62) still works unmodified on this same
 // authenticated path, and TestRealityProberValidatesOriginChain that the raw-splice
 // path for an unauthenticated peer (ADR-0032) is untouched.
 func TestRealityTerminatePathPresentsStolenChain(t *testing.T) {
@@ -464,7 +464,7 @@ func TestRealityTerminatePathPresentsStolenChain(t *testing.T) {
 	}
 }
 
-// TestRealityMimicTLSMatchesSignerKeyType is one #98 acceptance test: the fresh key
+// TestRealityMimicTLSMatchesSignerKeyType is one old #98 acceptance test: the fresh key
 // that signs a borrowed leaf's CertificateVerify is minted in the origin leaf's own
 // key class — here RSA, at the origin's exact bit length — rather than always a
 // fixed P-256 ECDSA key regardless of what the origin actually presents (the prior
@@ -503,9 +503,9 @@ func TestRealityMimicTLSMatchesSignerKeyType(t *testing.T) {
 	}
 }
 
-// TestRealityMimicTLSMatchesSignerCurve is the other #98 acceptance test: class
+// TestRealityMimicTLSMatchesSignerCurve is the other old #98 acceptance test: class
 // parity tracks the specific EC curve, not just "RSA vs EC" — an origin on P-384
-// gets a P-384 signer, not the P-256 every origin got before #98 regardless of its
+// gets a P-384 signer, not the P-256 every origin got before old #98 regardless of its
 // own curve.
 func TestRealityMimicTLSMatchesSignerCurve(t *testing.T) {
 	const sni = "steal-p384.example"
@@ -529,7 +529,7 @@ func TestRealityMimicTLSMatchesSignerCurve(t *testing.T) {
 	}
 }
 
-// TestRealityMatchingSignerSchemeIsChromeSupported is the #104 regression test — it
+// TestRealityMatchingSignerSchemeIsChromeSupported is the old #104 regression test — it
 // closes the structural gap the issue named: TestRealityMimicTLSMatchesSignerCurve
 // only checks that a minted signer's curve matches the origin leaf's, never that the
 // mimicked ClientHello (utls.HelloChrome_Auto) actually offers a TLS signature scheme
@@ -597,7 +597,7 @@ func TestRealityMatchingSignerSchemeIsChromeSupported(t *testing.T) {
 
 	// The same rule governs the non-ECDSA key classes realityMatchingSigner handles:
 	// mint only when the mimicked ClientHello offers a scheme that class can produce.
-	// #104 fixed the ECDSA-P521 case; these guard the sibling classes the original
+	// Old #104 fixed the ECDSA-P521 case; these guard the sibling classes the original
 	// fix left untested — Ed25519 was in fact still broken, minting unconditionally.
 	//
 	// RSA: Chrome offers rsa_pss_rsae_sha256 et al., so an RSA leaf mints.
@@ -628,9 +628,9 @@ func TestRealityMatchingSignerSchemeIsChromeSupported(t *testing.T) {
 }
 
 // TestRealityMatchingSignerRejectsUnsupportedKeyType proves the "no new distinguisher"
-// half of #98: an origin leaf key class realityMatchingSigner cannot mint a match for
+// half of old #98: an origin leaf key class realityMatchingSigner cannot mint a match for
 // is refused outright rather than silently substituted with a mismatched class (which
-// would just be a different flavor of the tell #98 closes). realityMimicTLS's caller,
+// would just be a different flavor of the tell old #98 closes). realityMimicTLS's caller,
 // warmMimicCert, already falls back to the self-signed terminate-path config on any
 // error here, so refusing is a narrowing of the existing behaviour, not a new failure
 // mode.
@@ -728,7 +728,7 @@ func (c *blockingReadConn) Close() error {
 	return c.Conn.Close()
 }
 
-// TestRealitySessionCloseJoinsWatchControl is the #65 acceptance test at the
+// TestRealitySessionCloseJoinsWatchControl is the old #65 acceptance test at the
 // session level: Close must not return until watchControl has actually exited, not
 // merely been signalled. Before the fix, useControl's bare `go` meant Close
 // returned as soon as the tracked conns were closed, regardless of whether
@@ -749,7 +749,7 @@ func TestRealitySessionCloseJoinsWatchControl(t *testing.T) {
 		t.Fatalf("Close returned after %v, want >= 100ms — watchControl was not joined", elapsed)
 	}
 
-	// #98: Close must also surface how long that wait actually took.
+	// Old #98: Close must also surface how long that wait actually took.
 	d, ok := rec.drainDuration("reality: session close drained control-conn goroutine in ")
 	if !ok {
 		t.Fatal("Close did not emit a drain-duration event")
@@ -780,7 +780,7 @@ func startStallingOrigin(t *testing.T, delay time.Duration) string {
 	return ln.Addr().String()
 }
 
-// TestRealityCloseJoinsBackgroundGoroutines is the #65 acceptance test at the
+// TestRealityCloseJoinsBackgroundGoroutines is the old #65 acceptance test at the
 // transport level: close must not return until acceptLoop and warmMimicCert have
 // actually exited. warmMimicCert is given a deliberately slow origin so its
 // lifetime is controllable; before the fix, close returned as soon as the
@@ -805,7 +805,7 @@ func TestRealityCloseJoinsBackgroundGoroutines(t *testing.T) {
 		t.Fatalf("close returned after %v, want >= 200ms — warmMimicCert was not joined", elapsed)
 	}
 
-	// #98: close must also surface how long that wait actually took.
+	// Old #98: close must also surface how long that wait actually took.
 	d, ok := rec.drainDuration("reality: transport stop drained background goroutines in ")
 	if !ok {
 		t.Fatal("close did not emit a drain-duration event")
@@ -815,9 +815,9 @@ func TestRealityCloseJoinsBackgroundGoroutines(t *testing.T) {
 	}
 }
 
-// TestRealityEnsureListenerHonorsClosed is the #101 regression test: a close()
+// TestRealityEnsureListenerHonorsClosed is the old #101 regression test: a close()
 // that beats the very first Accept's call to ensureListener must not be undone by
-// it. Pre-#101, ensureListener never checked t.closed at all, so its sync.Once
+// it. Before old #101, ensureListener never checked t.closed at all, so its sync.Once
 // could still bind a fresh listener and spawn acceptLoop/warmMimicCert after
 // close() had already flipped t.closed and returned — close() would have read
 // t.ln as still nil (not yet published) and skipped closing it, and its

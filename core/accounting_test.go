@@ -42,7 +42,7 @@ func TestAccountingDisabledByDefault(t *testing.T) {
 // same layer core/e2e_test.go already tests at: a raw net.Pipe standing in
 // for one transport stream, exitTerminate on one end (recognizing the
 // accounting sentinel and calling into handleAcctStream), the client's
-// accounting exchange on the other. This is #20's acceptance criterion: a
+// accounting exchange on the other. This is old #20's acceptance criterion: a
 // co-signed receipt exists after the exchange, and it verifies.
 func TestAcctSentinelRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -259,9 +259,9 @@ func TestClientAccountingLoopProducesReceipts(t *testing.T) {
 	defer sess.Close()
 	<-accepted
 
-	// The exit key travels WITH the path now (issue #146): the coordinator picks the
+	// The exit key travels WITH the path now (old #146): the coordinator picks the
 	// exit, so there is no engine-lifetime key to set beforehand.
-	ctr := clientEng.startAccounting(sid, sess, nil, exitEng.exitKey.Public) // nil link: this test exercises the receipt round trip, not the #158 report send
+	ctr := clientEng.startAccounting(sid, sess, nil, exitEng.exitKey.Public) // nil link: this test exercises the receipt round trip, not the old #158 report send
 	if ctr == nil {
 		t.Fatal("expected accounting to be enabled for this client")
 	}

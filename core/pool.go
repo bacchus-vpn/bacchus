@@ -1,6 +1,6 @@
 package core
 
-// Transport pool + per-user failover (issue #15). The client carries several
+// Transport pool + per-user failover (old #15). The client carries several
 // candidate paths — a transport, an exit, and a mode (core/selection.Candidate)
 // — and discovers which actually works from *this* user's network, right now.
 // Russian blocking is per-operator, regionally fragmented, and time-varying, so
@@ -38,7 +38,7 @@ import (
 // candidate — a path that recovers keeps getting retried — it only sinks it.
 const candCooldown = 30 * time.Second
 
-// poolOn reports whether this engine selects across a transport pool (issue #15)
+// poolOn reports whether this engine selects across a transport pool (old #15)
 // rather than dialing the single Config.Transport. Set when Config.TransportPool
 // is non-empty; an empty pool preserves the exact pre-pool Connect path.
 func (e *Engine) poolOn() bool { return len(e.transportOrder) > 0 }
@@ -66,7 +66,7 @@ func (e *Engine) setupPool(cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("core: transport pool: %w", err)
 		}
-		// A pooled reality transport splices too, so it needs the same #163 metering the
+		// A pooled reality transport splices too, so it needs the same old #163 metering the
 		// single-transport path gets (Engine.attachRealitySplice); a no-op for webrtc.
 		e.transports[name] = e.attachRealitySplice(tr)
 	}
@@ -93,7 +93,7 @@ func selectionPath(dir string) string {
 }
 
 // ResetSelection forgets everything the transport pool learned on this device
-// (issue #15) — the per-network+geo winning paths — so path discovery starts
+// (old #15) — the per-network+geo winning paths — so path discovery starts
 // fresh. It is what the user's "reset" control calls. Safe any time; a no-op
 // before the store is built.
 func (e *Engine) ResetSelection() error {
@@ -196,7 +196,7 @@ func (e *Engine) hopCooling(id string) bool {
 // dialedPath is one validated candidate: the live session, the exit the coordinator
 // actually assigned inside the candidate's country, and the measured round-trip.
 //
-// exitID is here because it is an OUTPUT of dialing, not an input to it (issue #146).
+// exitID is here because it is an OUTPUT of dialing, not an input to it (old #146).
 // The candidate names a country; which exit inside it the client gets is the
 // coordinator's answer, arrives on the session reply, and is the exit's Noise static
 // key — so it has to travel back out with the session or the caller cannot open a
@@ -218,7 +218,7 @@ type candidateDialer func(ctx context.Context, c selection.Candidate) (dialedPat
 // network+geo (learned winner first), and races it to a validated session. It
 // returns the winning session, the candidate that won, and its round-trip. It
 // refuses to select at all once a force-major version mismatch is latched
-// (issue #79) — checked both before and after the exits fetch, since that
+// (old #79) — checked both before and after the exits fetch, since that
 // fetch is often what observes the mismatch in the first place.
 func (e *Engine) selectPath(ctx context.Context) (dialedPath, selection.Candidate, error) {
 	// A prior round may already have latched a force-major mismatch; don't keep
@@ -230,8 +230,8 @@ func (e *Engine) selectPath(ctx context.Context) (dialedPath, selection.Candidat
 	countries, err := e.countriesFn(ctx)
 	if err != nil {
 		// poolCountries has already classified this: a force-major mismatch observed
-		// during the fetch (issue #79), or ErrNoCoordinatorReachable when every
-		// coordinator was silent (issue #115). Either way it is more actionable than
+		// during the fetch (old #79), or ErrNoCoordinatorReachable when every
+		// coordinator was silent (old #115). Either way it is more actionable than
 		// a generic empty-list error, so surface it verbatim — connectPooled returns
 		// it, and maintainPath keys mesh-walk recovery on the sentinel.
 		return dialedPath{}, selection.Candidate{}, err
@@ -281,7 +281,7 @@ func (e *Engine) selectPath(ctx context.Context) (dialedPath, selection.Candidat
 	if rttMs < 1 {
 		rttMs = 1
 	}
-	// The winning EXIT is deliberately not persisted (issue #146): the client cannot
+	// The winning EXIT is deliberately not persisted (old #146): the client cannot
 	// ask for it next time, so recording it would be a per-device history of the exits
 	// a user has been through in exchange for nothing selection could act on.
 	if err := e.store.Put(selection.Record{
@@ -297,10 +297,10 @@ func (e *Engine) selectPath(ctx context.Context) (dialedPath, selection.Candidat
 // poolCountries returns the countries to select among and, instead of a silent empty
 // list, three errors the caller must act on:
 //
-//   - the latched force-major version mismatch (issue #79): this build can no longer
+//   - the latched force-major version mismatch (old #79): this build can no longer
 //     speak the network's wire protocol, so every candidate is withheld and the
 //     mismatch surfaced rather than letting a client dial a cutover it can't speak;
-//   - ErrNoCoordinatorReachable when every coordinator was silent (issue #115):
+//   - ErrNoCoordinatorReachable when every coordinator was silent (old #115):
 //     pairing a session needs a coordinator, so nothing can be reached — surface the
 //     sentinel so the pool triggers mesh-walk recovery instead of failing cold or
 //     spinning on a dead directory; and
@@ -320,7 +320,7 @@ func (e *Engine) selectPath(ctx context.Context) (dialedPath, selection.Candidat
 //
 // This used to fall back to a configured exit when a coordinator answered with an
 // empty directory — the one case a manual pin still helped, since it could be paired
-// through that live coordinator. Country-only assignment (issue #146) removes it,
+// through that live coordinator. Country-only assignment (old #146) removes it,
 // necessarily rather than by choice: a connect names a country, the coordinator picks
 // the exit, and a coordinator that offers no country will refuse every country a
 // client could name (refuseNoCountry). There is no longer a request a pin could be
@@ -440,8 +440,8 @@ func (e *Engine) drainLosers(resc <-chan raceResult, remaining int) {
 // countryAttempts is how many exits inside one candidate's country the pool will try
 // before failing that candidate.
 //
-// It exists because a candidate no longer names an exit (issue #146). The pre-#146
-// ladder held one entry per (transport, EXIT), so a broken exit cost one entry and the
+// It exists because a candidate no longer names an exit (old #146). The ladder before
+// old #146 held one entry per (transport, EXIT), so a broken exit cost one entry and the
 // race moved to the next exit on the same transport. A country-scoped candidate
 // collapses all of those into one, so without a retry here a single unhealthy exit
 // would condemn its whole transport for that country — a real loss of coverage that
@@ -477,7 +477,7 @@ func (e *Engine) dialAndValidate(ctx context.Context, c selection.Candidate) (di
 	var exclude []string
 	var lastErr error
 	for attempt := 0; attempt < countryAttempts; attempt++ {
-		// A relay-tier candidate on a chaining client carries an onion (issue #142),
+		// A relay-tier candidate on a chaining client carries an onion (old #142),
 		// assembled before pairing because its first peeling hop is the node the
 		// coordinator is asked to wire us to. Rebuilt on each attempt rather than once
 		// per candidate, because a fresh plan is the only thing that can move a chained
@@ -515,7 +515,7 @@ func (e *Engine) dialAndValidate(ctx context.Context, c selection.Candidate) (di
 }
 
 // chainableLadder drops every direct-mode candidate when the client is chaining
-// (issue #142), which is the pool's half of the same rule modeLadder applies to the
+// (old #142), which is the pool's half of the same rule modeLadder applies to the
 // single-transport ladder: a direct candidate cannot carry an onion, so racing one
 // would mean a chaining client's fastest path is the unchained one — a silent
 // downgrade of exactly the property the user configured. See modeLadder.
@@ -539,7 +539,7 @@ func (e *Engine) chainableLadder(l []selection.Candidate) []selection.Candidate 
 // pairInCountry asks each coordinator in turn to pair a session in c's country,
 // returning the first that comes up. exclude names this client's own just-failed
 // sessions so the coordinator avoids their exits. plan, when non-nil, makes the
-// request name the chain's first hop instead of a country (issue #142).
+// request name the chain's first hop instead of a country (old #142).
 func (e *Engine) pairInCountry(ctx context.Context, c selection.Candidate, tr Transport, timeout time.Duration, exclude []string, plan *chainPlan) (attemptResult, error) {
 	for _, l := range e.orderLinks() {
 		select {
@@ -550,8 +550,8 @@ func (e *Engine) pairInCountry(ctx context.Context, c selection.Candidate, tr Tr
 		default:
 		}
 		e.greet(l)
-		// nil dedupe: the pool has its own cross-transport failover (issue #15), so
-		// it does not use the single-transport rotation skip-set (issue #56).
+		// nil dedupe: the pool has its own cross-transport failover (old #15), so
+		// it does not use the single-transport rotation skip-set (old #56).
 		r := e.attemptWith(ctx, l, connectReq{country: c.Country, mode: c.Mode, exclude: exclude, plan: plan}, tr, timeout, nil)
 		if r.outcome == connectOK {
 			return r, nil
@@ -564,14 +564,14 @@ func (e *Engine) pairInCountry(ctx context.Context, c selection.Candidate, tr Tr
 }
 
 // validateSession proves a freshly dialed session sustains flow before the pool
-// commits to it (issue #15, trap #1). It opens an ordinary end-to-end stream to
+// commits to it (old #15, trap #1). It opens an ordinary end-to-end stream to
 // the exit, runs the probe (push ~32 KB, read it back), and returns the
 // round-trip. The probe stream is closed on return; the session stays up for
 // real traffic. The stream is force-closed if ctx elapses, unblocking the read.
 func (e *Engine) validateSession(ctx context.Context, sess Session, exitPub []byte, timeout time.Duration) (time.Duration, error) {
 	openCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	// Probe over the SAME chain the real traffic will use (issue #142), not over a
+	// Probe over the SAME chain the real traffic will use (old #142), not over a
 	// shortcut to the exit: the point of sustained-flow validation is that the path
 	// the pool is about to commit to actually carries bytes, and on a chained path
 	// that includes every hop. A probe that skipped the hops could pass while the
@@ -604,9 +604,9 @@ func (e *Engine) validateSession(ctx context.Context, sess Session, exitPub []by
 
 // connectPooled selects a validated path, binds the local SOCKS listener over
 // it, and maintains it — re-selecting a *different* candidate when the active
-// path drops (the #15 acceptance). It returns once SOCKS is listening; the
+// path drops (the old #15 acceptance). It returns once SOCKS is listening; the
 // maintain loop runs in the background. It returns an error without dialing
-// anything if a force-major version mismatch is already latched (issue #79).
+// anything if a force-major version mismatch is already latched (old #79).
 func (e *Engine) connectPooled(ctx context.Context) error {
 	path, winner, err := e.selectPath(ctx)
 	if err != nil {
@@ -643,7 +643,7 @@ func (e *Engine) connectPooled(ctx context.Context) error {
 // connection is opened (core/transport_reality.go's dialInner), not after this
 // loop commits the new session. So maintainPath never needs to know the
 // underlay address itself; it only has to re-run selection, and each candidate
-// makes its own underlay tunnel-safe as it dials. See issue #109 / ADR-0028.
+// makes its own underlay tunnel-safe as it dials. See old #109 / ADR-0028.
 func (e *Engine) maintainPath(ctx context.Context, sess Session, current selection.Candidate) {
 	defer e.wg.Done()
 	for {
@@ -663,7 +663,7 @@ func (e *Engine) maintainPath(ctx context.Context, sess Session, current selecti
 			// unreachable, not just the candidates blocked — try warm recovery before
 			// giving up: walk known peers for a fresh directory and, if one names a
 			// live coordinator, hand it to the supervisor to rebuild against (issue
-			// #115, ADR-0037). tryMeshRecovery returns false for any other failure or
+			// old #115, ADR-0037). tryMeshRecovery returns false for any other failure or
 			// when recovery finds nothing better, leaving the existing give-up intact.
 			if errors.Is(err, ErrNoCoordinatorReachable) && e.tryMeshRecovery(ctx) {
 				return
@@ -711,7 +711,7 @@ func (e *Engine) reselect(ctx context.Context) (dialedPath, selection.Candidate,
 
 // setActivePath swaps in the session and the static key of the exit terminating it,
 // for new SOCKS connections to use. The key comes from the dialed path rather than
-// from the candidate (issue #146): the candidate names a country, and which exit
+// from the candidate (old #146): the candidate names a country, and which exit
 // inside it the coordinator assigned is known only once the session reply arrives —
 // so a failover to a different exit routes its end-to-end handshake to the right one.
 func (e *Engine) setActivePath(p dialedPath) {

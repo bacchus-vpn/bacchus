@@ -17,7 +17,7 @@ import (
 // driver — without standing up a real WebRTC/Reality stack. The actual
 // data-channel/ICE teardown that a live transport reports on a network change can
 // only be confirmed on real infra; these tests prove the engine's reaction to a
-// session drop, which is what issue #2 owns ("re-establish within the transport").
+// session drop, which is what old #2 owns ("re-establish within the transport").
 type fakeTransport struct {
 	mu       sync.Mutex
 	sessions []*fakeSession
@@ -79,7 +79,7 @@ func fakeConnectCoordinator(t *testing.T, reply func(mode string) (wire, bool)) 
 
 // mintAny answers every mode with a fresh session.
 // mintAny answers every connect with a session, as a healthy coordinator does.
-// The exit id is mandatory: it IS the exit's Noise static key (issue #146,
+// The exit id is mandatory: it IS the exit's Noise static key (old #146,
 // ADR-0009), and a client refuses a mint without one.
 func mintAny(string) (wire, bool) { return wire{Type: "session", ExitID: testExitID}, true }
 
@@ -91,7 +91,7 @@ func newSmokeClient(t *testing.T, coord string, tr Transport) *Engine {
 		Coordinators: []string{coord},
 		Roles:        []string{RoleClient},
 		SocksAddr:    "127.0.0.1:0",
-		Geo:          "NL", // a connect names a country, not an exit (issue #146)
+		Geo:          "NL", // a connect names a country, not an exit (old #146)
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -105,7 +105,7 @@ func newSmokeClient(t *testing.T, coord string, tr Transport) *Engine {
 	return eng
 }
 
-// TestReconnectSmoke_RecoversAfterMidSessionDrop is issue #2's acceptance over a
+// TestReconnectSmoke_RecoversAfterMidSessionDrop is old #2's acceptance over a
 // loopback stack: a client connects through a real coordinator + the reconnect
 // driver, and when the live session is killed mid-session the path is
 // re-established automatically within a bounded time — no user action, and the

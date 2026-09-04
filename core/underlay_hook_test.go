@@ -11,7 +11,7 @@ import (
 // TestRealityUnderlayDialWiredFromConfig proves Config.OnUnderlayDial reaches the
 // reality transport — a nil hook stays nil, a set hook is stored — so a
 // full-device client that sets it actually gets the pre-dial callback (issue
-// #109).
+// old #109).
 func TestRealityUnderlayDialWiredFromConfig(t *testing.T) {
 	bare, err := newRealityTransport(Config{}, nil)
 	if err != nil {
@@ -35,7 +35,7 @@ func TestRealityUnderlayDialWiredFromConfig(t *testing.T) {
 }
 
 // TestRealityUnderlayDialFiresBeforeUnderlayConnect is the leak-focused ordering
-// proof for issue #109: OnUnderlayDial must run — and, for a full-device client,
+// proof for old #109: OnUnderlayDial must run — and, for a full-device client,
 // finish making the address tunnel-safe — BEFORE reality opens the underlay TCP
 // connection to it. If it fired after the dial (a "route flip races the real
 // address" leak), the connection would already be established here.

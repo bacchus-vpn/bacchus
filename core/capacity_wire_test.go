@@ -11,7 +11,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/capacity"
 )
 
-// Declared node limits on the register wire (issue #143, ADR-0040) — core's half.
+// Declared node limits on the register wire (old #143, ADR-0040) — core's half.
 //
 // The coordinator's half (its own wire copy, and what it does with these fields)
 // is in cmd/coordinator/capacity_test.go. The two are pinned to each other by the
@@ -22,7 +22,7 @@ import (
 // literals live in both binaries because the coordinator must not import core's
 // transport stack; a rename on either side has to fail a build somewhere, and
 // this pair is that somewhere (same reason as TestRelayDispositionWireContract,
-// issue #97).
+// old #97).
 func TestQuotaStateWireContract(t *testing.T) {
 	if quotaOK != "ok" || quotaExhausted != "exhausted" {
 		t.Fatalf("quota state literals drifted: ok=%q exhausted=%q", quotaOK, quotaExhausted)
@@ -92,7 +92,7 @@ func TestRegisterCarriesDeclaredLimits(t *testing.T) {
 }
 
 // TestRegisterOmitsUndeclaredLimits pins the opt-in property end to end: a node
-// that declares nothing sends exactly the register it sent before #143 existed, so
+// that declares nothing sends exactly the register it sent before old #143 existed, so
 // the running fleet is untouched by this change.
 func TestRegisterOmitsUndeclaredLimits(t *testing.T) {
 	coord := fakeCoordinator(t)
@@ -185,7 +185,7 @@ func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 // (YouTube, Google, most CDN-fronted sites), DNS, or torrents moved every byte
 // unpaced and uncounted, Quota.Exhausted never flipped, registerLoop kept stamping
 // quotaOK, and the coordinator kept assigning. A node with `-monthly-quota 400GB`
-// would serve arbitrarily far past it — the exact overage bill issue #143 exists to
+// would serve arbitrarily far past it — the exact overage bill old #143 exists to
 // prevent, arriving in silence.
 //
 // The bug also falsified four separate claims in ADR-0040, the design note, RUNNING.md
@@ -252,7 +252,7 @@ func TestUDPRelayIsMetered(t *testing.T) {
 
 // TestInvalidDeclaredLimitsRefuseToStart: a misconfigured limit stops the node
 // rather than being approximated. An operator who asked for a cap and silently did
-// not get one is the exact harm issue #143 exists to prevent.
+// not get one is the exact harm old #143 exists to prevent.
 func TestInvalidDeclaredLimitsRefuseToStart(t *testing.T) {
 	// A quota anchored to a day that does not exist in February would silently skip
 	// a reset.

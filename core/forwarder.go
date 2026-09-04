@@ -50,15 +50,15 @@ func (e *Engine) startFwdSession(m wire, l *coordLink) {
 }
 
 // handlerFor picks the egress for an assigned session: peer relay when the
-// assignment carries an exitAddr (issue #17 — this node splices client<->exit),
+// assignment carries an exitAddr (old #17 — this node splices client<->exit),
 // direct exit egress otherwise. The "otherwise" covers both a mode:"direct"
-// connect and a relay-mode TURN fallback (issue #97): the coordinator wires both
+// connect and a relay-mode TURN fallback (old #97): the coordinator wires both
 // as an assign with no exitAddr, so the exit cannot tell them apart — correctly,
 // since both are genuinely direct exit<->client data planes. sid is threaded
 // through for that direct case: a peer-relay-forwarded connection instead reaches
 // the exit via serveExit's bare TCP listener with no session id (relayPipe never
 // looks inside the stream), so there is nothing for exitTerminate to key
-// accounting state by there — the relay-side accounting gap #17/ADR-0033 defers
+// accounting state by there — the relay-side accounting gap old #17/ADR-0033 defers
 // to a follow-up. See core/accounting.go.
 //
 // The tier's per-session speed cap (issue #58/#74, ADR-0048) is built here, once
@@ -122,12 +122,12 @@ func (e *Engine) exitDirect(sid string, pace *capacity.Limiter, st Stream) {
 // relay-forwarded connections (see handlerFor); handleAcctStream and the
 // counting wrap below both no-op on an empty sid / disabled accounting.
 //
-// A target carrying udpTargetPrefix (issue #41) is a UDP relay request, not a
+// A target carrying udpTargetPrefix (old #41) is a UDP relay request, not a
 // TCP CONNECT — same overloaded-target-field trick as acctSentinel/
 // probeSentinel, branching to exitTerminateUDP (core/udprelay.go) instead of
 // dialing TCP.
 //
-// A target carrying hopTargetPrefix (issue #142, ADR-0038) is an onion forward:
+// A target carrying hopTargetPrefix (old #142, ADR-0038) is an onion forward:
 // this node is an INTERMEDIATE hop in a client-assembled chain, so it splices to
 // the next Bacchus node rather than egressing. That branch is what makes this
 // function serve two roles — the exit's egress and a relay's onion ingress (see
@@ -146,7 +146,7 @@ func (e *Engine) exitDirect(sid string, pace *capacity.Limiter, st Stream) {
 // ADR-0048 §5.
 func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWriteCloser) {
 	defer raw.Close()
-	// The exit presents its admission credential (issue #60) in the handshake so
+	// The exit presents its admission credential (old #60) in the handshake so
 	// the client can verify end-to-end that this exit is admission-authorized.
 	// Holding none presents none — unchanged behavior for an exit that has no
 	// credential, against a client that doesn't require one. Read per handshake
@@ -161,7 +161,7 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 		return
 	}
 	if target == probeSentinel {
-		// Sustained-flow validation (issue #15): echo the client's bytes back so
+		// Sustained-flow validation (old #15): echo the client's bytes back so
 		// it can confirm the path survives the freeze threshold before committing.
 		// Like accounting, this branches after the identical handshake and dials
 		// nothing. Reached both directly and via a relay splice (sid may be empty).
@@ -170,7 +170,7 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 	}
 	prefix, addr := splitTargetPrefix(target)
 	if prefix == hopTargetPrefix {
-		// An onion forward (issue #142, ADR-0038): splice to the next Bacchus node
+		// An onion forward (old #142, ADR-0038): splice to the next Bacchus node
 		// instead of egressing. relayForward enforces that the next hop is a node in
 		// the signed directory and that this node opted into forwarding at all — see
 		// its doc for why neither check is optional.
@@ -211,7 +211,7 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 	// Meter this session only when there is a session id to attribute bytes to and
 	// the exit opted into accounting (ADR-0021, direct-mode-only). A sid-bearing
 	// session is a direct-shaped assign — a mode:"direct" connect OR a relay-mode
-	// TURN fallback (issue #97); the client treats a TURN fallback as the direct
+	// TURN fallback (old #97); the client treats a TURN fallback as the direct
 	// disposition and cosigns exactly like a direct connect (core/client.go), so
 	// this counter is used, not orphaned. A peer-relay splice arrives with sid==""
 	// (see handlerFor) and stays unmetered — the one relayed case ADR-0021 still
@@ -223,7 +223,7 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 	// Three wrappers, three different questions, innermost first: the accounting
 	// counter says what the session MOVED (a receipt's claim, ADR-0021), the
 	// per-session limiter says what this user's TIER is entitled to (#58), and
-	// e.meter says what this OPERATOR is willing to carry (#143, ADR-0040). The
+	// e.meter says what this OPERATOR is willing to carry (old #143, ADR-0040). The
 	// tier cap sits inside the operator's, which is the composition ADR-0048 §4
 	// depends on: a coordinator stamping a large SessionCapBps widens only the
 	// inner bound, and the node's own aggregate limiter still paces the result.
@@ -238,7 +238,7 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 	_, _ = io.Copy(nc, e.meter(pace.LimitReads(e.limiterCtx, ctr.CountReads(remote))))
 }
 
-// meter applies this node's DECLARED limits (issue #143, ADR-0040) to one
+// meter applies this node's DECLARED limits (old #143, ADR-0040) to one
 // direction of one session's copy: the aggregate speed cap paces it, and the
 // monthly quota counts it and cuts it off once the operator's cap is spent.
 //
@@ -255,7 +255,7 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 //
 // Both forwarder roles are metered, not just the exit. A relay spends its
 // operator's uplink exactly as an exit does and their ISP meters it identically,
-// so a residential relay volunteer needs this every bit as much — issue #143 is
+// so a residential relay volunteer needs this every bit as much — old #143 is
 // about the household, not about the role.
 //
 // What must be metered, stated as a rule with its exceptions ENUMERATED rather than
@@ -283,7 +283,7 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 //     rawSplice/bridge/holdAndDrain). It is unbounded and not small, and it is NOT
 //     reachable from here — a probe never completes the handshake that would reach
 //     exitTerminate. It USED to be the one that mattered: unmetered, on by default,
-//     able to exceed a declared quota on its own (design §8.7). Issue #163 closed
+//     able to exceed a declared quota on its own (design §8.7). Old #163 closed
 //     that — it is now counted and paced by realitySpliceLimits (a separate handle
 //     sharing this node's quota and limiter), enforced at splice ADMISSION rather
 //     than per-read, because cutting a probe response mid-copy is the tell ADR-0027
@@ -291,7 +291,7 @@ func (e *Engine) exitTerminate(sid string, pace *capacity.Limiter, raw io.ReadWr
 //     because the rule is "through here or meterN", and this is the third path.
 //
 // The first three are why the honest scope is "unbounded volume on a user's behalf",
-// not "every byte". The reality splice is now metered too (#163), so §4.2's *never*
+// not "every byte". The reality splice is now metered too (old #163), so §4.2's *never*
 // holds for it up to a bounded in-flight overshoot — the price of not truncating a
 // probe response — argued in ADR-0027/ADR-0041 rather than left as a silent hole.
 //
@@ -315,7 +315,7 @@ func (e *Engine) meter(r io.Reader) io.Reader {
 // wrap there. It still spends the operator's uplink, and their ISP still meters it
 // — a client pulling QUIC/HTTP3 or DNS moves real bytes through a real exit. An
 // unmetered UDP path would let exactly the traffic most people generate sail past
-// a declared quota, which is the overage bill issue #143 exists to prevent.
+// a declared quota, which is the overage bill old #143 exists to prevent.
 func (e *Engine) meterN(n int) error {
 	if n <= 0 {
 		return nil
@@ -328,17 +328,17 @@ func (e *Engine) meterN(n int) error {
 	return e.limiter.WaitN(e.limiterCtx, n)
 }
 
-// relayPipe is the peer-relay splice (issue #17, ADR-0033): dial the exit's
+// relayPipe is the peer-relay splice (old #17, ADR-0033): dial the exit's
 // advertised address and forward ciphertext both ways. The relay adds no
 // preamble and reads nothing from the stream — it forwards to the next hop only
 // and never sees the destination or content.
 //
 // This is what makes a peer relay transparent to the end-to-end layer: the
 // client's Noise_NK channel (and the exit's admission credential riding inside
-// it, #60/#69) is spliced through untouched, so the client still authenticates
+// it, old #60/#69) is spliced through untouched, so the client still authenticates
 // and admission-verifies the *exit*, not this relay — proven end-to-end by
 // TestPeerRelaySplicePreservesE2E. The only engine state it touches is emit, to
-// surface a dial-to-exit failure (issue #97).
+// surface a dial-to-exit failure (old #97).
 //
 // pace is the tier's per-session speed cap (issue #74, ADR-0048 §5), nil for
 // uncapped. This is where a peer-relayed session is shaped, and the relay is the
@@ -361,19 +361,19 @@ func (e *Engine) relayPipe(st Stream, pace *capacity.Limiter, exitAddr string) {
 	if err != nil {
 		// A relay that cannot reach its assigned exit is a real operational fault
 		// (exit down, stale advertised address, or a partitioned relay->exit leg),
-		// not something to swallow — a relay operator needs the signal (issue #97).
+		// not something to swallow — a relay operator needs the signal (old #97).
 		// The splice carries no session id or destination (see handlerFor), so this
 		// names only the exit address the relay already dials; the client is
 		// unaffected end-to-end — its transport to this relay simply carries nothing,
-		// so it times out and reconnects (issue #2) or is nudged onto another relay
-		// (issue #96).
+		// so it times out and reconnects (old #2) or is nudged onto another relay
+		// (old #96).
 		e.emit(EventError, "", "relay: dial exit %s: %v", exitAddr, err)
 		return
 	}
 	defer up.Close()
 	// Two limiters, two questions, innermost first — the same composition the exit's
 	// TCP path uses (ADR-0048 §4): pace says what this session's TIER is entitled to,
-	// e.meter says what this OPERATOR is willing to carry (#143, ADR-0040). The tier
+	// e.meter says what this OPERATOR is willing to carry (old #143, ADR-0040). The tier
 	// cap sits inside the operator's, so a coordinator stamping a large SessionCapBps
 	// widens only the inner bound and this relay's own aggregate limiter still paces
 	// the result. There is no accounting counter here: a relayed session has no

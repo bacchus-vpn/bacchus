@@ -58,7 +58,7 @@ func TestE2ERoundTrip(t *testing.T) {
 	}
 }
 
-// TestE2ERelayIsBlind is the #12 acceptance test: with a logging relay in the
+// TestE2ERelayIsBlind is the old #12 acceptance test: with a logging relay in the
 // path, the bytes it forwards are ciphertext — it recovers neither the
 // destination nor the content — while the exit still terminates correctly.
 func TestE2ERelayIsBlind(t *testing.T) {

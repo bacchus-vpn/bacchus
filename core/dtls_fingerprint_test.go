@@ -404,7 +404,7 @@ func oneHandshake(dialTr, acceptTr *webrtcTransport) error {
 	return nil
 }
 
-// --- issue #57: handshake Random has no timestamp ----------------------------
+// --- old #57: handshake Random has no timestamp ------------------------------
 
 // randomFirst4 populates a fresh handshake.Random exactly the way pion itself
 // does — both flight0handler.go (ServerHello) and flight1handler.go
@@ -421,7 +421,7 @@ func randomFirst4(t *testing.T) uint32 {
 	return binary.BigEndian.Uint32(wire[0:4])
 }
 
-// TestHandshakeRandomHasNoTimestamp is issue #57's core proof: the vendored
+// TestHandshakeRandomHasNoTimestamp is old #57's core proof: the vendored
 // pion patch (third_party/pion-dtls) makes Random.Populate fill all 32 bytes
 // randomly, so the first 4 bytes no longer carry a wall-clock-correlated
 // gmt_unix_time. It calls Populate directly rather than driving a real
@@ -454,7 +454,7 @@ func TestHandshakeRandomHasNoTimestamp(t *testing.T) {
 }
 
 // TestHandshakeCompletesAfterRandomPatch is the non-negotiable trap detector
-// for issue #57. The wrong fix — overwriting the timestamp only inside
+// for old #57. The wrong fix — overwriting the timestamp only inside
 // SetDTLSClientHelloMessageHook/SetDTLSServerHelloMessageHook — would leave
 // state.localRandom (which pion hashes directly into the master-secret PRF,
 // state.go) disagreeing with the wire bytes the peer actually parsed as its

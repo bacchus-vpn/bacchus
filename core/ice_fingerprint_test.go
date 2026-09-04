@@ -9,7 +9,7 @@ import (
 	"github.com/pion/dtls/v3/pkg/protocol/handshake"
 )
 
-// --- ICE credential fingerprint (issue #49, lever 1) -------------------------
+// --- ICE credential fingerprint (old #49, lever 1) ---------------------------
 
 // onlyICEChars reports whether every character of s is in the RFC 5245 ice-char
 // set we draw from. Notably this set includes digits and '+' / '/', which pion's
@@ -108,7 +108,7 @@ func offerICECreds(t *testing.T, tr *webrtcTransport) (ufrag, pwd string) {
 // from the *same* transport advertise browser-shaped ICE credentials that are
 // different from each other — i.e. the reshape is per-connection, not one static
 // pair reused fleet-wide (which would be a stronger fingerprint than pion's
-// default, the trap issue #49 calls out).
+// default, the trap old #49 calls out).
 func TestPerConnectionICECredentials(t *testing.T) {
 	tr := newWebRTCTransport(Config{DTLSFingerprint: FingerprintChrome}, nil)
 	uf1, pw1 := offerICECreds(t, tr)
@@ -142,7 +142,7 @@ func TestICECredentialsOffKeepsPionDefault(t *testing.T) {
 	}
 }
 
-// --- mDNS wiring (issue #49, lever 2) ----------------------------------------
+// --- mDNS wiring (old #49, lever 2) ------------------------------------------
 
 // TestMDNSTransportBuildsPeerConnection is a smoke test: with ICEmDNS on, the
 // transport still builds a PeerConnection (the mDNS mode is a valid enum and the
@@ -160,7 +160,7 @@ func TestMDNSTransportBuildsPeerConnection(t *testing.T) {
 	_ = pc.Close()
 }
 
-// --- DTLS ServerHello reshape (issue #49, lever 3) ---------------------------
+// --- DTLS ServerHello reshape (old #49, lever 3) -----------------------------
 
 func extTypeList(list []extension.Extension) []extension.TypeValue {
 	out := make([]extension.TypeValue, len(list))

@@ -16,7 +16,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 )
 
-// Mesh-walk recovery wiring (issue #31, design §4.3). Two independent halves:
+// Mesh-walk recovery wiring (old #31, design §4.3). Two independent halves:
 //
 //   - startCourier makes a relay/exit node a COURIER: it keeps a fresh
 //     coordinator-signed snapshot cached and serves it to recovering clients that
@@ -156,7 +156,7 @@ const maxMeshRecoveries = 5
 // node registers and serves until interrupted; a client connects and, when every
 // coordinator is unreachable and recovery is configured, walks the mesh for a fresh
 // directory and reconnects through it — rebuilding the engine with the rediscovered
-// coordinators. Recovery engages at BOTH boundaries (issue #115): at first connect,
+// coordinators. Recovery engages at BOTH boundaries (old #115): at first connect,
 // when Connect returns core.ErrNoCoordinatorReachable (direct or pooled); and
 // mid-session, when the engine's own failover loop rediscovers a fresh directory and
 // signals eng.NeedsRecovery. Both converge here on the same rebuild. It returns the
@@ -170,7 +170,7 @@ func runNode(ctx context.Context, cfg core.Config, coords []string, mesh *meshRe
 		cfg.Coordinators = coords
 		// Plumb mesh recovery into the engine so its failover loops can trigger a walk
 		// from inside a live session when every coordinator goes silent mid-session
-		// (issue #115), not only at first connect. proof evolves across rebuilds: each
+		// (old #115), not only at first connect. proof evolves across rebuilds: each
 		// fresher snapshot becomes the next proof of prior contact.
 		if mesh != nil {
 			cfg.MeshPeers, cfg.MeshProof, cfg.MeshPubKey = mesh.peers, proof, mesh.pubkey
@@ -204,7 +204,7 @@ func runNode(ctx context.Context, cfg core.Config, coords []string, mesh *meshRe
 		}
 		if err == nil {
 			// Connected. Run until interrupted, or until a mid-session mesh-walk found a
-			// fresh directory and asked to be rebuilt against it (issue #115).
+			// fresh directory and asked to be rebuilt against it (old #115).
 			select {
 			case <-eng.Done():
 				return nil // engine stopped (interrupt / ctx cancellation)

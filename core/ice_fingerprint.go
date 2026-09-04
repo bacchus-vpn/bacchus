@@ -6,8 +6,8 @@ package core
 // alphabet ([a-zA-Z]). A mainstream browser draws a *short* ufrag and a pwd from
 // the full RFC 5245 "ice-char" set (letters, digits, '+', '/'). pion's longer,
 // letters-only credentials are therefore a weak-but-real distinguisher in the
-// STUN connectivity checks — the "pion-ish" residual left over from #14, which
-// only reshaped the DTLS ClientHello (issue #49).
+// STUN connectivity checks — the "pion-ish" residual left over from old #14, which
+// only reshaped the DTLS ClientHello (old #49).
 //
 // The fix must be *per connection*. pion's SetICECredentials writes a single
 // static pair onto the SettingEngine, and because a transport shares one API

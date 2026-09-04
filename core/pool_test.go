@@ -24,7 +24,7 @@ type fakeSession struct {
 
 func newFakeSession() *fakeSession { return &fakeSession{closed: make(chan struct{})} }
 
-// testExitID / testExitPub stand in for the exit a coordinator ASSIGNS (issue #146). A
+// testExitID / testExitPub stand in for the exit a coordinator ASSIGNS (old #146). A
 // candidate names a country, so a stubbed dialer has to report an exit back the way
 // dialAndValidate does — the pool reads its static key out of the dialed path to key
 // every stream's end-to-end handshake, and a stub that returned none would exercise a
@@ -101,7 +101,7 @@ func (r *eventRecorder) hasSubstring(kind, sub string) bool {
 
 // newPoolEngineForVersionGate builds a pool engine like newPoolEngine, but
 // leaves countriesFn wired to the real poolCountries (rather than stubbing it) and
-// captures emitted events, so the force-major tests (issue #79) exercise the
+// captures emitted events, so the force-major tests (old #79) exercise the
 // actual withhold-the-pin logic and can assert the "update required" event
 // fires. No coordinator is
 // reachable (Start is never called), so ListCountries always fails fast with the
@@ -133,7 +133,7 @@ func aheadMajor() string {
 	return version.Version{Major: self.Major + 1}.String()
 }
 
-// TestPoolFindsWorkingWhenPrimaryBlocked is the first half of the #15 acceptance:
+// TestPoolFindsWorkingWhenPrimaryBlocked is the first half of the old #15 acceptance:
 // with the primary transport blocked on every exit, the pool automatically walks
 // the ladder to a working alternate-transport candidate — and remembers it.
 func TestPoolFindsWorkingWhenPrimaryBlocked(t *testing.T) {
@@ -195,7 +195,7 @@ func TestPoolStaggerFallsBackOnStall(t *testing.T) {
 	path.sess.Close()
 }
 
-// TestPoolFailoverReconnects is the second half of the #15 acceptance: when the
+// TestPoolFailoverReconnects is the second half of the old #15 acceptance: when the
 // committed path drops, the pool reselects a *different* candidate under the same
 // SOCKS listener — no rebind, no manual reconnect.
 func TestPoolFailoverReconnects(t *testing.T) {
@@ -308,9 +308,9 @@ func TestResetSelectionForgetsWinner(t *testing.T) {
 // coordinator reachable (Start is never called), every member is silent, so before
 // any version mismatch poolCountries surfaces ErrNoCoordinatorReachable rather than the
 // pinned exit — a pin cannot be paired without a coordinator, so the sentinel that
-// triggers mesh-walk recovery is the right answer (issue #115). Once a force-major
+// triggers mesh-walk recovery is the right answer (old #115). Once a force-major
 // mismatch is latched it must take precedence and withhold everything with the
-// update error, so a pinned client can never bypass the cutover (issue #79).
+// update error, so a pinned client can never bypass the cutover (old #79).
 func TestPoolCountriesAllSilentThenForceMajor(t *testing.T) {
 	e, _ := newPoolEngineForVersionGate(t, "A")
 	defer e.Stop()
@@ -328,7 +328,7 @@ func TestPoolCountriesAllSilentThenForceMajor(t *testing.T) {
 	}
 }
 
-// TestPoolConnectAbortsOnForceMajorPinned is the pinned-exit half of the #79
+// TestPoolConnectAbortsOnForceMajorPinned is the pinned-exit half of the old #79
 // acceptance: a pooled client configured with a pinned exit must not bypass
 // the force-major cutover by falling back to it.
 func TestPoolConnectAbortsOnForceMajorPinned(t *testing.T) {
@@ -357,7 +357,7 @@ func TestPoolConnectAbortsOnForceMajorPinned(t *testing.T) {
 	}
 }
 
-// TestPoolConnectAbortsOnForceMajorNoPin is the no-pin half of the #79
+// TestPoolConnectAbortsOnForceMajorNoPin is the no-pin half of the old #79
 // acceptance: without a pinned exit the client must still get the actionable
 // "update required" error, not a generic empty-list failure.
 func TestPoolConnectAbortsOnForceMajorNoPin(t *testing.T) {
@@ -387,7 +387,7 @@ func TestPoolConnectAbortsOnForceMajorNoPin(t *testing.T) {
 }
 
 // TestPoolConnectEmptyExitListFailsNormally guards against over-broadening the
-// #79 fix: an ordinary empty exit list (no force-major involved) must still
+// old #79 fix: an ordinary empty exit list (no force-major involved) must still
 // fail with the original generic error, not be mistaken for a version gate.
 func TestPoolConnectEmptyExitListFailsNormally(t *testing.T) {
 	e := newPoolEngine(t, nil) // countriesFn stub returns an empty list
@@ -403,7 +403,7 @@ func TestPoolConnectEmptyExitListFailsNormally(t *testing.T) {
 }
 
 // TestPoolConnectClosesSessionWhenSocksBindFails covers the minor tidy noted
-// in issue #79: if bindPoolSocks fails after selectPath already committed a
+// in old #79: if bindPoolSocks fails after selectPath already committed a
 // session, connectPooled must close that session and clear the active path
 // rather than leaking it and leaving stale active-path state.
 func TestPoolConnectClosesSessionWhenSocksBindFails(t *testing.T) {

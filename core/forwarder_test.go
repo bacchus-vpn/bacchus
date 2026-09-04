@@ -14,14 +14,14 @@ import (
 	"github.com/flynn/noise"
 )
 
-// Peer-relay data-plane transparency (issue #17, ADR-0033). Unlike
+// Peer-relay data-plane transparency (old #17, ADR-0033). Unlike
 // core/e2e_test.go's TestE2ERelayIsBlind and exit_admission_test.go's
 // TestE2EHostileExitRejectedThroughRelay — which stand in a hand-rolled io.Copy
 // for the relay — these drive the *actual* forwarder splice, e.relayPipe, dialing
 // a real exit TCP ingress exactly as a Bacchus relay node does when the
-// coordinator assigns it a peer-relay session. That is what #17 ships, so the
+// coordinator assigns it a peer-relay session. That is what old #17 ships, so the
 // invariant it must preserve is proven against the shipped code: the Noise_NK
-// channel (and the exit's admission credential riding inside it, #60/#69)
+// channel (and the exit's admission credential riding inside it, old #60/#69)
 // terminates at the exit through the hop, and the relay stays blind.
 
 // pipeStream adapts one end of a net.Pipe to the Stream interface, standing in
@@ -78,9 +78,9 @@ func startExitIngress(t *testing.T, key noise.DHKey, cred []byte, wantTarget, wa
 	return ln.Addr().String()
 }
 
-// TestPeerRelaySplicePreservesE2E is the #17 invariant: a client reaches an exit
+// TestPeerRelaySplicePreservesE2E is the old #17 invariant: a client reaches an exit
 // through the real relayPipe splice, and the end-to-end Noise channel — target,
-// payload, and the exit's admission credential (#60) — terminates at the exit
+// payload, and the exit's admission credential (old #60) — terminates at the exit
 // exactly as in the direct case. The client verifies the *exit's* credential
 // end-to-end and routes, oblivious to the relay hop.
 func TestPeerRelaySplicePreservesE2E(t *testing.T) {
@@ -129,7 +129,7 @@ func TestPeerRelaySplicePreservesE2E(t *testing.T) {
 }
 
 // TestPeerRelaySpliceRejectsUnauthorizedExitE2E is the security half of the
-// invariant: the relay hop must not weaken #60/#69. An exit reached through the
+// invariant: the relay hop must not weaken old #60/#69. An exit reached through the
 // real relayPipe splice that presents no valid admission credential is rejected
 // by the client before any traffic flows — the relay cannot vouch for the exit,
 // because the credential is verified end-to-end inside the Noise channel the

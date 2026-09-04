@@ -19,7 +19,7 @@ import (
 // rotated snapshot (new hops, a renewed expiry) without a restart, the
 // client-side mirror of cmd/coordinator's own reloadRevocationsLoop.
 //
-// core/crl_reload_test.go (issue #90) is the direct template: same four-test
+// core/crl_reload_test.go (old #90) is the direct template: same four-test
 // shape (picks up a change; keeps the previous directory on each distinct
 // failure mode; the loop itself stops on Stop; Start wires it end to end),
 // because the fail-safe posture it pins is the identical one this file's
