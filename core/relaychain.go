@@ -1,6 +1,6 @@
 package core
 
-// Client-assembled, onion-layered relay chains (issue #142, ADR-0038).
+// Client-assembled, onion-layered relay chains (old #142, ADR-0038).
 //
 // A chain routes a RELAYED path through several nodes so that no single one of
 // them links this client to its exit. It is not a new protocol: a chain is the
@@ -14,14 +14,14 @@ package core
 //	  ...
 //	layer n-1  client <-> Hn-1   target "hop:<exit dial addr>"
 //	innermost  client <-> exit   target = the real destination, exit presents its
-//	                             admission credential (#60/#69) — UNCHANGED
+//	                             admission credential (old #60/#69) — UNCHANGED
 //
 // # How the chain reaches its first peeling hop
 //
 // Noise_NK authenticates the responder by a static key the initiator supplies up
 // front, so the client can only peel at a hop whose X25519 key it already holds.
 // It does not hold the coordinator-assigned relay's: that relay is named to the
-// client only by wire.RelayTag, which is deliberately non-routable (issue #56).
+// client only by wire.RelayTag, which is deliberately non-routable (old #56).
 // So the assigned relay canNOT be a peeling hop; the client has to name the head
 // of its chain itself.
 //
@@ -43,8 +43,8 @@ package core
 //
 // The client resolves its terminating exit from the SIGNED coldstart snapshot
 // (core/coldstart), which carries exits with their countries and is the same
-// artifact hop selection already reads. That is what replaced the pre-#146 live
-// per-exit list, and it is strictly better than what it replaced: signed, and never
+// artifact hop selection already reads. That is what replaced the live per-exit list
+// old #146 retired, and it is strictly better than what it replaced: signed, and never
 // requested per connect.
 //
 // # What a chain does and does not hide
@@ -222,12 +222,12 @@ var (
 // key the client runs Noise_NK against, so a substituted hop cannot complete the
 // handshake) and the address the PREVIOUS hop dials to reach it.
 type relayHop struct {
-	id       string // hex X25519 public key — the node id (#12/#60)
+	id       string // hex X25519 public key — the node id (old #12/#60)
 	pub      []byte // that id decoded; PeerStatic for this hop's layer
 	dial     string // host:port the previous hop dials
-	operator string // coordinator-signed operator/vouch tag, for diversity (#124)
+	operator string // coordinator-signed operator/vouch tag, for diversity (old #124)
 
-	// country is the country tag the coordinator published for this node (issue #136,
+	// country is the country tag the coordinator published for this node (old #136,
 	// ADR-0042 §1). A chaining client filters terminating-exit candidates by it, which
 	// is the whole of how the user's chosen country still means something once the
 	// coordinator has stopped choosing the exit.
@@ -333,7 +333,7 @@ type relayDirectory struct {
 // only by case, never by meaning; an empty cc matches every exit.
 //
 // This is the reader ADR-0042 §9 says core/ was missing. Removing the live
-// per-exit list (#146) left the signed snapshot as the only place a client can
+// per-exit list (old #146) left the signed snapshot as the only place a client can
 // learn a concrete exit id, and a chaining client needs one — it encrypts its
 // innermost layer to that exit's static key, which IS its id (ADR-0009).
 //
@@ -468,7 +468,7 @@ func loadRelayDirectory(signed []byte, pub ed25519.PublicKey, selfID string, now
 
 		// A peeling hop must have an X25519 id (so the client can run Noise_NK
 		// against it) and an address the previous hop can dial. A relay-only node
-		// qualifies through Ingress (issue #124); an exit-role node qualifies through
+		// qualifies through Ingress (old #124); an exit-role node qualifies through
 		// its advertise address, and only it can be a chain's first peeling hop.
 		pub, err := hex.DecodeString(ent.ID)
 		if err != nil || len(pub) != 32 {
@@ -958,7 +958,7 @@ func chooseChainExitAvoiding(d *relayDirectory, country string, avoid func(strin
 // Operator diversity is the anti-correlation control (ADR-0038 §6): controlling
 // the FIRST and LAST hop of a chain re-links client to exit, so two hops of one
 // chain must not sit in the same operator's vouch subtree. The tag is
-// coordinator-signed and not a node self-report (#124), which is what makes it
+// coordinator-signed and not a node self-report (old #124), which is what makes it
 // worth anything — a node asked to state its own operator would simply lie.
 //
 // # Exactly how far it goes, which is less far than "enforced"
@@ -976,7 +976,7 @@ func chooseChainExitAvoiding(d *relayDirectory, country string, avoid func(strin
 // And it is not the load-bearing signal even when it does apply. Real network
 // diversity is AS diversity, and an AS number is deliberately absent from the
 // signed directory because neither a node nor a coordinator can be trusted to
-// assert one (the ADR-0038 #124 amendment says so explicitly).
+// assert one (the ADR-0038 old #124 amendment says so explicitly).
 //
 // # AS diversity, which IS the load-bearing signal (issue #23)
 //
@@ -1043,7 +1043,7 @@ func chooseChainExitAvoiding(d *relayDirectory, country string, avoid func(strin
 // satisfy the advisory one. Without pass 2, the no-table case is worse than useless:
 // every hop pools into unknown, so no pass demanding AS distinctness can place
 // anything, and the fill would fall straight through to unconstrained — silently
-// switching OFF the operator diversity that has been running since #124. Adding a
+// switching OFF the operator diversity that has been running since old #124. Adding a
 // control must not remove one, so the ladder keeps a rung where operator diversity
 // stands alone.
 //
@@ -1292,7 +1292,7 @@ func randIndex(n int) (int, error) {
 	return int(j.Int64()), nil
 }
 
-// relayTagFor recomputes the coordinator's opaque peer-relay tag (issue #56) for a
+// relayTagFor recomputes the coordinator's opaque peer-relay tag (old #56) for a
 // node id the client already holds.
 //
 // The derivation is duplicated from cmd/coordinator's relayTag rather than
@@ -1302,9 +1302,9 @@ func randIndex(n int) (int, error) {
 // pins the quota literals.
 //
 // The tag is one-way, so it cannot be turned back into a node id — which is the
-// property #56 wanted. It is not, however, unguessable FORWARD: a client that
+// property old #56 wanted. It is not, however, unguessable FORWARD: a client that
 // already knows a specific node's id can compute that node's tag and compare. That
-// asymmetry is what verifyChainDisjoint uses, and it costs #56 nothing, because a
+// asymmetry is what verifyChainDisjoint uses, and it costs old #56 nothing, because a
 // client can only test ids it already has.
 func relayTagFor(id string) string {
 	sum := sha256.Sum256(append([]byte("bacchus-relay-tag\x00"), id...))
@@ -1489,7 +1489,7 @@ func (g *stallGuard) stop() bool {
 //     worth routing around — a different chain will not be refused by a node it does
 //     not contain — but the node itself is fine and should be come back to, which is
 //     what an EXPIRING cooling mark says and a removal would not.
-//   - hopRejected is admission verification failing (#26/#60). NOT liveness, and
+//   - hopRejected is admission verification failing (#26/old #60). NOT liveness, and
 //     deliberately not recoverable — see chainDialError.recoverable.
 type chainFault int
 
@@ -1598,7 +1598,7 @@ func (e *Engine) dialE2E(raw io.ReadWriteCloser, plan *chainPlan, exitPub []byte
 // The innermost handshake is the unedited clientHandshake call, with the same
 // exitVerifyFunc every unchained path uses, passed the same thing every unchained
 // path passes it: the static key of the exit THIS handshake is against. That is the
-// whole of the #60/#69 argument — the exit-admission credential is verified over a
+// whole of the old #60/#69 argument — the exit-admission credential is verified over a
 // channel that terminates at the exit, and the layers around it are outside that
 // channel, so the check is bit-identical whether it crossed 0, 1, or n hops.
 //
@@ -1606,7 +1606,7 @@ func (e *Engine) dialE2E(raw io.ReadWriteCloser, plan *chainPlan, exitPub []byte
 // hex-encodes to "", which admission.accept reads as a BEARER credential and skips
 // the subject-binding check for entirely: signature, window, role and revocation
 // would all still be checked, but "this credential belongs to the exit I am
-// actually talking to" — the #60 property — would not be. The plan is the only
+// actually talking to" — the old #60 property — would not be. The plan is the only
 // place a chained path holds that key.
 //
 // Layers are verified outermost-first, so a bad hop fails before the client
@@ -1837,7 +1837,7 @@ func (e *Engine) rebuildChain(prev *chainPlan) (*chainPlan, error) {
 //     off it, and dropping the session is what hands the problem to the machinery that
 //     can — reconnectLoop (ADR-0030) or the pool's maintainPath (ADR-0028), both of
 //     which re-run chainFor and will now avoid the cooled head. This is the client's
-//     own version of the coordinator's #96 relay-dead nudge, for the node the
+//     own version of the coordinator's old #96 relay-dead nudge, for the node the
 //     coordinator cannot nudge about: reselectDeadRelays only ever covers the assigned
 //     blind relay, and everything past it is the client's to notice.
 //   - An admission rejection: cool the node and fail. See chainDialError.recoverable.
@@ -2106,7 +2106,7 @@ const (
 // forwardLimits bounds what an intermediate hop will carry: concurrent forwarded
 // circuits per PREVIOUS HOP and in aggregate, plus an optional per-previous-hop
 // byte pace. It is the "rate-limit per previous hop and in aggregate" ADR-0038 §6
-// called for and #142 shipped without.
+// called for and old #142 shipped without.
 //
 // # Why the previous hop is the key
 //

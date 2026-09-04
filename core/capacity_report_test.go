@@ -13,7 +13,7 @@ import (
 
 // mintCosignedReceipt runs the real exit and client accounting halves over an in-memory
 // pipe and returns a genuinely co-signed receipt plus the client key that signed it — the
-// same shape runClientAccounting holds when it sends a capacity-report (issue #158).
+// same shape runClientAccounting holds when it sends a capacity-report (old #158).
 func mintCosignedReceipt(t *testing.T, exitID string, bytesN uint64) (accounting.Receipt, ed25519.PrivateKey) {
 	t.Helper()
 	_, exitKey, _ := ed25519.GenerateKey(rand.Reader)

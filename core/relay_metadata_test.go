@@ -11,12 +11,12 @@ import (
 )
 
 // This file covers the coordinator relay-metadata lane on the core side:
-//   - issue #97: a relay:"turn" reply is the DIRECT disposition (accurate
+//   - old #97: a relay:"turn" reply is the DIRECT disposition (accurate
 //     connected-via line + accounted like a direct session), while relay:"peer"
 //     stays a relayed, unaccounted path; relayPipe surfaces a dial-to-exit
 //     failure; and the relayPeer/relayTURN literals are pinned so they cannot
 //     drift from the coordinator's copy.
-//   - issue #56: the client remembers a peer relay whose dial failed this Connect
+//   - old #56: the client remembers a peer relay whose dial failed this Connect
 //     (by the coordinator's opaque tag) and skips a second pool member that
 //     re-offers the same relay.
 //
@@ -59,7 +59,7 @@ func (t *dialCountTransport) count() int {
 
 // newRelayMetaClient builds a client engine on the real single-transport connect
 // path with accounting enabled, so a test can assert both the connected-via event
-// and whether a counter was started (the two halves of issue #97's "treat turn as
+// and whether a counter was started (the two halves of old #97's "treat turn as
 // direct"). Fast timeouts keep it snappy; a long accounting interval keeps the
 // receipt loop from ticking during the test.
 func newRelayMetaClient(t *testing.T, coords []string, tr Transport) *Engine {
@@ -68,7 +68,7 @@ func newRelayMetaClient(t *testing.T, coords []string, tr Transport) *Engine {
 		Coordinators:    coords,
 		Roles:           []string{RoleClient},
 		SocksAddr:       "127.0.0.1:0",
-		Geo:             "NL", // a connect names a country now (issue #146)
+		Geo:             "NL", // a connect names a country now (old #146)
 		AcctDir:         t.TempDir(),
 		AcctIntervalSec: 3600, // don't let the client accounting loop tick mid-test
 	})
@@ -89,7 +89,7 @@ func newRelayMetaClient(t *testing.T, coords []string, tr Transport) *Engine {
 // the given disposition and tag.
 //
 // Every mint carries an ExitID, because a real coordinator's does and a client cannot
-// use a session without one — an exit's id IS its Noise static key (issue #146,
+// use a session without one — an exit's id IS its Noise static key (old #146,
 // ADR-0009), so a mint that omits it is refused at the wire boundary. Omitting it here
 // would make these tests exercise that refusal path instead of the relay-disposition
 // behaviour they are about.
@@ -102,7 +102,7 @@ func refuseDirectMint(relay, tag string) func(string) (wire, bool) {
 	}
 }
 
-// TestConnectTurnFallbackIsDirectDisposition is issue #97's client half: a
+// TestConnectTurnFallbackIsDirectDisposition is old #97's client half: a
 // relay-mode connect that comes back relay:"turn" must report the DIRECT path
 // (not "via RELAY") and be accounted like a direct session — the exit holds a
 // session id to attribute bytes to, so there is a real counter to cosign.
@@ -165,7 +165,7 @@ func TestConnectPeerRelayIsRelayDisposition(t *testing.T) {
 	}
 }
 
-// TestConnectSkipsRelayTagThatAlreadyFailed is issue #56: two pool members hand
+// TestConnectSkipsRelayTagThatAlreadyFailed is old #56: two pool members hand
 // back the SAME peer relay (same opaque tag) and refuse direct. The transport dial
 // fails, so the first member's relay tag is recorded; the second member's re-offer
 // of that tag must be skipped, not re-dialed — one transport dial across the pass,
@@ -220,7 +220,7 @@ func TestConnectRetriesDistinctRelayTags(t *testing.T) {
 	}
 }
 
-// TestConnectDoesNotDedupTurnFallbackTag is issue #111: the rotation dedupe is
+// TestConnectDoesNotDedupTurnFallbackTag is old #111: the rotation dedupe is
 // gated on the relayPeer disposition, so a coordinator that (illegitimately) stamps
 // a relay tag on a relay:"turn" reply must NOT cause a later pool member's same-tag
 // TURN reply to be skipped. Both members' paths must be dialed — a hostile
@@ -273,7 +273,7 @@ func TestRelayDedup(t *testing.T) {
 	if d.seen("x") {
 		t.Fatal("a fresh dedupe sees nothing")
 	}
-	d.fail("") // empty tag is a no-op (direct / TURN-fallback / pre-#56 coordinator)
+	d.fail("") // empty tag is a no-op (direct / TURN-fallback / a coordinator predating old #56)
 	if d.seen("") {
 		t.Fatal("an empty tag must never be seen")
 	}
@@ -286,7 +286,7 @@ func TestRelayDedup(t *testing.T) {
 	}
 }
 
-// TestRelayPipeEmitsErrorOnFailedDial is issue #97's fix (3): a relay that cannot
+// TestRelayPipeEmitsErrorOnFailedDial is old #97's fix (3): a relay that cannot
 // reach its assigned exit must surface the failure, not swallow it.
 func TestRelayPipeEmitsErrorOnFailedDial(t *testing.T) {
 	sink, snap := collectEvents()
@@ -313,7 +313,7 @@ func TestRelayPipeEmitsErrorOnFailedDial(t *testing.T) {
 // side of the coordinator<->client wire. They are duplicated in
 // cmd/coordinator/main.go (that binary does not import core); the coordinator test
 // of the same name pins the identical bytes, so neither copy can drift without a
-// test failing (issue #97).
+// test failing (old #97).
 func TestRelayDispositionWireContract(t *testing.T) {
 	if relayPeer != "peer" || relayTURN != "turn" {
 		t.Fatalf("relay disposition literals drifted: peer=%q turn=%q", relayPeer, relayTURN)

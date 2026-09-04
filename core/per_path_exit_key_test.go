@@ -23,7 +23,7 @@ import (
 // (pool_test.go's testExitID, reconnect_smoke_test.go, relay_metadata_test.go, and
 // cmd/node's midsession_recovery_test.go where exit2 deliberately shares exit1's
 // identity). So no test ever had a coordinator assign a DIFFERENT exit across a
-// reconnect or a reselect — which is the exact scenario country-only assignment (#146)
+// reconnect or a reselect — which is the exact scenario country-only assignment (old #146)
 // created and the exact scenario that forced the key to become per-path.
 //
 // A suite built on one exit id cannot see the difference between per-path and
@@ -298,7 +298,7 @@ func TestCountryReplyWireContract(t *testing.T) {
 	}
 
 	// Busy must survive as its own field rather than being re-derived: a country that
-	// is present but full is the state #147 has to be able to say out loud, and Exits
+	// is present but full is the state old #147 has to be able to say out loud, and Exits
 	// alone cannot express it.
 	const busyEncoded = `{"type":"countries","countries":[{"country":"SE","exits":2,"available":0,"busy":true}]}`
 	var b wire

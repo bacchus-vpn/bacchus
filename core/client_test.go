@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestMeshRecoveryPartialConfigDiagnostic is issue #121's second item: a direct
+// TestMeshRecoveryPartialConfigDiagnostic is old #121's second item: a direct
 // core.Config caller (unlike cmd/node's loadMeshRecovery, which fails fast) that
 // sets only some of MeshPeers/MeshProof/MeshPubKey — or a wrong-size MeshPubKey —
 // got recovery silently disabled by meshRecoveryConfigured with no signal at all.
@@ -44,7 +44,7 @@ func TestMeshRecoveryPartialConfigDiagnostic(t *testing.T) {
 				Coordinators: []string{"127.0.0.1:1"},
 				Roles:        []string{RoleClient},
 				SocksAddr:    "127.0.0.1:0",
-				Geo:          "NL", // a connect names a country, not an exit (issue #146)
+				Geo:          "NL", // a connect names a country, not an exit (old #146)
 				MeshPeers:    tc.peers,
 				MeshProof:    tc.proof,
 				MeshPubKey:   tc.pubkey,
@@ -61,7 +61,7 @@ func TestMeshRecoveryPartialConfigDiagnostic(t *testing.T) {
 
 			// The fail-safe itself must be untouched by the diagnostic: recovery is
 			// configured if and only if all three fields are fully, correctly set —
-			// a partial config still disables it exactly as before issue #121.
+			// a partial config still disables it exactly as before old #121.
 			fullyConfigured := len(tc.peers) > 0 && len(tc.proof) > 0 && len(tc.pubkey) == ed25519.PublicKeySize
 			if got := e.meshRecoveryConfigured(); got != fullyConfigured {
 				t.Fatalf("meshRecoveryConfigured() = %v, want %v — partial config must still fail safe", got, fullyConfigured)
@@ -82,7 +82,7 @@ func TestMeshRecoveryPartialDiagnosticIsOneTime(t *testing.T) {
 		Coordinators: []string{"127.0.0.1:1"},
 		Roles:        []string{RoleClient},
 		SocksAddr:    "127.0.0.1:0",
-		Geo:          "NL",                    // a connect names a country, not an exit (issue #146)
+		Geo:          "NL",                    // a connect names a country, not an exit (old #146)
 		MeshPeers:    []string{"127.0.0.1:1"}, // peers only: proof/pubkey missing => partial
 		OnEvent:      rec.record,
 	}

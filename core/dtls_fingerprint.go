@@ -8,7 +8,7 @@ package core
 // real call," and it is a single-rule distinguisher: Russia fingerprinted and
 // blocked Snowflake by exactly this kind of static DTLS signature, and the
 // mid-2026 censor auto-blocks nodes case-by-case on protocol signature. One
-// signature push and a static fingerprint is fleet-wide detectable (issue #14,
+// signature push and a static fingerprint is fleet-wide detectable (old #14,
 // ADR-0018).
 //
 // This file rewrites the ClientHello to look like a mainstream browser's WebRTC
@@ -21,11 +21,11 @@ package core
 // as opaque uint16s and skips unknown/GREASE extensions and groups, so injecting
 // browser/GREASE values never breaks the handshake between two of our own nodes.
 //
-// Scope (issue #14): break the static pion signature and blend toward common
+// Scope (old #14): break the static pion signature and blend toward common
 // browser shapes. It is deliberately not a full obfuscated transport — a
 // DataChannel bulk tunnel still doesn't match a real video call's traffic shape
 // over time. That residual is documented in docs/design/dtls-fingerprint.md and
-// is the job of the second transport (#16), not this change.
+// is the job of the second transport (old #16), not this change.
 
 import (
 	"crypto/rand"
@@ -182,7 +182,7 @@ func firefoxProfile() dtlsProfile {
 // ClientHello + ServerHello hooks (which change the bytes on the wire). The
 // ClientHello hook draws fresh randomness per connection so GREASE values and
 // Chrome's extension order vary call to call, the way a real browser's do; the
-// ServerHello hook is a deterministic reorder (issue #49). A node installs both
+// ServerHello hook is a deterministic reorder (old #49). A node installs both
 // because it may end up either the DTLS client or the server for a given peer.
 func (p dtlsProfile) apply(se *webrtc.SettingEngine) {
 	se.SetDTLSCipherSuites(negotiableSuites...)
@@ -255,13 +255,13 @@ func rewriteClientHello(m handshake.MessageClientHello, p dtlsProfile, r *mrand.
 }
 
 // rewriteServerHello reshapes pion's DTLS ServerHello into a browser-plausible
-// extension order (issue #49). It is a pure reorder — no GREASE, no permutation
+// extension order (old #49). It is a pure reorder — no GREASE, no permutation
 // (see serverExtOrder) — and transcript-safe for the same reason the ClientHello
 // rewrite is: pion marshals the hooked message and both peers hash those exact
 // bytes, while reorderByPriority preserves the whole extension set, so every
 // negotiated parameter still travels. The ServerHello carries far less signal
 // than the ClientHello (one chosen cipher, a few answerer-selected extensions),
-// so this is the lightest of #49's levers, but it clears the last "pion emits
+// so this is the lightest of old #49's levers, but it clears the last "pion emits
 // its extensions in this fixed order" tell on the answer side.
 func rewriteServerHello(m handshake.MessageServerHello) handshake.Message {
 	m.Extensions = reorderByPriority(m.Extensions, serverExtOrder)

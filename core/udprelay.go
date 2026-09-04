@@ -15,7 +15,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/capacity"
 )
 
-// UDP relay forwarding (issue #41): carries a client's captured UDP flow
+// UDP relay forwarding (old #41): carries a client's captured UDP flow
 // (QUIC, VoIP, games — anything but the DNS special case tun2socks.go already
 // handles) across the same E2E channel a TCP CONNECT uses, via the
 // udpTargetPrefix sentinel (core/e2e.go). One flow is one fixed destination
@@ -26,7 +26,7 @@ import (
 // ForwarderRequest, one association, one destination). That single
 // destination is enforced, not just assumed of a well-behaved client:
 // serveSOCKSUDPAssociate drops (rather than misroutes) any later datagram
-// addressed elsewhere (issue #99).
+// addressed elsewhere (old #99).
 //
 // Two framing layers, not one:
 //   - The client-facing SOCKS boundary (handleSocksUDPAssociate, and the
@@ -141,7 +141,7 @@ func (e *Engine) exitTerminateUDP(sid string, pace *capacity.Limiter, nc *noiseC
 			if err := pace.WaitN(e.limiterCtx, n); err != nil {
 				return
 			}
-			// Declared limits (issue #143): pace and count this datagram against the
+			// Declared limits (old #143): pace and count this datagram against the
 			// operator's cap, and stop the flow once the quota is spent. meter() cannot
 			// reach here — this loop moves datagrams, not a stream.
 			if err := e.meterN(n); err != nil {
@@ -164,7 +164,7 @@ func (e *Engine) exitTerminateUDP(sid string, pace *capacity.Limiter, nc *noiseC
 		if err := pace.WaitN(e.limiterCtx, len(payload)); err != nil { // tier cap (issue #74); see above
 			return
 		}
-		if err := e.meterN(len(payload)); err != nil { // declared limits (issue #143); see above
+		if err := e.meterN(len(payload)); err != nil { // declared limits (old #143); see above
 			return
 		}
 		if _, err := conn.Write(payload); err != nil {
@@ -239,7 +239,7 @@ func encodeSOCKSUDPFrame(ip net.IP, port uint16, payload []byte) []byte {
 }
 
 // handleSocksUDPAssociate serves one SOCKS5 UDP ASSOCIATE request (RFC 1928
-// §4, issue #41): buf already holds the VER/CMD/RSV/ATYP header handleSocks
+// §4, old #41): buf already holds the VER/CMD/RSV/ATYP header handleSocks
 // read. The DST.ADDR/DST.PORT that follows is the client's advertised
 // send-from address — purely advisory (most SOCKS5 clients, including this
 // project's own, send 0.0.0.0:0 since they don't know it in advance) and
@@ -304,7 +304,7 @@ func (e *Engine) serveSOCKSUDPAssociate(relay *net.UDPConn, ctrlDone <-chan stru
 
 	openCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	// Chained exactly like the TCP path (issue #142). A UDP association that took a
+	// Chained exactly like the TCP path (old #142). A UDP association that took a
 	// shorter path than the user's configured chain would be a silent hole in the
 	// property they asked for — and UDP is most of what a browser moves.
 	//
@@ -393,7 +393,7 @@ func (e *Engine) serveSOCKSUDPAssociate(relay *net.UDPConn, ctrlDone <-chan stru
 			continue // one malformed datagram is not a reason to tear the whole flow down
 		}
 		if dstPort != port || !dstIP.Equal(ip) {
-			continue // one destination per association (issue #99): drop, don't misroute to ip:port
+			continue // one destination per association (old #99): drop, don't misroute to ip:port
 		}
 		touch()
 		ctr.Add(uint64(len(p)))

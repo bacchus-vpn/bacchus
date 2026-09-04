@@ -12,7 +12,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/selection"
 )
 
-// This file extends mesh-walk recovery past the first-connect boundary (issue #115):
+// This file extends mesh-walk recovery past the first-connect boundary (old #115):
 // it must also engage when a LIVE session loses every coordinator mid-session, on
 // both the single-transport reconnect path and the pooled failover path, and the
 // pooled path must surface ErrNoCoordinatorReachable so recovery can key on it. The
@@ -70,7 +70,7 @@ func TestReconnectMidSessionAllSilentTriggersMeshWalk(t *testing.T) {
 		t.Fatal("recovery must carry the fresher snapshot as the next proof of prior contact")
 	}
 
-	// No strand, no double-connect (the #105 review lesson): once recovery is
+	// No strand, no double-connect (the old #105 review lesson): once recovery is
 	// signalled, the reconnect loop must STOP and hand off to the supervisor — it must
 	// not keep dialing the dead pool. Record the establish count after the signal,
 	// stop as the supervisor would, and prove it did not grow: nothing is racing the

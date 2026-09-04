@@ -19,7 +19,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/rendezvous"
 )
 
-// This file drives issue #121's first item: the cmd/node supervisor glue in
+// This file drives old #121's first item: the cmd/node supervisor glue in
 // runNode that consumes Engine.NeedsRecovery -> reads RecoveredDirectory ->
 // Stop()s the old engine -> rebuilds against rediscovered coordinators
 // (courier.go, the <-eng.NeedsRecovery() branch) had no direct test. The
@@ -28,7 +28,7 @@ import (
 // runNode does with it. NeedsRecovery is never touched directly here: the test
 // drives the real conditions (a genuinely silent coordinator, a genuinely
 // dropped session, a real courier) that make the engine close it itself, so the
-// handoff runNode performs is pinned for real, per issue #105's lesson that a
+// handoff runNode performs is pinned for real, per old #105's lesson that a
 // stubbed signal would not have caught the double-connect/strand class of bug.
 //
 // cmd/node has no access to core's unexported test seams (fakeTransport,
@@ -51,7 +51,7 @@ type rvWire struct {
 	ID      string `json:"id,omitempty"`
 	Mode    string `json:"mode,omitempty"`
 	Session string `json:"session,omitempty"`
-	// Country is what a CONNECT names (issue #146, ADR-0042). A client no longer
+	// Country is what a CONNECT names (old #146, ADR-0042). A client no longer
 	// names an exit; it names a place, and the coordinator picks inside it.
 	Country string `json:"country,omitempty"`
 	// ExitID travels the other way: it is the coordinator's ANSWER on the session
@@ -127,7 +127,7 @@ func (c *fakeRendezvous) hasExit() bool {
 
 // registeredExit is the exit id this coordinator learned from the exit's own register
 // and hands back on every session mint — the value the client keys its end-to-end
-// handshake on (issue #146).
+// handshake on (old #146).
 func (c *fakeRendezvous) registeredExit() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -390,7 +390,7 @@ func freeTCPAddr(t *testing.T) string {
 	return addr
 }
 
-// TestRunNode_MidSessionMeshWalkRecoversToCleanSocksRebind is issue #121's
+// TestRunNode_MidSessionMeshWalkRecoversToCleanSocksRebind is old #121's
 // first item: runNode's <-eng.NeedsRecovery() branch — Stop the dead engine,
 // read RecoveredDirectory, rebuild core.New against the rediscovered
 // coordinators, reconnect — was exercised nowhere. This drives it for real.
@@ -415,7 +415,7 @@ func freeTCPAddr(t *testing.T) string {
 // core's own real-WebRTC tests (core/dtls_fingerprint_test.go) are skipped the
 // same way for the same reason.
 //
-// This does run automated, on every change that touches it (issue #131):
+// This does run automated, on every change that touches it (old #131):
 // .github/workflows/ci.yml's "server" job invokes plain `go test ./core/...
 // ./bind/... ./cmd/...` with no -short, so testing.Short() above is false in
 // CI and this test executes for real there — confirmed against the run that
@@ -465,7 +465,7 @@ func TestRunNode_MidSessionMeshWalkRecoversToCleanSocksRebind(t *testing.T) {
 	cfg := core.Config{
 		Roles:     []string{core.RoleClient},
 		SocksAddr: socksAddr,
-		// A client names a COUNTRY (issue #146); the coordinator picks the exit and
+		// A client names a COUNTRY (old #146); the coordinator picks the exit and
 		// tells the client which it got. exitID below is the exit's own identity,
 		// asserted against what the client is handed — not something it asks for.
 		Geo: "NL",

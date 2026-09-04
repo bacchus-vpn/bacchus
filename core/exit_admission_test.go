@@ -15,7 +15,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/admission"
 )
 
-// End-to-end exit-admission verification (issue #60). These tests drive the same
+// End-to-end exit-admission verification (old #60). These tests drive the same
 // layer core/e2e_test.go does — a raw net.Pipe standing in for one transport
 // stream, exitHandshake on one end and clientHandshake on the other — and assert
 // the client's decision to route or abort based on the admission credential the
@@ -90,7 +90,7 @@ func TestE2EClientAcceptsAdmissionAuthorizedExit(t *testing.T) {
 	}
 }
 
-// TestE2EClientRejectsHostileExit is the #60 acceptance test: a hostile exit
+// TestE2EClientRejectsHostileExit is the old #60 acceptance test: a hostile exit
 // holds a self-consistent id (so it completes Noise_NK) but has no valid root
 // credential binding that id to the exit role. Whatever it presents — nothing, a
 // malformed blob, a credential for another exit, an expired one, a wrong-role
@@ -259,9 +259,9 @@ func TestNewRejectsMalformedAdmissionPubKey(t *testing.T) {
 	}
 }
 
-// Client-side revocation oracle (issue #69): buildExitVerifier wires a signed
+// Client-side revocation oracle (old #69): buildExitVerifier wires a signed
 // CRL into a real revoked predicate instead of the nil (always-false) oracle
-// #60 v1 shipped with. These are the acceptance tests: a CRL configured
+// old #60 v1 shipped with. These are the acceptance tests: a CRL configured
 // rejects a revoked-but-unexpired credential and still accepts a non-revoked
 // one; no anchor/CRL at all is unchanged fail-open; a broken or stale CRL is a
 // construction error, not a silent downgrade.
@@ -290,7 +290,7 @@ func TestBuildExitVerifierWithCRL(t *testing.T) {
 	}
 }
 
-// TestBuildExitVerifierRevokedCredentialRejected is the #69 acceptance case at
+// TestBuildExitVerifierRevokedCredentialRejected is the old #69 acceptance case at
 // the verifier layer: a credential whose serial appears in the configured CRL
 // is rejected as ErrRevoked even though it is otherwise unexpired and
 // well-formed.
@@ -317,7 +317,7 @@ func TestBuildExitVerifierRevokedCredentialRejected(t *testing.T) {
 }
 
 // TestBuildExitVerifierNoCRLFailsOpenOnRevocation: with an anchor but no CRL
-// (today's #60 v1 shape), a credential that would be revoked under some other
+// (today's old #60 v1 shape), a credential that would be revoked under some other
 // bundle still verifies — matching admission.NewVerifier's nil-oracle default.
 func TestBuildExitVerifierNoCRLFailsOpenOnRevocation(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
@@ -338,7 +338,7 @@ func TestBuildExitVerifierNoCRLFailsOpenOnRevocation(t *testing.T) {
 }
 
 // TestBuildExitVerifierUnconfiguredFailsOpen: no anchor and no CRL is
-// unchanged fail-open — the client accepts any exit, exactly as before #69.
+// unchanged fail-open — the client accepts any exit, exactly as before old #69.
 func TestBuildExitVerifierUnconfiguredFailsOpen(t *testing.T) {
 	v, _, err := buildExitVerifier("", "", "", false, admissionNow)
 	if err != nil || v != nil {
@@ -346,7 +346,7 @@ func TestBuildExitVerifierUnconfiguredFailsOpen(t *testing.T) {
 	}
 }
 
-// TestBuildExitVerifierMalformedCRL covers issue #69's "malformed-CRL
+// TestBuildExitVerifierMalformedCRL covers old #69's "malformed-CRL
 // handling" requirement: a CRL that fails to parse, fails signature
 // verification, or has already expired must all fail construction — never
 // silently fall back to "nothing is revoked".
@@ -415,7 +415,7 @@ func TestBuildExitVerifierCRLWithoutAnchorErrors(t *testing.T) {
 	}
 }
 
-// Client CRL sourced from a file path, reloaded on an interval (issue #90).
+// Client CRL sourced from a file path, reloaded on an interval (old #90).
 // buildExitVerifier's crlPath handling mirrors its crlEncoded handling
 // exactly — same construction-error posture — so these tests parallel the
 // crlEncoded ones above; core/crl_reload_test.go covers the actual reload
@@ -508,13 +508,13 @@ func TestBuildExitVerifierCRLPathMalformedErrors(t *testing.T) {
 	}
 }
 
-// Opt-in require-CRL mode (issue #91): "anchor present, CRL absent" becomes a
-// construction error instead of the default fail-open. These are the #91
+// Opt-in require-CRL mode (old #91): "anchor present, CRL absent" becomes a
+// construction error instead of the default fail-open. These are the old #91
 // acceptance tests.
 
 // TestBuildExitVerifierRequireCRLDefaultUnchanged proves the default
 // (requireCRL=false, the zero value of Config.AdmissionRequireCRL) is
-// byte-for-byte the pre-#91 behavior: an anchor with no CRL still
+// byte-for-byte the behavior before old #91: an anchor with no CRL still
 // constructs and still fails open on revocation. This is the test that would
 // catch a regression flipping the default.
 func TestBuildExitVerifierRequireCRLDefaultUnchanged(t *testing.T) {
@@ -535,7 +535,7 @@ func TestBuildExitVerifierRequireCRLDefaultUnchanged(t *testing.T) {
 	}
 }
 
-// TestBuildExitVerifierRequireCRLAnchorNoCRLErrors is the #91 acceptance
+// TestBuildExitVerifierRequireCRLAnchorNoCRLErrors is the old #91 acceptance
 // case: an anchor configured, requireCRL on, and no CRL of either kind — the
 // exact "hostile coordinator stripped the CRL from the invite" shape — must
 // be a hard construction error, not a silent fail-open.
@@ -582,10 +582,10 @@ func TestBuildExitVerifierRequireCRLSatisfied(t *testing.T) {
 	}
 }
 
-// TestE2EClientRejectsRevokedExit is the #69 acceptance test run through the
+// TestE2EClientRejectsRevokedExit is the old #69 acceptance test run through the
 // actual handshake path (mirrors TestE2EClientRejectsHostileExit): an exit
 // presents a credential that is signed, self-bound, in its validity window —
-// everything #60 v1 checks — but its serial is in the client's configured
+// everything old #60 v1 checks — but its serial is in the client's configured
 // CRL. The client aborts instead of routing.
 func TestE2EClientRejectsRevokedExit(t *testing.T) {
 	rootPub, rootPriv, err := ed25519.GenerateKey(nil)
@@ -689,7 +689,7 @@ func TestE2EClientAcceptsNonRevokedExitWithCRLConfigured(t *testing.T) {
 
 // TestClientWithoutAnchorFailsOpen: no configured anchor means no verify
 // callback — the client accepts any exit it can complete Noise_NK with, matching
-// the coordinator's fail-open when -admission-pubkey is unset (#42).
+// the coordinator's fail-open when -admission-pubkey is unset (old #42).
 func TestClientWithoutAnchorFailsOpen(t *testing.T) {
 	eng, err := New(Config{Coordinators: []string{testCoord}, Roles: []string{"client"}})
 	if err != nil {

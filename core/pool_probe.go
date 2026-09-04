@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// Sustained-flow validation (issue #15, trap #1): "connected" is not "working".
+// Sustained-flow validation (old #15, trap #1): "connected" is not "working".
 // A Russian soft-block lets a transport complete its handshake and then wedges
 // the flow at roughly 16 KB / ~25 packets (the "destination-freeze"), so a path
 // that merely dialed is not yet a path the user's traffic should ride. The pool
@@ -20,7 +20,7 @@ import (
 // handshake to echo instead of dial. So it needs no change to core/e2e.go, rides
 // inside the same encryption as real traffic (indistinguishable on the wire),
 // and is reachable only by a peer that already completed transport setup and
-// authenticated the exit — the same admission/anti-probe gates (#42/#60/#62) as
+// authenticated the exit — the same admission/anti-probe gates (old #42/#60/#62) as
 // any real connection, adding no new external surface.
 const (
 	// probeSentinel is the reserved .invalid target (RFC 2606) that turns a
@@ -45,7 +45,7 @@ const (
 // client closes its side (the normal case, once the client has its bytes back)
 // or the cap is reached.
 //
-// Metered and paced like any other forwarded stream (issue #143), because the
+// Metered and paced like any other forwarded stream (old #143), because the
 // operator's ISP does not care that these bytes are a probe: they arrive and they
 // leave, and the bill is the same. maxProbeEcho bounds one stream, but nothing
 // bounds streams per session (see exitTerminate's AcceptStream loop), so an

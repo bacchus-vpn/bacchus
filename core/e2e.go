@@ -14,7 +14,7 @@ import (
 
 // End-to-end encryption client<->exit. A relay in the path forwards ciphertext
 // and the next hop only; it cannot recover the destination or the content
-// (ADR-0009, issue #12). The handshake is Noise_NK: the exit's static public key
+// (ADR-0009, old #12). The handshake is Noise_NK: the exit's static public key
 // is its node id, so the client authenticates the exit it selected and a
 // malicious relay cannot impersonate it. NK leaves the client anonymous.
 //
@@ -26,7 +26,7 @@ import (
 // destination lives inside the encrypted channel, not in the label.
 const e2eLabel = "e2e"
 
-// udpTargetPrefix marks an E2E target as a UDP relay request (issue #41)
+// udpTargetPrefix marks an E2E target as a UDP relay request (old #41)
 // rather than a TCP CONNECT: the client sends "udp:"+host:port instead of a
 // bare host:port, overloading the same target field the way acctSentinel and
 // probeSentinel already do (core/accounting.go, core/pool.go) — no change to
@@ -35,9 +35,9 @@ const e2eLabel = "e2e"
 const udpTargetPrefix = "udp:"
 
 // hopTargetPrefix marks an E2E target as an onion FORWARD to another Bacchus
-// node (issue #142, ADR-0038) rather than an egress to the internet: the client
+// node (old #142, ADR-0038) rather than an egress to the internet: the client
 // sends "hop:"+host:port, naming the next hop's forwarding ingress
-// (coldstart.Entry.Ingress, issue #124). It overloads the same target field as
+// (coldstart.Entry.Ingress, old #124). It overloads the same target field as
 // udpTargetPrefix/acctSentinel/probeSentinel — so a chain needs no new message
 // type, no handshake change, and no coordinator change; a hop is the existing
 // Noise_NK exchange with a different target string.
@@ -83,12 +83,12 @@ func exitKeyFromSeed(priv []byte) (noise.DHKey, error) {
 // by exitPub, then sends target as the first encrypted message. The returned
 // conn carries the tunnelled bytes.
 //
-// verifyExit, when non-nil, is the end-to-end admission check (issue #60): it is
+// verifyExit, when non-nil, is the end-to-end admission check (old #60): it is
 // handed the admission credential the exit presented in msg2's Noise payload and
 // returns a non-nil error to reject the exit, on which the handshake aborts and
 // no target is ever sent. A nil verifyExit means the client has no admission
 // anchor and does not verify (fail-open, matching the coordinator when
-// -admission-pubkey is unset, #42).
+// -admission-pubkey is unset, old #42).
 func clientHandshake(raw io.ReadWriteCloser, exitPub []byte, target string, verifyExit func(cred []byte) error) (*noiseConn, error) {
 	nc := newNoiseConn(raw)
 	hs, err := noise.NewHandshakeState(noise.Config{
@@ -113,7 +113,7 @@ func clientHandshake(raw io.ReadWriteCloser, exitPub []byte, target string, veri
 		return nil, err
 	}
 	// NK completes at msg2: cs0 encrypts initiator->responder, cs1 the reverse.
-	// msg2's payload carries the exit's admission credential (issue #60). It is
+	// msg2's payload carries the exit's admission credential (old #60). It is
 	// AEAD-sealed under a key that already mixes the exit's static key, so a relay
 	// in the path can neither read nor forge it, and it is cryptographically bound
 	// to the very key this handshake authenticates.
@@ -145,7 +145,7 @@ func clientHandshake(raw io.ReadWriteCloser, exitPub []byte, target string, veri
 // and returns the tunnel plus the client's requested target. It does not dial;
 // callers splice.
 //
-// cred is the exit's admission credential (issue #60), carried verbatim in
+// cred is the exit's admission credential (old #60), carried verbatim in
 // msg2's Noise payload so the client can verify end-to-end that this exit is
 // admission-authorized — not merely the id the coordinator named. An empty cred
 // presents none: an old client simply ignores the payload, and a client with no
@@ -193,8 +193,8 @@ func exitHandshake(raw io.ReadWriteCloser, key noise.DHKey, cred []byte) (*noise
 }
 
 // validTarget rejects obviously malformed destinations before the exit dials.
-// A routing prefix is stripped first, so a UDP relay request (issue #41) and an
-// onion forward (issue #142) both validate the same host:port shape underneath
+// A routing prefix is stripped first, so a UDP relay request (old #41) and an
+// onion forward (old #142) both validate the same host:port shape underneath
 // theirs. Exactly one prefix is stripped: the prefixes are distinct 4-byte
 // literals, so "udp:hop:…" is not a valid nesting and does not validate — the
 // only shapes that pass are a bare host:port and one prefix in front of one.

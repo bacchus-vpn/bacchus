@@ -8,14 +8,14 @@
 // hops however they are labelled. The AS a node sits in is therefore a security
 // input, and it is deliberately NOT carried in the signed directory — neither a node
 // nor a coordinator can be trusted to assert an AS number, because a Sybil operator
-// asked to state its own diversity would simply fabricate it (the ADR-0038 #124
+// asked to state its own diversity would simply fabricate it (the ADR-0038 old #124
 // amendment says so explicitly). The number has to be DERIVED, by the party relying
 // on it, from an address it did not choose.
 //
 // That derivation is what this package is. It is the same rule the rest of the
-// system already follows for observed addresses — coldstart.Entry.Ingress (#124),
-// the coordinator's derived country (#136, core/geoip), and capacity's observedAS
-// (#158): an observed address is trusted, a claimed one is not.
+// system already follows for observed addresses — coldstart.Entry.Ingress (old #124),
+// the coordinator's derived country (old #136, core/geoip), and capacity's observedAS
+// (old #158): an observed address is trusted, a claimed one is not.
 //
 // # Why local, never a lookup service
 //

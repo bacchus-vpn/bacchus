@@ -26,12 +26,12 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
-// The reality transport is the second Transport implementation (issue #16,
+// The reality transport is the second Transport implementation (old #16,
 // ADR-0008): TCP :443 wrapped in camouflage TLS, so it fails on a different axis
 // than WebRTC. WebRTC is UDP/DTLS and dies where an operator throttles UDP or
 // DataChannels; this rides TCP :443 with a borrowed-looking TLS handshake, the
 // surface that still survives in Russia (all of banking/Gosuslugi rides it).
-// Coverage is the union of the two, selected per user by the pool (issue #15).
+// Coverage is the union of the two, selected per user by the pool (old #15).
 //
 // Session model, mirrored onto TCP from the WebRTC one: a session is a set of
 // TLS connections to the exit's :443; each stream is one such connection,
@@ -57,7 +57,7 @@ const (
 
 	// realityProbeTimeout bounds the whole active-probe response — the reverse
 	// proxy to the origin, or the hold-and-drain when the origin is unreachable —
-	// so a slow prober cannot pin a goroutine open indefinitely (issue #62).
+	// so a slow prober cannot pin a goroutine open indefinitely (old #62).
 	realityProbeTimeout = 30 * time.Second
 
 	// realityProbeOff is the RealityProbeOrigin sentinel that disables probe
@@ -100,22 +100,22 @@ type realityTransport struct {
 	listenAddr  string              // TCP bind, default :443
 	advertise   string              // host:port put in the answer; the bound addr when empty
 	serverTLS   *tls.Config         // fallback self-signed config presented on the terminate path
-	probeOrigin string              // host:port of the impersonated origin: splice/mimic/bridge target; "" disables (issue #62 / ADR-0032)
+	probeOrigin string              // host:port of the impersonated origin: splice/mimic/bridge target; "" disables (old #62 / ADR-0032)
 	realityKey  *realityKeyPair     // exit's static X25519 identity; public half rides in the answer (ADR-0032)
 	replay      *realityReplayGuard // rejects verbatim ClientHello replays on the terminate path
 
 	// mimicTLS is the terminate-path config once the impersonated origin's actual
 	// certificate chain has been borrowed byte-for-byte (warmed in the background,
-	// issue #92); nil until then, when the self-signed serverTLS stands in. Read on
+	// old #92); nil until then, when the self-signed serverTLS stands in. Read on
 	// the hot path, so it is atomic.
 	mimicTLS atomic.Pointer[tls.Config]
 
 	onEvent func(kind, msg string)
 
-	// splice enforces the operator's declared limits (issue #143, ADR-0040) on the
+	// splice enforces the operator's declared limits (old #143, ADR-0040) on the
 	// active-probing reverse proxy — the one path that spent the operator's line
-	// unmetered (design §8.7, issue #163). nil when no limits are declared (today's
-	// fleet), in which case every splice path behaves exactly as it did before #163.
+	// unmetered (design §8.7, old #163). nil when no limits are declared (today's
+	// fleet), in which case every splice path behaves exactly as it did before old #163.
 	// Injected by the engine after construction (Engine.attachRealitySplice), because
 	// it shares the engine's quota+limiter and those outlive any one transport.
 	splice *realitySpliceLimits
@@ -124,7 +124,7 @@ type realityTransport struct {
 	// before each underlay TCP connection to it is opened (dialInner), so a
 	// full-device client can exclude that address from its tunnel first — the
 	// only point at which reality's dynamically-learned address is known before
-	// the connection exists (Config.OnUnderlayDial, issue #109). Client dial
+	// the connection exists (Config.OnUnderlayDial, old #109). Client dial
 	// path only; the responder side never sets it.
 	onUnderlayDial func(addr string)
 
@@ -134,7 +134,7 @@ type realityTransport struct {
 	// wg tracks every background goroutine the transport itself spawns (acceptLoop,
 	// warmMimicCert, one serveInbound per inbound conn, one answer per Accept), so
 	// close can Wait() for them instead of merely closing the listener and hoping
-	// (issue #65). They are all already bounded (listener close, realityHSTimeout,
+	// (old #65). They are all already bounded (listener close, realityHSTimeout,
 	// or ctx-cancel) — this makes that boundedness a real barrier, not a new timeout.
 	wg sync.WaitGroup
 
@@ -181,7 +181,7 @@ func newRealityTransport(cfg Config, onEvent func(kind, msg string)) (*realityTr
 	if err != nil {
 		return nil, fmt.Errorf("core: reality static key: %w", err)
 	}
-	// Active-probe response (issue #62): a failed inner handshake is reverse-
+	// Active-probe response (old #62): a failed inner handshake is reverse-
 	// proxied to a real origin so a prober sees an ordinary website, not the tell
 	// of an instant close. On by default — an unset origin means the SNI host on
 	// :443; the sentinel "off" restores the bare immediate close.
@@ -211,7 +211,7 @@ func (t *realityTransport) Name() string { return realityName }
 // Dial is the initiator: announce readiness, learn the exit's address + token
 // from the answer, then open one control connection. Returning only once that
 // connection is up makes Dial a real reachability probe — a blocked :443 fails
-// here, which is what the transport pool (issue #15) needs to fail over.
+// here, which is what the transport pool (old #15) needs to fail over.
 func (t *realityTransport) Dial(ctx context.Context, sig Signaler) (Session, error) {
 	if err := sendFrames(ctx, sig, sigOffer, mustJSON(realityOffer{Proto: realityName}), 2); err != nil {
 		return nil, err
@@ -291,7 +291,7 @@ func (t *realityTransport) answer(sig Signaler, s *realitySession) {
 // ensureListener binds the shared TLS listener once and starts its accept loop.
 // Idempotent and safe across the many Accept calls a single exit makes.
 //
-// Honors t.closed on both sides of the net.Listen call (issue #101): without
+// Honors t.closed on both sides of the net.Listen call (old #101): without
 // this, a close() that runs concurrently with (or just before) the very first
 // Accept's call to ensureListener could still let this sync.Once fire, binding a
 // fresh listener and spawning acceptLoop/warmMimicCert after close() already
@@ -338,7 +338,7 @@ func (t *realityTransport) ensureListener() error {
 
 // warmMimicCert borrows the impersonated origin's actual certificate chain once,
 // in the background, so the terminate path can present the same publicly-chaining
-// bytes the origin itself serves instead of a self-signed leaf (issue #92). Best-
+// bytes the origin itself serves instead of a self-signed leaf (old #92). Best-
 // effort: if the origin is unreachable or probing is disabled, the self-signed
 // serverTLS stands in.
 func (t *realityTransport) warmMimicCert() {
@@ -359,7 +359,7 @@ func (t *realityTransport) warmMimicCert() {
 // borrowed certificate chain once warmed, else the self-signed fallback. Either
 // way the client does not validate the chain (trust is the Noise end-to-end
 // handshake, ADR-0009) and, on the borrowed-chain path specifically, does not
-// require the CertificateVerify signature to check out either (ADR-0032 / #92) —
+// require the CertificateVerify signature to check out either (ADR-0032 / old #92) —
 // the exit does not hold the origin's private key, only its public bytes.
 func (t *realityTransport) terminateTLS() *tls.Config {
 	if cfg := t.mimicTLS.Load(); cfg != nil {
@@ -459,7 +459,7 @@ func (t *realityTransport) onUnauthenticated(raw net.Conn, peeked []byte) {
 		t.reject(raw, "unauthenticated clienthello")
 		return
 	}
-	// Declared-limit admission (issue #163). Once the operator's monthly quota is
+	// Declared-limit admission (old #163). Once the operator's monthly quota is
 	// spent — or this source IP is flooding new splices — do NOT open a reverse proxy:
 	// drain instead, the same camouflaged response ADR-0027 already uses for an
 	// unreachable origin, so refusing to amplify never becomes an instant-close tell.
@@ -498,7 +498,7 @@ func (t *realityTransport) rawSplice(peer, origin net.Conn, peeked []byte) {
 			return
 		}
 	}
-	// Both directions are metered (issue #163): each leg is a forwarded byte crossing
+	// Both directions are metered (old #163): each leg is a forwarded byte crossing
 	// the operator's line twice, so it is counted and paced exactly like the forwarder's
 	// meter — but never cut mid-copy, since truncating a probe response is the tell
 	// ADR-0027 exists to avoid (see realitySpliceLimits).
@@ -538,7 +538,7 @@ func (t *realityTransport) reject(conn net.Conn, reason string) {
 // consumed is the prober's already-read opening bytes, replayed to the origin so
 // the proxied request stays intact.
 //
-// Policy (issue #62, ADR-0024 follow-up). "Completes a TLS handshake, then
+// Policy (old #62, ADR-0024 follow-up). "Completes a TLS handshake, then
 // instantly closes on unrecognized bytes" is a behaviour an active prober can
 // measure — how Russia and China confirm and then kill a circumvention endpoint.
 // A real :443 server serves a page instead. So, ON BY DEFAULT (probeOrigin is
@@ -552,7 +552,7 @@ func (t *realityTransport) onProbe(tconn *tls.Conn, consumed []byte, reason stri
 		t.reject(tconn, reason)
 		return
 	}
-	// Declared-limit admission (issue #163), as in onUnauthenticated: an exhausted
+	// Declared-limit admission (old #163), as in onUnauthenticated: an exhausted
 	// quota or a per-IP flood refuses the NEW reverse proxy and drains instead, so the
 	// operator's line is not spent amplifying a probe past the cap. In-flight bridges
 	// are unaffected (option (c)).
@@ -622,7 +622,7 @@ func (t *realityTransport) bridge(prober *tls.Conn, origin net.Conn, consumed []
 			return
 		}
 	}
-	// Metered like rawSplice (issue #163): both legs count and pace, neither cuts.
+	// Metered like rawSplice (old #163): both legs count and pace, neither cuts.
 	done := make(chan struct{}, 2) // buffered so the losing copy never blocks on exit
 	go func() { _, _ = io.Copy(origin, t.splice.meterSplice(prober)); done <- struct{}{} }()
 	go func() { _, _ = io.Copy(prober, t.splice.meterSplice(origin)); done <- struct{}{} }()
@@ -637,7 +637,7 @@ func (t *realityTransport) bridge(prober *tls.Conn, origin net.Conn, consumed []
 func (t *realityTransport) holdAndDrain(conn net.Conn) {
 	defer conn.Close()
 	// Count the drained inbound bytes against the quota — once; they only arrive
-	// (issue #163). This is what makes "every reality byte is accounted" literally
+	// (old #163). This is what makes "every reality byte is accounted" literally
 	// true, not just "every reverse-proxied one". It does not pace: a drain emits
 	// nothing to shape. countDrain is nil-inert for an unmetered node.
 	_, _ = io.Copy(io.Discard, t.splice.countDrain(conn))
@@ -663,7 +663,7 @@ func (t *realityTransport) dialInner(ctx context.Context, ans realityAnswer, lab
 	}
 
 	// Hand the caller the underlay's address before opening the connection to it
-	// (issue #109). A full-device tunnel excludes ans.Addr from its own default
+	// (old #109). A full-device tunnel excludes ans.Addr from its own default
 	// route — and, under the kill-switch, allow-lists it — inside this call, so
 	// the connection below rides the physical interface instead of looping into
 	// the tunnel it is establishing. This is the one moment reality's address is
@@ -715,7 +715,7 @@ func (t *realityTransport) dialInner(ctx context.Context, ans realityAnswer, lab
 // authenticator before it terminates TLS and, seeing it valid, handles the
 // connection itself instead of splicing it to the impersonated origin — presenting
 // the impersonated origin's real certificate chain, byte-for-byte, but signed with
-// its own key rather than the origin's (issue #92; it does not hold that key).
+// its own key rather than the origin's (old #92; it does not hold that key).
 //
 // InsecureSkipCertVerifySignature (third_party/utls/PATCHES.md) is what lets this
 // specific handshake complete despite that: it tolerates a CertificateVerify
@@ -768,18 +768,18 @@ func (t *realityTransport) forget(token string) {
 }
 
 // close stops the shared listener, blocks new registrations, and waits for every
-// background goroutine the transport spawned to actually exit (issue #65) — so a
+// background goroutine the transport spawned to actually exit (old #65) — so a
 // caller that has returned from close knows the transport is fully quiescent, not
 // just that its listener is down. It does not tear down live sessions — the engine
 // closes those, and their own watchControl goroutine is joined by Session.Close.
 //
-// The wg.Wait below is the one latency #98 flagged as worth surfacing: every
+// The wg.Wait below is the one latency old #98 flagged as worth surfacing: every
 // goroutine it joins is already bounded (listener close, realityHSTimeout, or
 // realityProbeTimeout — see the wg doc comment), but a serveInbound goroutine mid
 // probe response (onProbe/holdAndDrain) can hold it for up to realityProbeTimeout,
 // so Engine.Stop calling this can stall that long draining one stuck prober. There
 // is no cheap way to bound it further without truncating a probe response
-// mid-flight — reintroducing the instant-close tell #62 exists to avoid — so
+// mid-flight — reintroducing the instant-close tell old #62 exists to avoid — so
 // reportDrain turns the wait into an observable duration instead of a silent pause.
 func (t *realityTransport) close() error {
 	t.mu.Lock()
@@ -796,7 +796,7 @@ func (t *realityTransport) close() error {
 	return err
 }
 
-// reportDrain surfaces how long close's wg.Wait() actually blocked (issue #98), via
+// reportDrain surfaces how long close's wg.Wait() actually blocked (old #98), via
 // the same onEvent channel every other notable transport occurrence already uses.
 func (t *realityTransport) reportDrain(d time.Duration) {
 	if t.onEvent != nil {
@@ -823,7 +823,7 @@ type realitySession struct {
 	once   sync.Once
 
 	// wg tracks the session's own background goroutines (watchControl), so Close
-	// can Wait() for them (issue #65) instead of leaving them to exit on their own
+	// can Wait() for them (old #65) instead of leaving them to exit on their own
 	// time after Close has already returned.
 	wg sync.WaitGroup
 
@@ -847,7 +847,7 @@ func newRealitySession(onEvent func(kind, msg string)) *realitySession {
 // useControl adopts conn as the session's control channel: it carries no data,
 // and its closure (peer gone or transport failure) tears the session down. A conn
 // arriving for an already-closed session is simply closed by track — no goroutine
-// is spawned that Close would then have no chance to join (issue #65).
+// is spawned that Close would then have no chance to join (old #65).
 func (s *realitySession) useControl(conn net.Conn) {
 	// The s.wg.Add(1) must sit under s.mu, atomically with the tracked-conn
 	// insert, so it is serialized against closeAndTeardown's isClosed flip.
@@ -963,7 +963,7 @@ func (s *realitySession) AcceptStream(ctx context.Context) (Stream, error) {
 func (s *realitySession) Closed() <-chan struct{} { return s.closed }
 
 // Close tears the session down and blocks until its own background goroutines
-// (watchControl) have actually exited (issue #65) — not merely triggered.
+// (watchControl) have actually exited (old #65) — not merely triggered.
 //
 // The teardown itself is split out into closeAndTeardown so that watchControl,
 // which runs on a goroutine this method waits for, can trigger it without calling
@@ -980,7 +980,7 @@ func (s *realitySession) Close() error {
 }
 
 // reportDrain surfaces how long Close's wg.Wait() actually blocked joining
-// watchControl, the control-conn goroutine (issue #98). Ordinarily near-instant —
+// watchControl, the control-conn goroutine (old #98). Ordinarily near-instant —
 // closeAndTeardown already closed the tracked conns, so watchControl's blocking
 // Read unblocks right away — but that is an assumption about the underlying
 // net.Conn's Close/Read interaction, not a guarantee, so it is worth surfacing
@@ -1125,7 +1125,7 @@ func realityServerTLS(sni string) (*tls.Config, error) {
 }
 
 // realityMimicTLS borrows the impersonated origin's certificate chain byte-for-byte
-// (issue #92) and wraps it in a terminate-path config signed by a fresh key of ours.
+// (old #92) and wraps it in a terminate-path config signed by a fresh key of ours.
 // A passive observer that fully validates the chain up to a public CA now sees the
 // same publicly-chaining bytes the origin itself serves, on our own authenticated
 // flows and not only the spliced unauthenticated ones ADR-0032 already covered.
@@ -1141,11 +1141,11 @@ func realityServerTLS(sni string) (*tls.Config, error) {
 //
 // The fresh key's class — RSA bit length, or EC curve — matches the borrowed leaf's
 // own public key (realityMatchingSigner), rather than always a fixed P-256 ECDSA key
-// regardless of the origin (issue #98): Go's TLS stack picks the CertificateVerify
+// regardless of the origin (old #98): Go's TLS stack picks the CertificateVerify
 // signature scheme from the *signing* key's type, not the leaf's, so a class mismatch
 // (an RSA leaf signed as if it were ECDSA-P256) is an internally-inconsistent tell to
 // anything that can inspect that message. Nobody can under ordinary TLS 1.3 — it is
-// encrypted (RFC 8446 §4.4, the framing #94's review settled on — see ADR-0032) — but
+// encrypted (RFC 8446 §4.4, the framing old #94's review settled on — see ADR-0032) — but
 // a forced TLS 1.2 downgrade or a credentialed insider could, and matching the class
 // costs nothing.
 func realityMimicTLS(dest, sni string) (*tls.Config, error) {
@@ -1177,7 +1177,7 @@ func realityMimicTLS(dest, sni string) (*tls.Config, error) {
 	// A fresh key of ours signs CertificateVerify; it cannot match the stolen leaf's
 	// embedded public key (see the func doc above), but it is minted in that key's
 	// own class so the signature scheme TLS negotiates for it is at least the one a
-	// genuine certificate of this leaf's type would use (issue #98).
+	// genuine certificate of this leaf's type would use (old #98).
 	signer, err := realityMatchingSigner(certs[0].PublicKey)
 	if err != nil {
 		return nil, err
@@ -1192,10 +1192,10 @@ func realityMimicTLS(dest, sni string) (*tls.Config, error) {
 // realityMatchingSigner mints a fresh private key in the same class as pub — the
 // same RSA bit length, or the same EC curve (restricted to curves Chrome's mimicked
 // ClientHello actually offers, see below), or Ed25519 — so the CertificateVerify
-// signature scheme Go's TLS stack negotiates for a borrowed leaf (issue #92) is the
+// signature scheme Go's TLS stack negotiates for a borrowed leaf (old #92) is the
 // one a genuine certificate of that leaf's type would use, not always the P-256
 // ECDSA signature scheme a fixed signer key would force regardless of the leaf
-// (issue #98). Go picks the scheme from the signing key's own type
+// (old #98). Go picks the scheme from the signing key's own type
 // (signatureSchemesForCertificate inspects cert.PrivateKey, never cert.Leaf), so a
 // mismatched class is what would make the borrowed chain internally inconsistent —
 // this closes that narrower tell without needing, or being able to get, the
@@ -1204,13 +1204,13 @@ func realityMimicTLS(dest, sni string) (*tls.Config, error) {
 // The ECDSA branch mints only on elliptic.P256() or elliptic.P384(): the two curves
 // utls.HelloChrome_Auto's supported_signature_algorithms extension actually offers
 // a scheme for (ecdsa_secp256r1_sha256 / ecdsa_secp384r1_sha384). Minting
-// unconditionally on the origin leaf's own curve (pre-#104) let a P-521 leaf mint a
+// unconditionally on the origin leaf's own curve (before old #104) let a P-521 leaf mint a
 // P-521 signer successfully — TLS 1.3 requires the CertificateVerify scheme to name
 // the signer's exact curve (RFC 8446 §4.2.3), and Chrome's ClientHello never offers
 // ecdsa_secp521r1_sha512, so the terminate handshake then failed with no
 // mutually-supported scheme, well past the point where warmMimicCert's fallback
 // could catch it. Any curve outside that pair now errors here instead, the same as
-// any other unmintable key class below (issue #104).
+// any other unmintable key class below (old #104).
 //
 // Ed25519 is the same case as P-521, one key class over: an Ed25519 leaf mints an
 // Ed25519 signer fine, but Chrome's ClientHello offers no ed25519 scheme (0x0807),
@@ -1240,7 +1240,7 @@ func realityMatchingSigner(pub crypto.PublicKey) (crypto.Signer, error) {
 		// against: the mint succeeds but the terminate handshake then has no
 		// mutually-supported CertificateVerify scheme and fails past warmMimicCert's
 		// fallback. Error so the caller falls back to the self-signed P-256 config,
-		// whose scheme Chrome does offer (issue #104).
+		// whose scheme Chrome does offer (old #104).
 		return nil, errors.New("core: origin leaf Ed25519 has no signature scheme in the mimicked Chrome ClientHello")
 	default:
 		return nil, fmt.Errorf("core: origin leaf key type %T has no matching signer", pub)

@@ -145,7 +145,7 @@ func TestChainExitNamesWhyTheCountryHadNoUsableExit(t *testing.T) {
 // values the coordinator stamps. cmd/coordinator holds an identical unexported set
 // because that binary deliberately does not import core, and its own test of the same
 // name pins the other side — the same arrangement TestQuotaStateWireContract uses for
-// the quota literals (#97). Two copies of one wire vocabulary need a pin on each side or
+// the quota literals (old #97). Two copies of one wire vocabulary need a pin on each side or
 // they drift silently, and a drifted provenance value reads as "unrecognized, therefore
 // not contradicted", which fails OPEN.
 func TestCountrySourceWireContract(t *testing.T) {

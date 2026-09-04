@@ -9,7 +9,7 @@ import (
 
 // newClientEngine builds a minimal client engine with no network I/O, for
 // exercising the client version-policy latch (observeNetworkVersion /
-// updateRequired) directly (issue #36, ADR-0015).
+// updateRequired) directly (old #36, ADR-0015).
 func newClientEngine(t *testing.T) *Engine {
 	t.Helper()
 	eng, err := New(Config{

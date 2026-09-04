@@ -96,8 +96,8 @@ var (
 // Built-in transports, usable by name in [Config.Transport] (one) or
 // [Config.TransportPool] (several). WebRTC (UDP/DTLS) brings NAT traversal;
 // Reality (TCP :443, camouflage TLS) covers networks that throttle UDP or
-// DataChannels and fails on a different axis (ADR-0008, issue #16). The
-// client-side pool races them per user when TransportPool is set (issue #15,
+// DataChannels and fails on a different axis (ADR-0008, old #16). The
+// client-side pool races them per user when TransportPool is set (old #15,
 // ADR-0028); otherwise [Config.Transport] selects exactly one.
 const (
 	TransportWebRTC  = "webrtc"

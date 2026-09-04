@@ -8,12 +8,12 @@ import (
 
 // parseLimits turns the operator-facing -max-speed / -monthly-quota /
 // -quota-cycle-day flags into the declared limits this node registers with (issue
-// #143, ADR-0040).
+// old #143, ADR-0040).
 //
 // Every failure here is fatal, deliberately. The alternative — warn and carry on
 // uncapped — means an operator who typed "20 Mb/s" instead of "20Mbit" gets a node
 // that serves without limit and finds out from their ISP. A volunteer who asked
-// for a cap and silently did not get one is the exact harm #143 exists to prevent,
+// for a cap and silently did not get one is the exact harm old #143 exists to prevent,
 // so a limit that cannot be parsed stops the node rather than being approximated.
 // parseForwardPeerRate turns -relay-forward-peer-rate into the per-previous-hop
 // pace a forwarding hop applies (issue #25). Same bits/s vocabulary as -max-speed,

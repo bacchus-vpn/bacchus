@@ -132,7 +132,7 @@ func TestNewTransportVersionedNameSurvivesNewNamedTransport(t *testing.T) {
 		t.Fatal("newNamedTransport returned no transport")
 	}
 	// The concrete type must survive, or Engine.attachRealitySplice's type
-	// assertion stops firing and #163's splice metering goes silently inert on
+	// assertion stops firing and old #163's splice metering goes silently inert on
 	// every pooled reality transport.
 	if _, ok := tr.(*realityTransport); !ok {
 		t.Fatalf("a versioned name must build the SAME concrete transport, got %T — "+

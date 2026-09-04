@@ -438,7 +438,7 @@ func TestTheRecoveredHeadroomIsAsserted(t *testing.T) {
 // D1 ruled the credential onto the challenge "and connect carries it only on the path
 // where no challenge was SENT". But presentDeviceCredential sends a challenge whenever
 // this device holds a credential — it cannot see the coordinator's gate. On a
-// deployment running admission (#42) with the device-credential gate (#50) switched
+// deployment running admission (old #42) with the device-credential gate (#50) switched
 // off, the challenge goes out, the coordinator answers with an EMPTY challenge and
 // stores nothing, and a client that reasoned "I sent a challenge, so I need not send
 // the credential" would have every connect refused by admission. The condition is a

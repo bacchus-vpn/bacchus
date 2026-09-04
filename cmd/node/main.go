@@ -8,7 +8,7 @@
 //	exit : id is its X25519 public key (see -exit-key); terminates the client's
 //	       end-to-end channel and egresses. Registers {id,country,addr}.
 //	relay: registers {id} — this is how a node advertises relay capability
-//	       (issue #17). The coordinator then prefers it as a data-plane peer for
+//	       (old #17). The coordinator then prefers it as a data-plane peer for
 //	       relay-mode clients, blind-forwarding each assigned session to the
 //	       exit's advertised address, over falling back to its TURN server.
 //	client: -list, or -exit-id <pubkey> -> direct-first, then a relayed path —
@@ -216,7 +216,7 @@ func main() {
 		}
 		admissionCredStr = strings.TrimSpace(string(b))
 	}
-	// The relay-chaining directory (issue #142), read here for the same reason. Its
+	// The relay-chaining directory (old #142), read here for the same reason. Its
 	// signature, freshness, and usefulness as a hop set are checked inside core.New,
 	// so a snapshot that is unsigned, expired, or names no usable hop is a startup
 	// failure rather than a node that quietly never chains.
@@ -236,8 +236,8 @@ func main() {
 		}
 		relayDirKey = ed25519.PublicKey(pub)
 	}
-	// The revocation bundle (issue #69) is read, verified, and — on an
-	// interval — reloaded by the engine itself (issue #90), so a bad path
+	// The revocation bundle (old #69) is read, verified, and — on an
+	// interval — reloaded by the engine itself (old #90), so a bad path
 	// fails inside core.New below rather than silently falling open on a
 	// typo.
 
@@ -308,7 +308,7 @@ func main() {
 
 	coordList := parseCoordinators(*coords)
 
-	// Mesh-walk courier (issue #31): a relay/exit that serves its cached snapshot to
+	// Mesh-walk courier (old #31): a relay/exit that serves its cached snapshot to
 	// recovering clients. Independent of the engine — it runs for the process
 	// lifetime, still serving a last-good snapshot even while the coordinators (and
 	// so the client engine below) cannot be reached.
@@ -340,7 +340,7 @@ func main() {
 			fmt.Println("(no country has a registered exit)")
 			return
 		}
-		// Countries, not exits (issue #146): the coordinator picks the exit inside
+		// Countries, not exits (old #146): the coordinator picks the exit inside
 		// the country you choose, so an exit list is neither offered nor useful.
 		// Pass one of these to -geo.
 		fmt.Println("Available countries (use with -geo):")
@@ -370,7 +370,7 @@ func main() {
 
 	// runNode serves (forwarder) or connects (client) and, for a client with mesh
 	// recovery configured, walks known peers for a fresh directory and reconnects
-	// when every coordinator is unreachable, instead of failing cold (issue #31).
+	// when every coordinator is unreachable, instead of failing cold (old #31).
 	if err := runNode(ctx, cfg, coordList, mesh); err != nil {
 		log.Fatal(err)
 	}

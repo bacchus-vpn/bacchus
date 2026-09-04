@@ -15,7 +15,7 @@ import (
 	"github.com/bacchus-vpn/bacchus/core/coldstart"
 )
 
-// Known-answer vectors for the peer-relay tag derivation (issue #56). They are
+// Known-answer vectors for the peer-relay tag derivation (old #56). They are
 // LITERALS, computed once, and the identical three lines appear in
 // cmd/coordinator's TestRelayTagWireContract. Two independent copies of a
 // derivation pinned to the same constants is the only arrangement in which drift
@@ -27,7 +27,7 @@ const (
 	relayTagVectorBacchus = "2500892b4984d747"
 )
 
-// Relay chaining, end to end through the production wiring (issue #142, ADR-0038).
+// Relay chaining, end to end through the production wiring (old #142, ADR-0038).
 //
 // Every other test in relaychain_test.go proves the ALGORITHM: it calls dialChain
 // with a hand-built &chainPlan{}, on an &Engine{} literal whose cfg.RelayHops is
@@ -331,7 +331,7 @@ func socksConnect(t *testing.T, addr, host string, port int) net.Conn {
 
 // ---------- the acceptance ----------
 
-// TestChainingClientCarriesTrafficThroughItsOwnChain is issue #142's acceptance.
+// TestChainingClientCarriesTrafficThroughItsOwnChain is old #142's acceptance.
 //
 // A client the real New() built with RelayHops=3 connects, binds SOCKS, and carries
 // a real request to a real exit across a chain it assembled itself out of the signed

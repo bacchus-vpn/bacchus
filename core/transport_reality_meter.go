@@ -15,15 +15,15 @@ import (
 // proxies unauthenticated connections to the impersonated origin so a censor's
 // prober sees that origin, not a Bacchus node. Those bytes cross the operator's
 // line — twice for a reverse-proxy leg (rawSplice/bridge), once for a drain
-// (holdAndDrain) — and until issue #163 they crossed it UNMETERED: not counted
-// against the declared monthly quota (#143/ADR-0040) and not paced by the declared
+// (holdAndDrain) — and until old #163 they crossed it UNMETERED: not counted
+// against the declared monthly quota (old #143/ADR-0040) and not paced by the declared
 // speed cap. On a node running -transport reality that made "-monthly-quota is
 // never exceeded" false, and handed an attacker a cheap, anonymous way to spend a
 // residential volunteer's cap and get the node evicted (design §8.7).
 //
 // realitySpliceLimits closes that hole. It shares the engine's quota and limiter —
 // one ISP bill, one uplink, exactly the forwarder's meter (core/forwarder.go) — but
-// enforces them in the one shape ADR-0027 (camouflage fidelity), not #143 (billing),
+// enforces them in the one shape ADR-0027 (camouflage fidelity), not old #143 (billing),
 // allows:
 //
 //   - It NEVER cuts a copy mid-stream. The forwarder's meter returns
@@ -51,7 +51,7 @@ import (
 //
 // The whole type is nil when the operator declared no limits (the entire current
 // datacenter fleet), so a node with no cap and no quota splices exactly as it did
-// before #163 — the same opt-in guarantee #143 makes everywhere else.
+// before old #163 — the same opt-in guarantee old #143 makes everywhere else.
 type realitySpliceLimits struct {
 	quota   *capacity.Quota   // nil-inert: shared with core/forwarder.go's meter
 	limiter *capacity.Limiter // nil-inert: shared with core/forwarder.go's meter
@@ -60,7 +60,7 @@ type realitySpliceLimits struct {
 }
 
 // attachRealitySplice injects the node's declared-limit enforcement into a reality
-// transport so its camouflage splice is metered and gated (issue #163). It is a no-op
+// transport so its camouflage splice is metered and gated (old #163). It is a no-op
 // for any other transport, and returns tr so it can wrap a newTransport call inline.
 // Called at construction, before the transport accepts anything, so the field is set
 // before any acceptLoop goroutine can read it. The engine's quota/limiter/limiterCtx
@@ -77,8 +77,8 @@ func (e *Engine) attachRealitySplice(tr Transport) Transport {
 // constructed quota and limiter (core/engine.go builds both before the transport).
 // It returns nil — fully inert — when the operator declared neither a speed cap nor
 // a quota, which is every node in today's fleet: with no bill to protect and no
-// quota to exhaust there is nothing for #163 to enforce, and keeping the splice paths
-// byte-for-byte unchanged there is the same opt-in promise #143 makes.
+// quota to exhaust there is nothing for old #163 to enforce, and keeping the splice paths
+// byte-for-byte unchanged there is the same opt-in promise old #143 makes.
 func newRealitySpliceLimits(quota *capacity.Quota, limiter *capacity.Limiter, ctx context.Context) *realitySpliceLimits {
 	if quota == nil && limiter == nil {
 		return nil
@@ -159,7 +159,7 @@ func (s *spliceCountReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// --- per-IP + global splice admission gate (issue #163) --------------------
+// --- per-IP + global splice admission gate (old #163) ----------------------
 
 const (
 	// spliceMaxConcurrent caps how many reverse-proxy splices run at once, across all
@@ -187,7 +187,7 @@ const (
 )
 
 // spliceGate rate-limits new reverse-proxy splices per source IP and caps their total
-// concurrency (issue #163). It bounds the instantaneous amplification a probe flood
+// concurrency (old #163). It bounds the instantaneous amplification a probe flood
 // inflicts and the per-IP churn (and memory) it costs, without touching a genuine,
 // occasional active probe. It does not make a single uplink unable to exhaust a
 // residential cap — the aggregate speed cap, not this gate, sets that clock (see

@@ -22,7 +22,7 @@ func newReconnectEngine(t *testing.T, onEvent func(Event)) *Engine {
 		Coordinators: []string{"127.0.0.1:1"},
 		Roles:        []string{RoleClient},
 		SocksAddr:    "127.0.0.1:0",
-		Geo:          "NL", // a connect names a country, not an exit (issue #146)
+		Geo:          "NL", // a connect names a country, not an exit (old #146)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestCapDelay(t *testing.T) {
 	}
 }
 
-// TestReconnectBackoffIsBoundedNoBusyLoop is the first half of the #2 acceptance:
+// TestReconnectBackoffIsBoundedNoBusyLoop is the first half of the old #2 acceptance:
 // when the path stays down, reconnection retries with growing (exponential),
 // bounded backoff — never a busy-loop. It bounds the otherwise-unbounded driver
 // with reconnectMaxAttempts so the test terminates, then asserts the retries were
@@ -185,7 +185,7 @@ func TestReconnectBackoffIsBoundedNoBusyLoop(t *testing.T) {
 	}
 }
 
-// TestReconnectFailsOverToOtherCandidate is the second half of the #2 acceptance:
+// TestReconnectFailsOverToOtherCandidate is the second half of the old #2 acceptance:
 // when the dropped path's mode can no longer be re-established, the driver fails
 // over to the next candidate (direct -> relay) and surfaces it.
 func TestReconnectFailsOverToOtherCandidate(t *testing.T) {
@@ -360,7 +360,7 @@ func TestReconnectStopsPromptlyDuringBackoff(t *testing.T) {
 // TestConnectClosesSessionWhenSocksBindFails is the non-pooled counterpart to
 // TestPoolConnectClosesSessionWhenSocksBindFails: on the single-transport Connect
 // path, if the SOCKS listener cannot bind, the just-established session must be
-// closed rather than leaked (issue #85). The establishFn seam stands a fake
+// closed rather than leaked (old #85). The establishFn seam stands a fake
 // session in for a real dialed path, with no coordinator or transport I/O.
 func TestConnectClosesSessionWhenSocksBindFails(t *testing.T) {
 	occupied, err := net.Listen("tcp", "127.0.0.1:0")
@@ -373,7 +373,7 @@ func TestConnectClosesSessionWhenSocksBindFails(t *testing.T) {
 		Coordinators: []string{"127.0.0.1:1"},
 		Roles:        []string{RoleClient},
 		SocksAddr:    occupied.Addr().String(), // already bound -> serveReconnectSocks fails
-		Geo:          "NL",                     // a connect names a country, not an exit (issue #146)
+		Geo:          "NL",                     // a connect names a country, not an exit (old #146)
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -20,7 +20,7 @@ import (
 // pool member is blocked; it is deliberately the thinnest thing that produces a
 // well-formed reply. The protocol itself is pinned against the REAL coordinator in
 // cmd/coordinator/protocol_integration_test.go — because this fake answering a shape
-// no coordinator sends is precisely how #146 shipped with a green suite.
+// no coordinator sends is precisely how old #146 shipped with a green suite.
 func fakePoolCoordinator(t *testing.T, respond bool, countries []wireCountry) string {
 	t.Helper()
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -55,7 +55,7 @@ func fakePoolCoordinator(t *testing.T, respond bool, countries []wireCountry) st
 	return pc.LocalAddr().String()
 }
 
-// TestClientRotation_DiscoversViaHealthyMember is issue #6's acceptance: with
+// TestClientRotation_DiscoversViaHealthyMember is old #6's acceptance: with
 // two coordinators configured and one blocked, the client must still discover
 // the country list through the other. The client shuffles its pool, so the blocked member
 // may be tried first — the budget covers that case, and either way discovery
